@@ -2,7 +2,6 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use super::app::App;
-use crate::model::Status;
 
 pub fn render(frame: &mut Frame, app: &App) {
     if app.show_notes {
@@ -51,11 +50,13 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            let status_icon = row.status.icon();
-            let status_style = match row.status {
-                Status::Active => Style::default().fg(Color::Green),
-                Status::Idle => Style::default().fg(Color::Yellow),
-                Status::Done => Style::default().fg(Color::DarkGray),
+            let status_icon = row.icon();
+            let status_style = if row.done {
+                Style::default().fg(Color::DarkGray)
+            } else if row.has_assignee {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Yellow)
             };
 
             let blocked_info = if row.blocked_by.is_empty() {

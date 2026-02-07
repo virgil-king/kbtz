@@ -3,19 +3,33 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::model::{Note, Status, Task};
+use crate::model::{Note, Task};
 use crate::ops;
 
 /// A flattened tree row for display.
 #[derive(Debug, Clone)]
 pub struct TreeRow {
     pub name: String,
-    pub status: Status,
+    pub done: bool,
+    pub has_assignee: bool,
     pub description: String,
     pub depth: usize,
     pub has_children: bool,
     pub is_last_at_depth: Vec<bool>,
     pub blocked_by: Vec<String>,
+}
+
+impl TreeRow {
+    /// Returns display icon: x=done, *=assigned (active), .=open (unassigned)
+    pub fn icon(&self) -> &'static str {
+        if self.done {
+            "x"
+        } else if self.has_assignee {
+            "*"
+        } else {
+            "."
+        }
+    }
 }
 
 pub struct App {
@@ -152,7 +166,8 @@ fn flatten_node(
 
     rows.push(TreeRow {
         name: task.name.clone(),
-        status: task.status,
+        done: task.done,
+        has_assignee: task.assignee.is_some(),
         description: task.description.clone(),
         depth,
         has_children,

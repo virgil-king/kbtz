@@ -13,6 +13,7 @@ use ratatui::prelude::*;
 use rusqlite::Connection;
 
 use crate::db;
+use crate::watch;
 use app::App;
 
 pub fn run(
@@ -46,15 +47,13 @@ fn run_loop(
     poll_interval: u64,
 ) -> Result<()> {
     let poll_duration = Duration::from_millis(poll_interval);
-    let mut last_mtime = std::fs::metadata(db_path)
-        .and_then(|m| m.modified())
-        .ok();
+
+    // Set up file watcher
+    let (_watcher, rx) = watch::watch_db(db_path)?;
 
     // We keep a separate owned connection that we reopen on DB changes.
-    // For the initial state, we use initial_conn for notes loading.
     let mut conn: Option<Connection> = None;
 
-    // Helper: get a reference to the best available connection
     fn get_conn<'a>(owned: &'a Option<Connection>, fallback: &'a Connection) -> &'a Connection {
         owned.as_ref().unwrap_or(fallback)
     }
@@ -75,12 +74,9 @@ fn run_loop(
             }
         }
 
-        // Check if DB file changed
-        let current_mtime = std::fs::metadata(db_path)
-            .and_then(|m| m.modified())
-            .ok();
-        if current_mtime != last_mtime {
-            last_mtime = current_mtime;
+        // Check for file changes (non-blocking)
+        if watch::wait_for_change(&rx, Duration::ZERO) {
+            watch::drain_events(&rx);
             let new_conn = db::open(db_path)?;
             app.refresh(&new_conn, root)?;
             conn = Some(new_conn);

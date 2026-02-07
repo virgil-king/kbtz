@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 
-use crate::model::{Note, Status, Task};
+use crate::model::{Note, Task};
 use crate::validate::{detect_dep_cycle, detect_parent_cycle, validate_name};
 
 fn task_exists(conn: &Connection, name: &str) -> Result<bool> {
@@ -24,7 +24,7 @@ pub fn add_task(
     name: &str,
     parent: Option<&str>,
     description: &str,
-    status: Status,
+    note: Option<&str>,
 ) -> Result<()> {
     validate_name(name)?;
     if task_exists(conn, name)? {
@@ -34,67 +34,86 @@ pub fn add_task(
         require_task(conn, p)?;
     }
     conn.execute(
-        "INSERT INTO tasks (name, parent, description, status) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, parent, description, status.as_str()],
+        "INSERT INTO tasks (name, parent, description) VALUES (?1, ?2, ?3)",
+        rusqlite::params![name, parent, description],
+    )?;
+    if let Some(content) = note {
+        conn.execute(
+            "INSERT INTO notes (task, content) VALUES (?1, ?2)",
+            rusqlite::params![name, content],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
+    require_task(conn, name)?;
+    conn.execute(
+        "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+        rusqlite::params![assignee, name],
     )?;
     Ok(())
 }
 
-pub fn edit_task(
-    conn: &Connection,
-    name: &str,
-    desc: Option<&str>,
-    status: Option<Status>,
-    parent: Option<Option<&str>>,
-    rename: Option<&str>,
-) -> Result<()> {
+pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
-
-    if let Some(new_name) = rename {
-        validate_name(new_name)?;
-        if new_name != name && task_exists(conn, new_name)? {
-            bail!("task '{new_name}' already exists");
+    let current_assignee: Option<String> = conn.query_row(
+        "SELECT assignee FROM tasks WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    match current_assignee {
+        Some(ref a) if a == assignee => {
+            conn.execute(
+                "UPDATE tasks SET assignee = NULL, assigned_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+                [name],
+            )?;
+            Ok(())
         }
+        Some(a) => bail!("task '{name}' is assigned to '{a}', not '{assignee}'"),
+        None => bail!("task '{name}' is not assigned"),
     }
+}
 
-    if let Some(Some(new_parent)) = parent {
+pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
+    require_task(conn, name)?;
+    conn.execute(
+        "UPDATE tasks SET done = 1, assignee = NULL, assigned_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        [name],
+    )?;
+    Ok(())
+}
+
+pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
+    require_task(conn, name)?;
+    conn.execute(
+        "UPDATE tasks SET done = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        [name],
+    )?;
+    Ok(())
+}
+
+pub fn update_description(conn: &Connection, name: &str, description: &str) -> Result<()> {
+    require_task(conn, name)?;
+    conn.execute(
+        "UPDATE tasks SET description = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+        rusqlite::params![description, name],
+    )?;
+    Ok(())
+}
+
+pub fn reparent_task(conn: &Connection, name: &str, parent: Option<&str>) -> Result<()> {
+    require_task(conn, name)?;
+    if let Some(new_parent) = parent {
         require_task(conn, new_parent)?;
-        let check_name = rename.unwrap_or(name);
-        if detect_parent_cycle(conn, check_name, new_parent)? {
+        if detect_parent_cycle(conn, name, new_parent)? {
             bail!("setting parent to '{new_parent}' would create a cycle");
         }
     }
-
-    if let Some(d) = desc {
-        conn.execute(
-            "UPDATE tasks SET description = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
-            rusqlite::params![d, name],
-        )?;
-    }
-
-    if let Some(s) = status {
-        conn.execute(
-            "UPDATE tasks SET status = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
-            rusqlite::params![s.as_str(), name],
-        )?;
-    }
-
-    if let Some(p) = parent {
-        conn.execute(
-            "UPDATE tasks SET parent = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
-            rusqlite::params![p, name],
-        )?;
-    }
-
-    if let Some(new_name) = rename {
-        if new_name != name {
-            conn.execute(
-                "UPDATE tasks SET name = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
-                rusqlite::params![new_name, name],
-            )?;
-        }
-    }
-
+    conn.execute(
+        "UPDATE tasks SET parent = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+        rusqlite::params![parent, name],
+    )?;
     Ok(())
 }
 
@@ -102,7 +121,6 @@ pub fn remove_task(conn: &Connection, name: &str, recursive: bool) -> Result<()>
     require_task(conn, name)?;
 
     if recursive {
-        // Collect all descendants depth-first, delete from leaves up
         let descendants = collect_descendants(conn, name)?;
         for desc_name in descendants.iter().rev() {
             conn.execute("DELETE FROM tasks WHERE name = ?1", [desc_name])?;
@@ -142,27 +160,55 @@ fn collect_descendants(conn: &Connection, name: &str) -> Result<Vec<String>> {
 pub fn get_task(conn: &Connection, name: &str) -> Result<Task> {
     require_task(conn, name)?;
     let task = conn.query_row(
-        "SELECT id, name, parent, description, status, created_at, updated_at FROM tasks WHERE name = ?1",
+        "SELECT id, name, parent, description, done, assignee, assigned_at, created_at, updated_at FROM tasks WHERE name = ?1",
         [name],
         |row| {
-            let status_str: String = row.get(4)?;
             Ok(Task {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 parent: row.get(2)?,
                 description: row.get(3)?,
-                status: Status::parse(&status_str).unwrap(),
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                done: row.get::<_, i64>(4)? != 0,
+                assignee: row.get(5)?,
+                assigned_at: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         },
     )?;
     Ok(task)
 }
 
+/// Status filter for list_tasks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    Open,   // not done, no assignee
+    Active, // not done, has assignee
+    Done,   // done
+}
+
+impl StatusFilter {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "open" => Ok(Self::Open),
+            "active" => Ok(Self::Active),
+            "done" => Ok(Self::Done),
+            _ => bail!("invalid status '{s}': must be open, active, or done"),
+        }
+    }
+
+    fn matches(&self, task: &Task) -> bool {
+        match self {
+            Self::Open => !task.done && task.assignee.is_none(),
+            Self::Active => !task.done && task.assignee.is_some(),
+            Self::Done => task.done,
+        }
+    }
+}
+
 pub fn list_tasks(
     conn: &Connection,
-    status: Option<Status>,
+    status: Option<StatusFilter>,
     all: bool,
     root: Option<&str>,
 ) -> Result<Vec<Task>> {
@@ -173,7 +219,6 @@ pub fn list_tasks(
     let mut tasks: Vec<Task> = Vec::new();
 
     if let Some(root_name) = root {
-        // Get the root task itself + all descendants
         let root_task = get_task(conn, root_name)?;
         tasks.push(root_task);
         let descendants = collect_descendants(conn, root_name)?;
@@ -182,18 +227,19 @@ pub fn list_tasks(
         }
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, name, parent, description, status, created_at, updated_at FROM tasks ORDER BY id",
+            "SELECT id, name, parent, description, done, assignee, assigned_at, created_at, updated_at FROM tasks ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
-            let status_str: String = row.get(4)?;
             Ok(Task {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 parent: row.get(2)?,
                 description: row.get(3)?,
-                status: Status::parse(&status_str).unwrap(),
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                done: row.get::<_, i64>(4)? != 0,
+                assignee: row.get(5)?,
+                assigned_at: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?;
         for row in rows {
@@ -204,10 +250,10 @@ pub fn list_tasks(
     // Apply status filter
     if !all {
         if let Some(s) = status {
-            tasks.retain(|t| t.status == s);
+            tasks.retain(|t| s.matches(t));
         } else {
             // Default: exclude done tasks
-            tasks.retain(|t| t.status != Status::Done);
+            tasks.retain(|t| !t.done);
         }
     }
 
@@ -293,26 +339,27 @@ mod tests {
     #[test]
     fn add_and_get_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "test-task", None, "A test", Status::Active).unwrap();
+        add_task(&conn, "test-task", None, "A test", None).unwrap();
         let task = get_task(&conn, "test-task").unwrap();
         assert_eq!(task.name, "test-task");
         assert_eq!(task.description, "A test");
-        assert_eq!(task.status, Status::Active);
+        assert!(!task.done);
+        assert!(task.assignee.is_none());
         assert!(task.parent.is_none());
     }
 
     #[test]
     fn add_duplicate_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "dup", None, "", Status::Active).unwrap();
-        assert!(add_task(&conn, "dup", None, "", Status::Active).is_err());
+        add_task(&conn, "dup", None, "", None).unwrap();
+        assert!(add_task(&conn, "dup", None, "", None).is_err());
     }
 
     #[test]
     fn add_with_parent() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", Status::Active).unwrap();
-        add_task(&conn, "child", Some("parent"), "", Status::Active).unwrap();
+        add_task(&conn, "parent", None, "", None).unwrap();
+        add_task(&conn, "child", Some("parent"), "", None).unwrap();
         let child = get_task(&conn, "child").unwrap();
         assert_eq!(child.parent.as_deref(), Some("parent"));
     }
@@ -320,47 +367,80 @@ mod tests {
     #[test]
     fn add_with_missing_parent_fails() {
         let conn = db::open_memory().unwrap();
-        assert!(add_task(&conn, "child", Some("nonexistent"), "", Status::Active).is_err());
+        assert!(add_task(&conn, "child", Some("nonexistent"), "", None).is_err());
     }
 
     #[test]
-    fn edit_description() {
+    fn claim_and_release() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "old", Status::Active).unwrap();
-        edit_task(&conn, "t", Some("new"), None, None, None).unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
+
+        // Initially unassigned
+        let task = get_task(&conn, "t").unwrap();
+        assert!(task.assignee.is_none());
+
+        // Claim it
+        claim_task(&conn, "t", "agent-123").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.assignee.as_deref(), Some("agent-123"));
+        assert!(task.assigned_at.is_some());
+
+        // Release with wrong assignee fails
+        assert!(release_task(&conn, "t", "wrong-agent").is_err());
+
+        // Release with correct assignee
+        release_task(&conn, "t", "agent-123").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert!(task.assignee.is_none());
+        assert!(task.assigned_at.is_none());
+    }
+
+    #[test]
+    fn done_and_reopen() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
+        claim_task(&conn, "t", "agent").unwrap();
+
+        // Mark done clears assignee
+        mark_done(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert!(task.done);
+        assert!(task.assignee.is_none());
+
+        // Reopen
+        reopen_task(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert!(!task.done);
+    }
+
+    #[test]
+    fn update_description_works() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "old", None).unwrap();
+        update_description(&conn, "t", "new").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.description, "new");
     }
 
     #[test]
-    fn edit_status() {
+    fn reparent_works() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", Status::Active).unwrap();
-        edit_task(&conn, "t", None, Some(Status::Done), None, None).unwrap();
-        let task = get_task(&conn, "t").unwrap();
-        assert_eq!(task.status, Status::Done);
-    }
+        add_task(&conn, "a", None, "", None).unwrap();
+        add_task(&conn, "b", None, "", None).unwrap();
+        reparent_task(&conn, "b", Some("a")).unwrap();
+        let task = get_task(&conn, "b").unwrap();
+        assert_eq!(task.parent.as_deref(), Some("a"));
 
-    #[test]
-    fn rename_task() {
-        let conn = db::open_memory().unwrap();
-        add_task(&conn, "old-name", None, "desc", Status::Active).unwrap();
-        add_task(&conn, "child", Some("old-name"), "", Status::Active).unwrap();
-        edit_task(&conn, "old-name", None, None, None, Some("new-name")).unwrap();
-        // Old name gone
-        assert!(get_task(&conn, "old-name").is_err());
-        // New name exists with same description
-        let task = get_task(&conn, "new-name").unwrap();
-        assert_eq!(task.description, "desc");
-        // Child's parent updated via CASCADE
-        let child = get_task(&conn, "child").unwrap();
-        assert_eq!(child.parent.as_deref(), Some("new-name"));
+        // Clear parent
+        reparent_task(&conn, "b", None).unwrap();
+        let task = get_task(&conn, "b").unwrap();
+        assert!(task.parent.is_none());
     }
 
     #[test]
     fn remove_leaf_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", Status::Active).unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
         remove_task(&conn, "t", false).unwrap();
         assert!(get_task(&conn, "t").is_err());
     }
@@ -368,17 +448,17 @@ mod tests {
     #[test]
     fn remove_parent_without_recursive_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", Status::Active).unwrap();
-        add_task(&conn, "child", Some("parent"), "", Status::Active).unwrap();
+        add_task(&conn, "parent", None, "", None).unwrap();
+        add_task(&conn, "child", Some("parent"), "", None).unwrap();
         assert!(remove_task(&conn, "parent", false).is_err());
     }
 
     #[test]
     fn remove_parent_recursive() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", Status::Active).unwrap();
-        add_task(&conn, "child", Some("parent"), "", Status::Active).unwrap();
-        add_task(&conn, "grandchild", Some("child"), "", Status::Active).unwrap();
+        add_task(&conn, "parent", None, "", None).unwrap();
+        add_task(&conn, "child", Some("parent"), "", None).unwrap();
+        add_task(&conn, "grandchild", Some("child"), "", None).unwrap();
         remove_task(&conn, "parent", true).unwrap();
         assert!(get_task(&conn, "parent").is_err());
         assert!(get_task(&conn, "child").is_err());
@@ -388,18 +468,20 @@ mod tests {
     #[test]
     fn list_excludes_done_by_default() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "active", None, "", Status::Active).unwrap();
-        add_task(&conn, "done", None, "", Status::Done).unwrap();
+        add_task(&conn, "open", None, "", None).unwrap();
+        add_task(&conn, "done", None, "", None).unwrap();
+        mark_done(&conn, "done").unwrap();
         let tasks = list_tasks(&conn, None, false, None).unwrap();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].name, "active");
+        assert_eq!(tasks[0].name, "open");
     }
 
     #[test]
     fn list_all_includes_done() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "active", None, "", Status::Active).unwrap();
-        add_task(&conn, "done", None, "", Status::Done).unwrap();
+        add_task(&conn, "open", None, "", None).unwrap();
+        add_task(&conn, "done", None, "", None).unwrap();
+        mark_done(&conn, "done").unwrap();
         let tasks = list_tasks(&conn, None, true, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
@@ -407,19 +489,25 @@ mod tests {
     #[test]
     fn list_filter_status() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "i", None, "", Status::Idle).unwrap();
-        let tasks = list_tasks(&conn, Some(Status::Idle), false, None).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].name, "i");
+        add_task(&conn, "open", None, "", None).unwrap();
+        add_task(&conn, "active", None, "", None).unwrap();
+        claim_task(&conn, "active", "agent").unwrap();
+
+        let open_tasks = list_tasks(&conn, Some(StatusFilter::Open), false, None).unwrap();
+        assert_eq!(open_tasks.len(), 1);
+        assert_eq!(open_tasks[0].name, "open");
+
+        let active_tasks = list_tasks(&conn, Some(StatusFilter::Active), false, None).unwrap();
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(active_tasks[0].name, "active");
     }
 
     #[test]
     fn list_with_root() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", Status::Active).unwrap();
-        add_task(&conn, "child", Some("root"), "", Status::Active).unwrap();
-        add_task(&conn, "other", None, "", Status::Active).unwrap();
+        add_task(&conn, "root", None, "", None).unwrap();
+        add_task(&conn, "child", Some("root"), "", None).unwrap();
+        add_task(&conn, "other", None, "", None).unwrap();
         let tasks = list_tasks(&conn, None, false, Some("root")).unwrap();
         assert_eq!(tasks.len(), 2);
     }
@@ -427,7 +515,7 @@ mod tests {
     #[test]
     fn notes_crud() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", Status::Active).unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
         add_note(&conn, "t", "note 1").unwrap();
         add_note(&conn, "t", "note 2").unwrap();
         let notes = list_notes(&conn, "t").unwrap();
@@ -439,8 +527,8 @@ mod tests {
     #[test]
     fn blocking_relationships() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "b", None, "", Status::Active).unwrap();
+        add_task(&conn, "a", None, "", None).unwrap();
+        add_task(&conn, "b", None, "", None).unwrap();
         add_block(&conn, "a", "b").unwrap();
         assert_eq!(get_blockers(&conn, "b").unwrap(), vec!["a"]);
         assert_eq!(get_dependents(&conn, "a").unwrap(), vec!["b"]);
@@ -451,37 +539,34 @@ mod tests {
     #[test]
     fn self_block_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
+        add_task(&conn, "a", None, "", None).unwrap();
         assert!(add_block(&conn, "a", "a").is_err());
     }
 
     #[test]
     fn dep_cycle_detected() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "b", None, "", Status::Active).unwrap();
-        add_task(&conn, "c", None, "", Status::Active).unwrap();
+        add_task(&conn, "a", None, "", None).unwrap();
+        add_task(&conn, "b", None, "", None).unwrap();
+        add_task(&conn, "c", None, "", None).unwrap();
         add_block(&conn, "a", "b").unwrap();
         add_block(&conn, "b", "c").unwrap();
-        // c -> a would create cycle a->b->c->a
         assert!(add_block(&conn, "c", "a").is_err());
     }
 
     #[test]
     fn parent_cycle_detected() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "b", Some("a"), "", Status::Active).unwrap();
-        add_task(&conn, "c", Some("b"), "", Status::Active).unwrap();
-        // Setting a's parent to c would create a->b->c->a
-        let err = edit_task(&conn, "a", None, None, Some(Some("c")), None);
-        assert!(err.is_err());
+        add_task(&conn, "a", None, "", None).unwrap();
+        add_task(&conn, "b", Some("a"), "", None).unwrap();
+        add_task(&conn, "c", Some("b"), "", None).unwrap();
+        assert!(reparent_task(&conn, "a", Some("c")).is_err());
     }
 
     #[test]
     fn notes_cascade_on_delete() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", Status::Active).unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
         add_note(&conn, "t", "a note").unwrap();
         remove_task(&conn, "t", false).unwrap();
         let count: i64 = conn
@@ -493,31 +578,10 @@ mod tests {
     #[test]
     fn deps_cascade_on_delete() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "b", None, "", Status::Active).unwrap();
+        add_task(&conn, "a", None, "", None).unwrap();
+        add_task(&conn, "b", None, "", None).unwrap();
         add_block(&conn, "a", "b").unwrap();
         remove_task(&conn, "a", false).unwrap();
         assert!(get_blockers(&conn, "b").unwrap().is_empty());
-    }
-
-    #[test]
-    fn rename_cascades_to_deps() {
-        let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", Status::Active).unwrap();
-        add_task(&conn, "b", None, "", Status::Active).unwrap();
-        add_block(&conn, "a", "b").unwrap();
-        edit_task(&conn, "a", None, None, None, Some("a2")).unwrap();
-        assert_eq!(get_blockers(&conn, "b").unwrap(), vec!["a2"]);
-    }
-
-    #[test]
-    fn rename_cascades_to_notes() {
-        let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", Status::Active).unwrap();
-        add_note(&conn, "t", "hello").unwrap();
-        edit_task(&conn, "t", None, None, None, Some("t2")).unwrap();
-        let notes = list_notes(&conn, "t2").unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].content, "hello");
     }
 }

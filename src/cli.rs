@@ -13,9 +13,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create database and tables (idempotent)
-    Init,
-
     /// Add a task
     Add {
         /// Task name (alphanumeric, hyphens, underscores)
@@ -26,27 +23,54 @@ pub enum Command {
         /// Task description
         #[arg(short, long, default_value = "")]
         desc: String,
-        /// Task status (active, idle, done)
-        #[arg(short, long, default_value = "active")]
-        status: String,
+        /// Initial note
+        #[arg(short, long)]
+        note: Option<String>,
     },
 
-    /// Edit a task
-    Edit {
-        /// Task name to edit
+    /// Claim a task (set assignee)
+    Claim {
+        /// Task name
         name: String,
-        /// New description
-        #[arg(short, long)]
-        desc: Option<String>,
-        /// New status (active, idle, done)
-        #[arg(short, long)]
-        status: Option<String>,
-        /// New parent task name
+        /// Assignee ID (agent session ID)
+        assignee: String,
+    },
+
+    /// Release a task (clear assignee if it matches)
+    Release {
+        /// Task name
+        name: String,
+        /// Assignee ID to verify ownership
+        assignee: String,
+    },
+
+    /// Mark a task as done
+    Done {
+        /// Task name
+        name: String,
+    },
+
+    /// Reopen a completed task
+    Reopen {
+        /// Task name
+        name: String,
+    },
+
+    /// Change a task's parent
+    Reparent {
+        /// Task name
+        name: String,
+        /// New parent task name (omit to make root-level)
         #[arg(short, long)]
         parent: Option<String>,
-        /// Rename the task
-        #[arg(short = 'r', long)]
-        rename: Option<String>,
+    },
+
+    /// Update a task's description
+    Describe {
+        /// Task name
+        name: String,
+        /// New description
+        desc: String,
     },
 
     /// Remove a task
@@ -69,7 +93,7 @@ pub enum Command {
         /// Display as tree
         #[arg(long)]
         tree: bool,
-        /// Filter by status
+        /// Filter by status (open, active, done)
         #[arg(long)]
         status: Option<String>,
         /// Show all tasks including done
@@ -128,4 +152,7 @@ pub enum Command {
         #[arg(long, default_value = "1000")]
         poll_interval: u64,
     },
+
+    /// Wait for database changes (blocks until a change occurs)
+    Wait,
 }

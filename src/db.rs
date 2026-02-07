@@ -7,7 +7,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     name        TEXT NOT NULL UNIQUE CHECK(name GLOB '[a-zA-Z0-9_-]*' AND length(name) > 0),
     parent      TEXT REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE RESTRICT,
     description TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'idle', 'done')),
+    done        INTEGER NOT NULL DEFAULT 0 CHECK(done IN (0, 1)),
+    assignee    TEXT,
+    assigned_at TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

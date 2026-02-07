@@ -5,12 +5,18 @@ use crate::model::{Note, Task};
 pub fn format_task_detail(task: &Task, notes: &[Note], blockers: &[String], dependents: &[String]) -> String {
     let mut out = String::new();
     out.push_str(&format!("Name:        {}\n", task.name));
-    out.push_str(&format!("Status:      {}\n", task.status));
+    out.push_str(&format!("Status:      {}\n", task.status_str()));
     if let Some(ref p) = task.parent {
         out.push_str(&format!("Parent:      {}\n", p));
     }
     if !task.description.is_empty() {
         out.push_str(&format!("Description: {}\n", task.description));
+    }
+    if let Some(ref assignee) = task.assignee {
+        out.push_str(&format!("Assignee:    {}\n", assignee));
+    }
+    if let Some(ref assigned_at) = task.assigned_at {
+        out.push_str(&format!("Assigned at: {}\n", assigned_at));
     }
     out.push_str(&format!("Created:     {}\n", task.created_at));
     out.push_str(&format!("Updated:     {}\n", task.updated_at));
@@ -48,7 +54,7 @@ pub fn format_task_list(tasks: &[Task]) -> String {
         };
         out.push_str(&format!(
             "{} {}{}{}\n",
-            task.status.icon(),
+            task.icon(),
             task.name,
             parent_info,
             desc
@@ -101,7 +107,7 @@ fn write_tree(
     out.push_str(&format!(
         "{}{} {}{}\n",
         line_prefix,
-        task.status.icon(),
+        task.icon(),
         task.name,
         desc
     ));
@@ -139,15 +145,16 @@ pub fn format_notes(notes: &[Note]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Status;
 
-    fn make_task(name: &str, parent: Option<&str>, status: Status, desc: &str) -> Task {
+    fn make_task(name: &str, parent: Option<&str>, done: bool, assignee: Option<&str>, desc: &str) -> Task {
         Task {
             id: 0,
             name: name.to_string(),
             parent: parent.map(|s| s.to_string()),
             description: desc.to_string(),
-            status,
+            done,
+            assignee: assignee.map(|s| s.to_string()),
+            assigned_at: assignee.map(|_| "2025-01-01T00:00:00Z".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
@@ -155,7 +162,7 @@ mod tests {
 
     #[test]
     fn tree_single_root() {
-        let tasks = vec![make_task("root", None, Status::Active, "Root task")];
+        let tasks = vec![make_task("root", None, false, Some("agent"), "Root task")];
         let out = format_task_tree(&tasks);
         assert_eq!(out, "* root  Root task\n");
     }
@@ -163,9 +170,9 @@ mod tests {
     #[test]
     fn tree_with_children() {
         let tasks = vec![
-            make_task("root", None, Status::Active, ""),
-            make_task("child1", Some("root"), Status::Active, ""),
-            make_task("child2", Some("root"), Status::Idle, ""),
+            make_task("root", None, false, Some("agent"), ""),
+            make_task("child1", Some("root"), false, Some("agent"), ""),
+            make_task("child2", Some("root"), false, None, ""),
         ];
         let out = format_task_tree(&tasks);
         assert!(out.contains("root"));
@@ -178,11 +185,11 @@ mod tests {
     #[test]
     fn flat_list() {
         let tasks = vec![
-            make_task("a", None, Status::Active, "desc A"),
-            make_task("b", None, Status::Idle, ""),
+            make_task("a", None, false, Some("agent"), "desc A"),
+            make_task("b", None, false, None, ""),
         ];
         let out = format_task_list(&tasks);
-        assert!(out.contains("* a  desc A"));
-        assert!(out.contains(". b"));
+        assert!(out.contains("* a  desc A")); // assigned = active = *
+        assert!(out.contains(". b")); // unassigned = open = .
     }
 }
