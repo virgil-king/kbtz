@@ -59,6 +59,10 @@ END;
 CREATE TRIGGER IF NOT EXISTS notes_fts_ad AFTER DELETE ON notes BEGIN
     INSERT INTO notes_fts(notes_fts, rowid, content) VALUES('delete', old.id, old.content);
 END;
+CREATE TRIGGER IF NOT EXISTS notes_fts_au AFTER UPDATE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, content) VALUES('delete', old.id, old.content);
+    INSERT INTO notes_fts(rowid, content) VALUES(new.id, new.content);
+END;
 ";
 
 fn set_pragmas(conn: &Connection) -> Result<()> {
