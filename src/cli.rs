@@ -21,7 +21,7 @@ pub enum Command {
         #[arg(short, long)]
         parent: Option<String>,
         /// Task description
-        #[arg(short, long, default_value = "")]
+        #[arg(short, long)]
         desc: String,
         /// Initial note
         #[arg(short, long)]
