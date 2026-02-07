@@ -19,7 +19,7 @@ use ops::StatusFilter;
 
 fn default_db_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME environment variable not set")?;
-    Ok(PathBuf::from(home).join(".tager").join("tager.db"))
+    Ok(PathBuf::from(home).join(".kbtz").join("kbtz.db"))
 }
 
 fn resolve_db_path(cli_db: Option<String>) -> Result<String> {
