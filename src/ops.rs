@@ -48,10 +48,21 @@ pub fn add_task(
 
 pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
-    conn.execute(
-        "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+    let rows = conn.execute(
+        "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND (assignee IS NULL OR assignee = ?1)",
         rusqlite::params![assignee, name],
     )?;
+    if rows == 0 {
+        let current: Option<String> = conn.query_row(
+            "SELECT assignee FROM tasks WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        match current {
+            Some(a) => bail!("task '{name}' is already claimed by '{a}'"),
+            None => bail!("task '{name}' was concurrently released; retry"),
+        }
+    }
     Ok(())
 }
 
@@ -541,6 +552,32 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "a", None, "", None).unwrap();
         assert!(add_block(&conn, "a", "a").is_err());
+    }
+
+    #[test]
+    fn claim_already_claimed_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
+        claim_task(&conn, "t", "agent-1").unwrap();
+        let err = claim_task(&conn, "t", "agent-2").unwrap_err();
+        assert!(
+            err.to_string().contains("already claimed by 'agent-1'"),
+            "unexpected error: {err}"
+        );
+        // Original assignee unchanged
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.assignee.as_deref(), Some("agent-1"));
+    }
+
+    #[test]
+    fn claim_idempotent_for_same_assignee() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
+        claim_task(&conn, "t", "agent-1").unwrap();
+        // Re-claiming by same assignee succeeds
+        claim_task(&conn, "t", "agent-1").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.assignee.as_deref(), Some("agent-1"));
     }
 
     #[test]
