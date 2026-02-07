@@ -26,6 +26,9 @@ pub enum Command {
         /// Initial note
         #[arg(short, long)]
         note: Option<String>,
+        /// Create already claimed by this assignee
+        #[arg(short, long)]
+        claim: Option<String>,
     },
 
     /// Claim a task (set assignee)

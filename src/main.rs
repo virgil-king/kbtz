@@ -69,10 +69,14 @@ fn run() -> Result<()> {
             parent,
             desc,
             note,
+            claim,
         } => {
             let conn = open_db(&db_path)?;
-            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref())?;
+            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref())?;
             eprintln!("Added task '{name}'");
+            if let Some(assignee) = &claim {
+                eprintln!("Claimed '{name}' for '{assignee}'");
+            }
         }
 
         Command::Claim { name, assignee } => {
