@@ -1,0 +1,8 @@
+{
+  "name": "kbtz-worker",
+  "version": "1.0.0",
+  "description": "Kbtz task worker agent that claims and works on tasks in a loop",
+  "author": {
+    "name": "virgil"
+  }
+}
