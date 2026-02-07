@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 
 use crate::model::{Note, Task};
 use crate::validate::{detect_dep_cycle, detect_parent_cycle, validate_name};
@@ -64,6 +65,123 @@ pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Sanitize free-form text into an FTS5 query: split on whitespace, quote each
+/// word, join with OR. Returns None if no words remain after filtering.
+fn sanitize_fts_query(text: &str) -> Option<String> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            let cleaned: String = w.chars().filter(|c| *c != '"').collect();
+            format!("\"{}\"", cleaned)
+        })
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    Some(words.join(" OR "))
+}
+
+const CLAIM_NEXT_WITH_PREFER: &str = "
+SELECT t.name FROM tasks t
+LEFT JOIN (
+    SELECT rowid, rank FROM tasks_fts
+    WHERE tasks_fts MATCH ?1
+      AND rowid IN (SELECT id FROM tasks WHERE done = 0 AND assignee IS NULL)
+) tfts ON tfts.rowid = t.id
+LEFT JOIN (
+    SELECT n.task, MIN(nfts.rank) as best_rank
+    FROM notes_fts nfts
+    JOIN notes n ON n.id = nfts.rowid
+    JOIN tasks t2 ON t2.name = n.task AND t2.done = 0 AND t2.assignee IS NULL
+    WHERE notes_fts MATCH ?1
+    GROUP BY n.task
+) nfts ON nfts.task = t.name
+LEFT JOIN (
+    SELECT td.blocker, COUNT(*) as cnt FROM task_deps td
+    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.done = 0
+    GROUP BY td.blocker
+) uc ON uc.blocker = t.name
+WHERE t.done = 0 AND t.assignee IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM task_deps td2
+      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.done = 0
+      WHERE td2.blocked = t.name
+  )
+ORDER BY
+    CASE WHEN tfts.rank IS NOT NULL OR nfts.best_rank IS NOT NULL THEN 0 ELSE 1 END,
+    MIN(COALESCE(tfts.rank, 0), COALESCE(nfts.best_rank, 0)),
+    COALESCE(uc.cnt, 0) DESC,
+    t.id ASC
+LIMIT 1
+";
+
+const CLAIM_NEXT_NO_PREFER: &str = "
+SELECT t.name FROM tasks t
+LEFT JOIN (
+    SELECT td.blocker, COUNT(*) as cnt FROM task_deps td
+    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.done = 0
+    GROUP BY td.blocker
+) uc ON uc.blocker = t.name
+WHERE t.done = 0 AND t.assignee IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM task_deps td2
+      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.done = 0
+      WHERE td2.blocked = t.name
+  )
+ORDER BY
+    COALESCE(uc.cnt, 0) DESC,
+    t.id ASC
+LIMIT 1
+";
+
+pub fn claim_next_task(
+    conn: &Connection,
+    assignee: &str,
+    prefer: Option<&str>,
+) -> Result<Option<String>> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+
+    let result = (|| -> Result<Option<String>> {
+        let fts_query = prefer.and_then(sanitize_fts_query);
+
+        let task_name: Option<String> = match fts_query {
+            Some(ref q) => conn
+                .query_row(CLAIM_NEXT_WITH_PREFER, [q], |row| row.get(0))
+                .optional()?,
+            None => conn
+                .query_row(CLAIM_NEXT_NO_PREFER, [], |row| row.get(0))
+                .optional()?,
+        };
+
+        let Some(name) = task_name else {
+            return Ok(None);
+        };
+
+        let rows = conn.execute(
+            "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND assignee IS NULL",
+            rusqlite::params![assignee, name],
+        )?;
+
+        if rows == 0 {
+            // Another writer claimed it between our SELECT and UPDATE
+            return Ok(None);
+        }
+
+        Ok(Some(name))
+    })();
+
+    match result {
+        Ok(v) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
@@ -620,5 +738,104 @@ mod tests {
         add_block(&conn, "a", "b").unwrap();
         remove_task(&conn, "a", false).unwrap();
         assert!(get_blockers(&conn, "b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn claim_next_no_tasks() {
+        let conn = db::open_memory().unwrap();
+        assert_eq!(claim_next_task(&conn, "agent", None).unwrap(), None);
+    }
+
+    #[test]
+    fn claim_next_picks_oldest() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "second", None, "", None).unwrap();
+        add_task(&conn, "third", None, "", None).unwrap();
+        // "second" has lower id, should be picked first
+        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn claim_next_skips_done_and_assigned() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "done-task", None, "", None).unwrap();
+        mark_done(&conn, "done-task").unwrap();
+        add_task(&conn, "claimed-task", None, "", None).unwrap();
+        claim_task(&conn, "claimed-task", "other-agent").unwrap();
+        add_task(&conn, "available", None, "", None).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("available"));
+    }
+
+    #[test]
+    fn claim_next_skips_blocked_tasks() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "blocker", None, "", None).unwrap();
+        add_task(&conn, "blocked", None, "", None).unwrap();
+        add_block(&conn, "blocker", "blocked").unwrap();
+
+        // "blocked" has undone blocker, so only "blocker" is available
+        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("blocker"));
+    }
+
+    #[test]
+    fn claim_next_prefers_unblockers() {
+        let conn = db::open_memory().unwrap();
+        // "plain" is older (lower id), but "unblocker" unblocks "downstream"
+        add_task(&conn, "plain", None, "", None).unwrap();
+        add_task(&conn, "unblocker", None, "", None).unwrap();
+        add_task(&conn, "downstream", None, "", None).unwrap();
+        add_block(&conn, "unblocker", "downstream").unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("unblocker"));
+    }
+
+    #[test]
+    fn claim_next_with_preference() {
+        let conn = db::open_memory().unwrap();
+        // "backend" is older but doesn't match preference
+        add_task(&conn, "backend", None, "server-side API work", None).unwrap();
+        add_task(&conn, "frontend", None, "UI components for dashboard", None).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", Some("UI components")).unwrap();
+        assert_eq!(picked.as_deref(), Some("frontend"));
+    }
+
+    #[test]
+    fn claim_next_preference_matches_notes() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "task-a", None, "generic task", None).unwrap();
+        add_task(&conn, "task-b", None, "another generic task", None).unwrap();
+        add_note(&conn, "task-b", "needs database migration work").unwrap();
+
+        let picked = claim_next_task(&conn, "agent", Some("database migration")).unwrap();
+        assert_eq!(picked.as_deref(), Some("task-b"));
+    }
+
+    #[test]
+    fn claim_next_preference_is_soft() {
+        let conn = db::open_memory().unwrap();
+        // No task matches the preference, but tasks should still be returned
+        add_task(&conn, "only-task", None, "some work", None).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", Some("nonexistent-xyz")).unwrap();
+        assert_eq!(picked.as_deref(), Some("only-task"));
+    }
+
+    #[test]
+    fn claim_next_sets_assignee() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None).unwrap();
+
+        let picked = claim_next_task(&conn, "my-agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("t"));
+
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.assignee.as_deref(), Some("my-agent"));
+        assert!(task.assigned_at.is_some());
     }
 }

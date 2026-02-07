@@ -36,6 +36,16 @@ pub enum Command {
         assignee: String,
     },
 
+    /// Claim the best available task
+    #[command(name = "claim-next")]
+    ClaimNext {
+        /// Assignee ID (agent session ID)
+        assignee: String,
+        /// Soft preference text for ranking (matched against name, description, and notes)
+        #[arg(long)]
+        prefer: Option<String>,
+    },
+
     /// Release a task (clear assignee if it matches)
     Release {
         /// Task name

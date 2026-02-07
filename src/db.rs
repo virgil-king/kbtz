@@ -27,6 +27,38 @@ CREATE TABLE IF NOT EXISTS task_deps (
     PRIMARY KEY (blocker, blocked),
     CHECK (blocker != blocked)
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+    name, description,
+    content='tasks', content_rowid='id'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+    content,
+    content='notes', content_rowid='id'
+);
+
+-- Keep tasks_fts in sync with tasks
+CREATE TRIGGER IF NOT EXISTS tasks_fts_ai AFTER INSERT ON tasks BEGIN
+    INSERT INTO tasks_fts(rowid, name, description) VALUES(new.id, new.name, new.description);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_fts_ad AFTER DELETE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, name, description)
+    VALUES('delete', old.id, old.name, old.description);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_fts_au AFTER UPDATE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, name, description)
+    VALUES('delete', old.id, old.name, old.description);
+    INSERT INTO tasks_fts(rowid, name, description) VALUES(new.id, new.name, new.description);
+END;
+
+-- Keep notes_fts in sync with notes
+CREATE TRIGGER IF NOT EXISTS notes_fts_ai AFTER INSERT ON notes BEGIN
+    INSERT INTO notes_fts(rowid, content) VALUES(new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_fts_ad AFTER DELETE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, content) VALUES('delete', old.id, old.content);
+END;
 ";
 
 fn set_pragmas(conn: &Connection) -> Result<()> {
@@ -46,6 +78,17 @@ pub fn open(path: &str) -> Result<Connection> {
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+
+    // One-time FTS rebuild for databases created before FTS5 tables existed.
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        conn.execute_batch(
+            "INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');
+             INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
+             PRAGMA user_version = 1;",
+        )?;
+    }
+
     Ok(())
 }
 

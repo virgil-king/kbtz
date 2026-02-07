@@ -81,6 +81,20 @@ fn run() -> Result<()> {
             eprintln!("Claimed '{name}' for '{assignee}'");
         }
 
+        Command::ClaimNext { assignee, prefer } => {
+            let conn = open_db(&db_path)?;
+            match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
+                Some(name) => {
+                    println!("{name}");
+                    eprintln!("Claimed '{name}' for '{assignee}'");
+                }
+                None => {
+                    eprintln!("No tasks available");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Command::Release { name, assignee } => {
             let conn = open_db(&db_path)?;
             ops::release_task(&conn, &name, &assignee)?;
