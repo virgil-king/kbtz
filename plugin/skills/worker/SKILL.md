@@ -242,7 +242,7 @@ done
 |---------|-------------|
 | `kbtz wait` | Block until database changes |
 | `kbtz list [--status S] [--json]` | List tasks (open/active/done) |
-| `kbtz show <name>` | Show task details and blockers |
+| `kbtz show <name> [--json]` | Show task details and blockers |
 | `kbtz claim <name> <assignee>` | Claim a specific task |
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
 | `kbtz release <name> <assignee>` | Release a claimed task |

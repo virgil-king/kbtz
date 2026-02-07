@@ -98,6 +98,9 @@ pub enum Command {
     Show {
         /// Task name
         name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// List tasks
@@ -125,9 +128,6 @@ pub enum Command {
         name: String,
         /// Note content (omit to read from stdin)
         content: Option<String>,
-        /// Read content from stdin
-        #[arg(long)]
-        stdin: bool,
     },
 
     /// List notes for a task
@@ -156,7 +156,8 @@ pub enum Command {
     },
 
     /// Launch interactive TUI
-    Tree {
+    #[command(name = "watch")]
+    Watch {
         /// Root task for subtree
         #[arg(long)]
         root: Option<String>,

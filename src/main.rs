@@ -138,16 +138,26 @@ fn run() -> Result<()> {
             eprintln!("Removed task '{name}'");
         }
 
-        Command::Show { name } => {
+        Command::Show { name, json } => {
             let conn = open_db(&db_path)?;
             let task = ops::get_task(&conn, &name)?;
             let notes = ops::list_notes(&conn, &name)?;
             let blockers = ops::get_blockers(&conn, &name)?;
             let dependents = ops::get_dependents(&conn, &name)?;
-            print!(
-                "{}",
-                output::format_task_detail(&task, &notes, &blockers, &dependents)
-            );
+            if json {
+                let detail = output::TaskDetail {
+                    task: &task,
+                    notes: &notes,
+                    blocked_by: &blockers,
+                    blocks: &dependents,
+                };
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                print!(
+                    "{}",
+                    output::format_task_detail(&task, &notes, &blockers, &dependents)
+                );
+            }
         }
 
         Command::List {
@@ -169,15 +179,11 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Note {
-            name,
-            content,
-            stdin,
-        } => {
+        Command::Note { name, content } => {
             let conn = open_db(&db_path)?;
             let content = match content {
-                Some(c) if !stdin => c,
-                _ => {
+                Some(c) => c,
+                None => {
                     let mut buf = String::new();
                     std::io::stdin().read_to_string(&mut buf)?;
                     if buf.is_empty() {
@@ -212,7 +218,7 @@ fn run() -> Result<()> {
             eprintln!("'{blocker}' no longer blocks '{blocked}'");
         }
 
-        Command::Tree {
+        Command::Watch {
             root,
             poll_interval,
         } => {

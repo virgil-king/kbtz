@@ -1,6 +1,17 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::model::{Note, Task};
+
+#[derive(Serialize)]
+pub struct TaskDetail<'a> {
+    #[serde(flatten)]
+    pub task: &'a Task,
+    pub notes: &'a [Note],
+    pub blocked_by: &'a [String],
+    pub blocks: &'a [String],
+}
 
 pub fn format_task_detail(task: &Task, notes: &[Note], blockers: &[String], dependents: &[String]) -> String {
     let mut out = String::new();
