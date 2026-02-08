@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kbtz",
+  "description": "Plugins for the kbtz task tracker",
+  "owner": {
+    "name": "virgil"
+  },
+  "plugins": [
+    {
+      "name": "kbtz-worker",
+      "description": "Kbtz task worker agent that claims and works on tasks in a loop",
+      "version": "1.0.0",
+      "author": {
+        "name": "virgil"
+      },
+      "source": "./plugin"
+    }
+  ]
+}

@@ -3,7 +3,7 @@ name: worker
 description: This skill should be used when the user asks to "start working", "become a worker", "work on tasks", "run as a worker agent", "claim tasks from kbtz", or wants to operate as an autonomous task worker that processes tasks from the kbtz task tracker.
 ---
 
-# Tager Worker Agent
+# Kbtz Worker Agent
 
 This skill transforms Claude into an autonomous worker agent that processes tasks from the kbtz task tracker database.
 
@@ -236,7 +236,7 @@ while true; do
 done
 ```
 
-## Tager Command Reference
+## Command Reference
 
 | Command | Description |
 |---------|-------------|
