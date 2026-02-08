@@ -63,6 +63,8 @@ kbtz claim-next $CLAUDE_CODE_SESSION_ID --prefer "$CLAUDE_CODE_SESSION_ID"
 
 ### Step 3: Work on the Task
 
+Never work on a task you have not claimed, since another worker may claim and begin work on it, resulting in redundant effort.
+
 Read the task details:
 
 ```bash
