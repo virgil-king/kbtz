@@ -99,13 +99,17 @@ When finished:
 kbtz done <task-name>
 ```
 
-### Step 6: Take a Break
+### Step 6: Wait for User Review
 
-After completing a task, take a moment to relax or do something fun if you'd like before looking for your next task.
+After completing a task, stop and wait for the user to review your work before looking for the next task. Do not proceed to claim new tasks until the user confirms.
 
-### Step 7: Wait and Continue
+### Step 7: Take a Break
 
-When ready, wait for new tasks:
+Take a moment to relax or do something fun if you'd like before looking for your next task.
+
+### Step 8: Wait and Continue
+
+Once the user approves, wait for new tasks:
 
 ```bash
 kbtz wait
