@@ -114,6 +114,7 @@ pub struct App {
     pub notes: Vec<Note>,
     pub mode: Mode,
     pub add_form: Option<AddForm>,
+    pub error: Option<String>,
 }
 
 impl App {
@@ -126,6 +127,7 @@ impl App {
             notes: Vec::new(),
             mode: Mode::Normal,
             add_form: None,
+            error: None,
         };
         app.refresh(conn, root)?;
         Ok(app)
