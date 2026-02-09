@@ -15,6 +15,7 @@ use rusqlite::Connection;
 use crate::db;
 use crate::watch;
 use app::App;
+use event::KeyAction;
 
 pub fn run(
     db_path: &str,
@@ -64,8 +65,17 @@ fn run_loop(
         if ct_event::poll(poll_duration)? {
             if let Event::Key(key) = ct_event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if event::handle_key(app, key) {
-                        return Ok(());
+                    match event::handle_key(app, key) {
+                        KeyAction::Quit => return Ok(()),
+                        KeyAction::Submit => {
+                            let c = get_conn(&conn, initial_conn);
+                            app.submit_add(c, root)?;
+                        }
+                        KeyAction::Refresh => {
+                            let c = get_conn(&conn, initial_conn);
+                            app.refresh(c, root)?;
+                        }
+                        KeyAction::Continue => {}
                     }
                     if app.show_notes {
                         app.load_notes(get_conn(&conn, initial_conn))?;
