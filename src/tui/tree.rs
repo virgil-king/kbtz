@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use super::app::App;
+use super::app::{AddField, App, Mode};
 
 pub fn render(frame: &mut Frame, app: &App) {
     if app.show_notes {
@@ -13,6 +13,12 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_notes(frame, app, chunks[1]);
     } else {
         render_tree(frame, app, frame.area());
+    }
+
+    match app.mode {
+        Mode::AddTask => render_add_dialog(frame, app),
+        Mode::Help => render_help(frame),
+        Mode::Normal => {}
     }
 }
 
@@ -130,4 +136,181 @@ fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn render_field(
+    frame: &mut Frame,
+    label: &str,
+    value: &str,
+    focused: bool,
+    chunks: &[Rect],
+    idx: &mut usize,
+) {
+    let label_style = if focused {
+        Style::default().fg(Color::Cyan).bold()
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(label_style),
+        chunks[*idx],
+    );
+    *idx += 1;
+
+    let cursor = if focused { "_" } else { "" };
+    frame.render_widget(
+        Paragraph::new(format!("  {value}{cursor}"))
+            .style(Style::default().fg(Color::White)),
+        chunks[*idx],
+    );
+    *idx += 1;
+}
+
+fn render_add_dialog(frame: &mut Frame, app: &App) {
+    let form = match &app.add_form {
+        Some(f) => f,
+        None => return,
+    };
+
+    let area = centered_rect(60, 14, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Add Task ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let has_error = form.error.is_some();
+    let mut constraints = vec![
+        Constraint::Length(1), // parent
+        Constraint::Length(1), // name label
+        Constraint::Length(1), // name input
+        Constraint::Length(1), // desc label
+        Constraint::Length(1), // desc input
+        Constraint::Length(1), // note label
+        Constraint::Length(1), // note input
+    ];
+    if has_error {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1)); // hint
+    constraints.push(Constraint::Min(0)); // spacer
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let mut idx = 0;
+
+    // Parent
+    let parent_text = match &form.parent {
+        Some(p) => format!("Parent: {p}"),
+        None => "Parent: (none)".into(),
+    };
+    frame.render_widget(
+        Paragraph::new(parent_text).style(Style::default().fg(Color::DarkGray)),
+        chunks[idx],
+    );
+    idx += 1;
+
+    render_field(frame, "Name:", &form.name, form.focused == AddField::Name, &chunks, &mut idx);
+    render_field(frame, "Description:", &form.description, form.focused == AddField::Description, &chunks, &mut idx);
+    render_field(frame, "Note:", &form.note, form.focused == AddField::Note, &chunks, &mut idx);
+
+    // Error
+    if let Some(err) = &form.error {
+        frame.render_widget(
+            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+            chunks[idx],
+        );
+        idx += 1;
+    }
+
+    // Hint
+    frame.render_widget(
+        Paragraph::new("Enter: submit  Tab/S-Tab: fields  Esc: cancel  C-u: clear")
+            .style(Style::default().fg(Color::DarkGray)),
+        chunks[idx],
+    );
+}
+
+fn render_help(frame: &mut Frame) {
+    let area = centered_rect(50, 16, frame.area());
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Help ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("j/Down  ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move down"),
+        ]),
+        Line::from(vec![
+            Span::styled("k/Up    ", Style::default().fg(Color::Cyan)),
+            Span::raw("Move up"),
+        ]),
+        Line::from(vec![
+            Span::styled("Space   ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle collapse"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter/n ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle notes panel"),
+        ]),
+        Line::from(vec![
+            Span::styled("a       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Add child task"),
+        ]),
+        Line::from(vec![
+            Span::styled("A       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Add root task"),
+        ]),
+        Line::from(vec![
+            Span::styled("?       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle help"),
+        ]),
+        Line::from(vec![
+            Span::styled("q/Esc   ", Style::default().fg(Color::Cyan)),
+            Span::raw("Quit"),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Add Task Dialog:", Style::default().bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab/S-Tab ", Style::default().fg(Color::Cyan)),
+            Span::raw("Next/prev field"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Submit"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Cancel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  C-u       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Clear field"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(help_text);
+    frame.render_widget(paragraph, inner);
 }
