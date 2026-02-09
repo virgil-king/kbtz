@@ -23,6 +23,24 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
+    let (tree_area, error_area) = if app.error.is_some() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    if let (Some(err), Some(err_area)) = (&app.error, error_area) {
+        frame.render_widget(
+            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+            err_area,
+        );
+    }
+
+    let area = tree_area;
     let items: Vec<ListItem> = app
         .rows
         .iter()
@@ -238,14 +256,14 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 
     // Hint
     frame.render_widget(
-        Paragraph::new("Enter: submit  Tab/S-Tab: fields  Esc: cancel  C-u: clear")
+        Paragraph::new("Enter: submit  Tab/S-Tab: fields  C-e: editor  Esc: cancel  C-u: clear")
             .style(Style::default().fg(Color::DarkGray)),
         chunks[idx],
     );
 }
 
 fn render_help(frame: &mut Frame) {
-    let area = centered_rect(50, 16, frame.area());
+    let area = centered_rect(50, 18, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -282,6 +300,10 @@ fn render_help(frame: &mut Frame) {
             Span::raw("Add root task"),
         ]),
         Line::from(vec![
+            Span::styled("N       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Add note to selected task"),
+        ]),
+        Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),
             Span::raw("Toggle help"),
         ]),
@@ -308,6 +330,10 @@ fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  C-u       ", Style::default().fg(Color::Cyan)),
             Span::raw("Clear field"),
+        ]),
+        Line::from(vec![
+            Span::styled("  C-e       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Open $EDITOR for note"),
         ]),
     ];
 

@@ -1,4 +1,5 @@
 mod app;
+mod editor;
 mod event;
 mod tree;
 
@@ -13,6 +14,7 @@ use ratatui::prelude::*;
 use rusqlite::Connection;
 
 use crate::db;
+use crate::ops;
 use crate::watch;
 use app::App;
 use event::KeyAction;
@@ -70,6 +72,43 @@ fn run_loop(
                         KeyAction::Submit => {
                             let c = get_conn(&conn, initial_conn);
                             app.submit_add(c, root)?;
+                        }
+                        KeyAction::OpenEditor => {
+                            let initial = &app.add_form.as_ref().unwrap().note;
+                            match editor::open_editor(terminal, initial) {
+                                Ok(content) => {
+                                    let form = app.add_form.as_mut().unwrap();
+                                    form.note = content.trim_end().to_string();
+                                    form.error = None;
+                                }
+                                Err(e) => {
+                                    app.add_form.as_mut().unwrap().error =
+                                        Some(e.to_string());
+                                }
+                            }
+                        }
+                        KeyAction::AddNote => {
+                            if let Some(task_name) = app.selected_name() {
+                                let task_name = task_name.to_string();
+                                app.error = None;
+                                match editor::open_editor(terminal, "") {
+                                    Ok(content) => {
+                                        let content = content.trim_end();
+                                        if !content.is_empty() {
+                                            let c = get_conn(&conn, initial_conn);
+                                            if let Err(e) = ops::add_note(c, &task_name, content) {
+                                                app.error = Some(e.to_string());
+                                            } else {
+                                                app.show_notes = true;
+                                                app.load_notes(c)?;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.error = Some(e.to_string());
+                                    }
+                                }
+                            }
                         }
                         KeyAction::Refresh => {
                             let c = get_conn(&conn, initial_conn);

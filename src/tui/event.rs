@@ -1,12 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, Mode};
+use super::app::{AddField, App, Mode};
 
 /// Result of handling a key press.
 pub enum KeyAction {
     Quit,
     Submit,
     Refresh,
+    OpenEditor,
+    AddNote,
     Continue,
 }
 
@@ -20,6 +22,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 }
 
 fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
+    app.error = None;
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => KeyAction::Quit,
         KeyCode::Char('j') | KeyCode::Down => {
@@ -46,6 +49,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
             app.enter_add_mode(false);
             KeyAction::Continue
         }
+        KeyCode::Char('N') => KeyAction::AddNote,
         KeyCode::Char('?') => {
             app.toggle_help();
             KeyAction::Continue
@@ -81,7 +85,13 @@ fn handle_add(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyAction::Continue
         }
         KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'u' {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'e' {
+                if let Some(form) = &app.add_form {
+                    if form.focused == AddField::Note {
+                        return KeyAction::OpenEditor;
+                    }
+                }
+            } else if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'u' {
                 if let Some(form) = &mut app.add_form {
                     form.focused_buf_mut().clear();
                     form.error = None;

@@ -117,6 +117,13 @@ done
 
 The `plugin/` directory contains a Claude Code plugin that teaches Claude how to operate as a kbtz worker agent. See `plugin/skills/worker/SKILL.md` for the full protocol.
 
+Install from the marketplace:
+
+```
+/plugin marketplace add https://github.com/virgil-king/kbtz.git
+/plugin install kbtz-worker@kbtz
+```
+
 ## Architecture
 
 ```
