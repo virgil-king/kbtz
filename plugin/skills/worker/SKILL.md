@@ -17,12 +17,6 @@ A worker agent operates in a continuous loop:
 5. Use `kbtz wait` to wait for other workers to complete delegated subtasks
 6. After closing a task, wait for new tasks and repeat
 
-## Session Identity
-
-Use the `$CLAUDE_CODE_SESSION_ID` environment variable as your session ID. This is automatically set by Claude Code and remains consistent throughout the session.
-
-Use `$CLAUDE_CODE_SESSION_ID` directly in all kbtz commands.
-
 ## Task Ownership
 
 Tasks are exclusive locks. Claiming a task grants you sole ownership of the task and its associated resources (worktrees, branches, etc.). Resource lifetimes are strictly nested:
@@ -197,49 +191,6 @@ Subtasks will be picked up by other worker agents. Write descriptions that are s
 kbtz add auth-middleware "Add JWT auth middleware to Express app. Validate tokens from /auth/token endpoint. Protect all /api/* routes. See src/server.ts for existing middleware pattern." -p api-task
 ```
 
-## Creating New Tasks
-
-When a task needs decomposition but will be done sequentially by you:
-
-```bash
-# Create subtasks under current task, already claimed by you
-kbtz add subtask-1 "First part" -p <parent-task> -c $CLAUDE_CODE_SESSION_ID
-kbtz add subtask-2 "Second part" -p <parent-task> -c $CLAUDE_CODE_SESSION_ID
-
-# Set up dependencies if needed
-kbtz block subtask-1 subtask-2  # subtask-1 blocks subtask-2
-```
-
-## Coordinating with Other Workers
-
-Multiple workers can operate on the same database:
-
-- Each worker has a unique session ID
-- `kbtz claim` and `kbtz claim-next` are atomic - only one worker can claim a task
-- Use notes to communicate with other workers
-- Check task ownership before modifying: `kbtz show <task>`
-
-To release a task (e.g., when blocked and moving to another):
-
-```bash
-kbtz release <task-name> $CLAUDE_CODE_SESSION_ID
-```
-
-## Error Handling
-
-If a task cannot be completed:
-
-1. Add a note explaining the blocker
-2. Create a new task describing what is needed
-3. Set up the blocking relationship
-4. Release the current task or leave it claimed while working on the blocker
-
-```bash
-kbtz note my-task "Blocked: need API credentials"
-kbtz add get-api-creds "Obtain API credentials for service X"
-kbtz block get-api-creds my-task
-```
-
 ## Example Worker Session
 
 ```bash
@@ -262,22 +213,6 @@ while true; do
     PREFER="$TASK"
 done
 ```
-
-## Command Reference
-
-| Command | Description |
-|---------|-------------|
-| `kbtz wait` | Block until database changes |
-| `kbtz list [--status S] [--json]` | List tasks (open/active/done) |
-| `kbtz show <name> [--json]` | Show task details and blockers |
-| `kbtz claim <name> <assignee>` | Claim a specific task |
-| `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
-| `kbtz release <name> <assignee>` | Release a claimed task |
-| `kbtz done <name>` | Mark task complete |
-| `kbtz add <name> <description> [-p parent] [-c assignee]` | Create a task |
-| `kbtz note <name> <content>` | Add a note |
-| `kbtz notes <name>` | List notes |
-| `kbtz block <blocker> <blocked>` | Set dependency |
 
 ## Starting the Worker
 
