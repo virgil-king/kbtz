@@ -23,6 +23,21 @@ Use the `$CLAUDE_CODE_SESSION_ID` environment variable as your session ID. This 
 
 Use `$CLAUDE_CODE_SESSION_ID` directly in all kbtz commands.
 
+## Task Ownership
+
+Tasks are exclusive locks. Claiming a task grants you sole ownership of the task and its associated resources (worktrees, branches, etc.). Resource lifetimes are strictly nested:
+
+```
+Session
+  └── Task ownership (claim → done/release)
+        └── Resources (worktrees, branches, etc.)
+```
+
+Rules:
+1. **Claim the task before acquiring resources.** Do not create worktrees or branches for a task you haven't claimed -- another worker may claim it and you'll have conflicting work.
+2. **Release resources before closing the task.** Clean up worktrees, merge or push branches, and remove temporary files before running `kbtz done` or `kbtz release`.
+3. **Close or release all tasks before ending the session.** Every task you own must be resolved via `kbtz done` or `kbtz release` before your session ends. Failing to do so leaves tasks permanently locked, blocking other workers and requiring manual cleanup.
+
 ## Main Work Loop
 
 ### Step 1: Wait for Tasks
@@ -95,10 +110,16 @@ If blocked by an unclaimed task, claim and complete it first, or create subtasks
 
 ### Step 5: Complete the Task
 
-When finished:
+Before closing a task, release all resources acquired under it: merge or push branches, remove worktrees, and clean up temporary files. Then mark the task done:
 
 ```bash
 kbtz done <task-name>
+```
+
+If your session is ending before the task is finished, clean up resources and release the task so another worker can pick it up:
+
+```bash
+kbtz release <task-name> $CLAUDE_CODE_SESSION_ID
 ```
 
 ### Step 6: Wait for User Review
