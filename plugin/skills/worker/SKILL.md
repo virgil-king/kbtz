@@ -120,11 +120,7 @@ kbtz release <task-name> $KBTZ_SESSION_ID
 
 After completing a task, stop and wait for the user to review your work before looking for the next task. Do not proceed to claim new tasks until the user confirms.
 
-### Step 7: Take a Break
-
-Take a moment to relax or do something fun if you'd like before looking for your next task.
-
-### Step 8: Continue
+### Step 7: Continue
 
 Once the user approves, return to Step 1 to claim the next task. Use `--prefer` to express affinity for related work. If switching to an unrelated domain, request context compaction (`/compact`) to free the context window.
 
