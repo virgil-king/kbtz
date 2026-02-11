@@ -49,7 +49,7 @@ This uses inotify/FSEvents to efficiently wait for any database modification.
 Use `claim-next` to atomically select and claim the best available task:
 
 ```bash
-TASK=$(kbtz claim-next $CLAUDE_CODE_SESSION_ID --prefer "keywords from recent work")
+TASK=$(kbtz claim-next $KBTZ_SESSION_ID --prefer "keywords from recent work")
 ```
 
 `claim-next` automatically:
@@ -62,10 +62,10 @@ The `--prefer` flag accepts free-form text. Use it to express affinity for relat
 
 ```bash
 # Prefer tasks related to your recent work area
-kbtz claim-next $CLAUDE_CODE_SESSION_ID --prefer "frontend UI components"
+kbtz claim-next $KBTZ_SESSION_ID --prefer "frontend UI components"
 
 # Prefer tasks that mention your session ID (e.g., handoff notes)
-kbtz claim-next $CLAUDE_CODE_SESSION_ID --prefer "$CLAUDE_CODE_SESSION_ID"
+kbtz claim-next $KBTZ_SESSION_ID --prefer "$KBTZ_SESSION_ID"
 ```
 
 `claim-next` prints the task name to stdout on success, or exits with code 1 if no tasks are available. If no tasks are available, return to step 1.
@@ -113,7 +113,7 @@ kbtz done <task-name>
 If your session is ending before the task is finished, clean up resources and release the task so another worker can pick it up:
 
 ```bash
-kbtz release <task-name> $CLAUDE_CODE_SESSION_ID
+kbtz release <task-name> $KBTZ_SESSION_ID
 ```
 
 ### Step 6: Wait for User Review
@@ -165,7 +165,7 @@ kbtz add db-schema "Design and migrate database schema" -p my-task
 kbtz block db-schema backend-api
 
 # Claim and do your part (e.g., the backend-api)
-kbtz claim backend-api $CLAUDE_CODE_SESSION_ID
+kbtz claim backend-api $KBTZ_SESSION_ID
 # ... work on it ...
 kbtz done backend-api
 
@@ -199,7 +199,7 @@ PREFER=""
 while true; do
     kbtz wait
 
-    TASK=$(kbtz claim-next "$CLAUDE_CODE_SESSION_ID" --prefer "$PREFER" 2>/dev/null) || continue
+    TASK=$(kbtz claim-next "$KBTZ_SESSION_ID" --prefer "$PREFER" 2>/dev/null) || continue
 
     echo "Claimed: $TASK"
 
@@ -216,4 +216,4 @@ done
 
 ## Starting the Worker
 
-To begin operating as a worker agent, use `$CLAUDE_CODE_SESSION_ID` as your session ID and enter the work loop.
+To begin operating as a worker agent, use `$KBTZ_SESSION_ID` as your session ID and enter the work loop.

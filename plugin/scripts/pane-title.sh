@@ -7,7 +7,7 @@ set -euo pipefail
 [ -n "${TMUX_PANE:-}" ] || exit 0
 
 sid=$(jq -r '.session_id // empty' 2>/dev/null) || true
-sid="${sid:-${CLAUDE_CODE_SESSION_ID:-}}"
+sid="${sid:-${KBTZ_SESSION_ID:-}}"
 
 state="${1:?Usage: pane-title.sh <idle|active|blocked>}"
 

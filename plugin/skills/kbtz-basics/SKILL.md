@@ -27,11 +27,11 @@ Task names must be **kebab-case**: lowercase letters, numbers, and hyphens only.
 
 ## Session ID
 
-Use `$CLAUDE_CODE_SESSION_ID` as your assignee in all kbtz commands. This environment variable is set automatically by Claude Code.
+Use `$KBTZ_SESSION_ID` as your assignee in all kbtz commands. This environment variable is set automatically by Claude Code.
 
 ```bash
-kbtz claim my-task $CLAUDE_CODE_SESSION_ID
-kbtz release my-task $CLAUDE_CODE_SESSION_ID
+kbtz claim my-task $KBTZ_SESSION_ID
+kbtz release my-task $KBTZ_SESSION_ID
 ```
 
 ## Common Patterns
@@ -44,10 +44,10 @@ kbtz add child-one "First subtask" -p parent-task
 kbtz add child-two "Second subtask" -p parent-task
 ```
 
-Use `-c $CLAUDE_CODE_SESSION_ID` to create and claim in one step:
+Use `-c $KBTZ_SESSION_ID` to create and claim in one step:
 
 ```bash
-kbtz add my-subtask "Description" -p parent -c $CLAUDE_CODE_SESSION_ID
+kbtz add my-subtask "Description" -p parent -c $KBTZ_SESSION_ID
 ```
 
 ### Adding progress notes
