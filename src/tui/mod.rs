@@ -13,7 +13,6 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 use rusqlite::Connection;
 
-use crate::db;
 use crate::ops;
 use crate::watch;
 use app::App;
@@ -45,7 +44,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     db_path: &str,
-    initial_conn: &Connection,
+    conn: &Connection,
     root: Option<&str>,
     poll_interval: u64,
 ) -> Result<()> {
@@ -53,13 +52,6 @@ fn run_loop(
 
     // Set up file watcher
     let (_watcher, rx) = watch::watch_db(db_path)?;
-
-    // We keep a separate owned connection that we reopen on DB changes.
-    let mut conn: Option<Connection> = None;
-
-    fn get_conn<'a>(owned: &'a Option<Connection>, fallback: &'a Connection) -> &'a Connection {
-        owned.as_ref().unwrap_or(fallback)
-    }
 
     loop {
         terminal.draw(|frame| tree::render(frame, app))?;
@@ -70,8 +62,7 @@ fn run_loop(
                     match event::handle_key(app, key) {
                         KeyAction::Quit => return Ok(()),
                         KeyAction::Submit => {
-                            let c = get_conn(&conn, initial_conn);
-                            app.submit_add(c, root)?;
+                            app.submit_add(conn, root)?;
                         }
                         KeyAction::OpenEditor => {
                             let initial = &app.add_form.as_ref().unwrap().note;
@@ -95,12 +86,11 @@ fn run_loop(
                                     Ok(content) => {
                                         let content = content.trim_end();
                                         if !content.is_empty() {
-                                            let c = get_conn(&conn, initial_conn);
-                                            if let Err(e) = ops::add_note(c, &task_name, content) {
+                                            if let Err(e) = ops::add_note(conn, &task_name, content) {
                                                 app.error = Some(e.to_string());
                                             } else {
                                                 app.show_notes = true;
-                                                app.load_notes(c)?;
+                                                app.load_notes(conn)?;
                                             }
                                         }
                                     }
@@ -111,13 +101,12 @@ fn run_loop(
                             }
                         }
                         KeyAction::Refresh => {
-                            let c = get_conn(&conn, initial_conn);
-                            app.refresh(c, root)?;
+                            app.refresh(conn, root)?;
                         }
                         KeyAction::Continue => {}
                     }
                     if app.show_notes {
-                        app.load_notes(get_conn(&conn, initial_conn))?;
+                        app.load_notes(conn)?;
                     }
                 }
             }
@@ -126,9 +115,7 @@ fn run_loop(
         // Check for file changes (non-blocking)
         if watch::wait_for_change(&rx, Duration::ZERO) {
             watch::drain_events(&rx);
-            let new_conn = db::open(db_path)?;
-            app.refresh(&new_conn, root)?;
-            conn = Some(new_conn);
+            app.refresh(conn, root)?;
         }
     }
 }
