@@ -10,12 +10,12 @@ This skill transforms Claude into an autonomous worker agent that processes task
 ## Overview
 
 A worker agent operates in a continuous loop:
-1. Wait for tasks to appear using `kbtz wait`
-2. Claim the best available task using `kbtz claim-next`
+1. Claim the best available task using `kbtz claim-next`
+2. If no tasks are available, wait using `kbtz wait`, then retry
 3. Work on the task until completion or blocked
 4. For large tasks, create subtasks for other workers to handle in parallel
 5. Use `kbtz wait` to wait for other workers to complete delegated subtasks
-6. After closing a task, wait for new tasks and repeat
+6. After closing a task, claim the next task and repeat
 
 ## Task Ownership
 
@@ -34,17 +34,7 @@ Rules:
 
 ## Main Work Loop
 
-### Step 1: Wait for Tasks
-
-Block until the database changes:
-
-```bash
-kbtz wait
-```
-
-This uses inotify/FSEvents to efficiently wait for any database modification.
-
-### Step 2: Claim a Task
+### Step 1: Claim a Task
 
 Use `claim-next` to atomically select and claim the best available task:
 
@@ -68,7 +58,17 @@ kbtz claim-next $KBTZ_SESSION_ID --prefer "frontend UI components"
 kbtz claim-next $KBTZ_SESSION_ID --prefer "$KBTZ_SESSION_ID"
 ```
 
-`claim-next` prints the task name to stdout on success, or exits with code 1 if no tasks are available. If no tasks are available, return to step 1.
+`claim-next` prints the task name to stdout on success, or exits with code 1 if no tasks are available.
+
+### Step 2: Wait for Tasks
+
+If no tasks are available, block until the database changes:
+
+```bash
+kbtz wait
+```
+
+This uses inotify/FSEvents to efficiently wait for any database modification. When it returns, go back to Step 1.
 
 ### Step 3: Work on the Task
 
@@ -120,21 +120,9 @@ kbtz release <task-name> $KBTZ_SESSION_ID
 
 After completing a task, stop and wait for the user to review your work before looking for the next task. Do not proceed to claim new tasks until the user confirms.
 
-### Step 7: Take a Break
+### Step 7: Continue
 
-Take a moment to relax or do something fun if you'd like before looking for your next task.
-
-### Step 8: Wait and Continue
-
-Once the user approves, wait for new tasks:
-
-```bash
-kbtz wait
-```
-
-When new tasks appear, use `--prefer` to express affinity for related work. If switching to an unrelated domain, request context compaction (`/compact`) to free the context window.
-
-Return to Step 2.
+Once the user approves, return to Step 1 to claim the next task. Use `--prefer` to express affinity for related work. If switching to an unrelated domain, request context compaction (`/compact`) to free the context window.
 
 ## Delegating to Other Workers
 
@@ -197,9 +185,11 @@ kbtz add auth-middleware "Add JWT auth middleware to Express app. Validate token
 PREFER=""
 
 while true; do
-    kbtz wait
-
-    TASK=$(kbtz claim-next "$KBTZ_SESSION_ID" --prefer "$PREFER" 2>/dev/null) || continue
+    TASK=$(kbtz claim-next "$KBTZ_SESSION_ID" --prefer "$PREFER" 2>/dev/null)
+    if [ -z "$TASK" ]; then
+        kbtz wait
+        continue
+    fi
 
     echo "Claimed: $TASK"
 
@@ -216,4 +206,4 @@ done
 
 ## Starting the Worker
 
-To begin operating as a worker agent, use `$KBTZ_SESSION_ID` as your session ID and enter the work loop.
+To begin operating as a worker agent, use `$KBTZ_SESSION_ID` as your session ID. Try to claim a task immediately — only enter the wait loop if nothing is available.
