@@ -117,6 +117,18 @@ fn run() -> Result<()> {
             eprintln!("Reopened '{name}'");
         }
 
+        Command::Pause { name } => {
+            let conn = open_db(&db_path)?;
+            ops::pause_task(&conn, &name)?;
+            eprintln!("Paused '{name}'");
+        }
+
+        Command::Unpause { name } => {
+            let conn = open_db(&db_path)?;
+            ops::unpause_task(&conn, &name)?;
+            eprintln!("Unpaused '{name}'");
+        }
+
         Command::Reparent { name, parent } => {
             let conn = open_db(&db_path)?;
             ops::reparent_task(&conn, &name, parent.as_deref())?;

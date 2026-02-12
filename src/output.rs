@@ -26,8 +26,8 @@ pub fn format_task_detail(task: &Task, notes: &[Note], blockers: &[String], depe
     if let Some(ref assignee) = task.assignee {
         out.push_str(&format!("Assignee:    {}\n", assignee));
     }
-    if let Some(ref assigned_at) = task.assigned_at {
-        out.push_str(&format!("Assigned at: {}\n", assigned_at));
+    if let Some(ref status_changed_at) = task.status_changed_at {
+        out.push_str(&format!("Status changed: {}\n", status_changed_at));
     }
     out.push_str(&format!("Created:     {}\n", task.created_at));
     out.push_str(&format!("Updated:     {}\n", task.updated_at));
@@ -157,15 +157,15 @@ pub fn format_notes(notes: &[Note]) -> String {
 mod tests {
     use super::*;
 
-    fn make_task(name: &str, parent: Option<&str>, done: bool, assignee: Option<&str>, desc: &str) -> Task {
+    fn make_task(name: &str, parent: Option<&str>, status: &str, assignee: Option<&str>, desc: &str) -> Task {
         Task {
             id: 0,
             name: name.to_string(),
             parent: parent.map(|s| s.to_string()),
             description: desc.to_string(),
-            done,
+            status: status.to_string(),
             assignee: assignee.map(|s| s.to_string()),
-            assigned_at: assignee.map(|_| "2025-01-01T00:00:00Z".to_string()),
+            status_changed_at: assignee.map(|_| "2025-01-01T00:00:00Z".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn tree_single_root() {
-        let tasks = vec![make_task("root", None, false, Some("agent"), "Root task")];
+        let tasks = vec![make_task("root", None, "active", Some("agent"), "Root task")];
         let out = format_task_tree(&tasks);
         assert_eq!(out, "* root  Root task\n");
     }
@@ -181,9 +181,9 @@ mod tests {
     #[test]
     fn tree_with_children() {
         let tasks = vec![
-            make_task("root", None, false, Some("agent"), ""),
-            make_task("child1", Some("root"), false, Some("agent"), ""),
-            make_task("child2", Some("root"), false, None, ""),
+            make_task("root", None, "active", Some("agent"), ""),
+            make_task("child1", Some("root"), "active", Some("agent"), ""),
+            make_task("child2", Some("root"), "open", None, ""),
         ];
         let out = format_task_tree(&tasks);
         assert!(out.contains("root"));
@@ -196,11 +196,11 @@ mod tests {
     #[test]
     fn flat_list() {
         let tasks = vec![
-            make_task("a", None, false, Some("agent"), "desc A"),
-            make_task("b", None, false, None, ""),
+            make_task("a", None, "active", Some("agent"), "desc A"),
+            make_task("b", None, "open", None, ""),
         ];
         let out = format_task_list(&tasks);
-        assert!(out.contains("* a  desc A")); // assigned = active = *
-        assert!(out.contains(". b")); // unassigned = open = .
+        assert!(out.contains("* a  desc A")); // active = *
+        assert!(out.contains(". b")); // open = .
     }
 }

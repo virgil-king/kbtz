@@ -3,15 +3,16 @@ use rusqlite::Connection;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
-    id          INTEGER PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE CHECK(name GLOB '[a-zA-Z0-9_-]*' AND length(name) > 0),
-    parent      TEXT REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE RESTRICT,
-    description TEXT NOT NULL DEFAULT '',
-    done        INTEGER NOT NULL DEFAULT 0 CHECK(done IN (0, 1)),
-    assignee    TEXT,
-    assigned_at TEXT,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    id                 INTEGER PRIMARY KEY,
+    name               TEXT NOT NULL UNIQUE CHECK(name GLOB '[a-zA-Z0-9_-]*' AND length(name) > 0),
+    parent             TEXT REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE RESTRICT,
+    description        TEXT NOT NULL DEFAULT '',
+    status             TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'paused', 'active', 'done')),
+    assignee           TEXT,
+    status_changed_at  TEXT,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    CHECK((status = 'active') = (assignee IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -37,7 +38,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     content,
     content='notes', content_rowid='id'
 );
+";
 
+const TRIGGERS: &str = "
 -- Keep tasks_fts in sync with tasks
 CREATE TRIGGER IF NOT EXISTS tasks_fts_ai AFTER INSERT ON tasks BEGIN
     INSERT INTO tasks_fts(rowid, name, description) VALUES(new.id, new.name, new.description);
@@ -82,16 +85,60 @@ pub fn open(path: &str) -> Result<Connection> {
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(TRIGGERS)?;
 
-    // One-time FTS rebuild for databases created before FTS5 tables existed.
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         conn.execute_batch(
             "INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');
              INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
-             PRAGMA user_version = 1;",
+             PRAGMA user_version = 2;",
         )?;
+    } else if version < 2 {
+        migrate_v1_to_v2(conn)?;
     }
+
+    Ok(())
+}
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE tasks_new (
+            id                 INTEGER PRIMARY KEY,
+            name               TEXT NOT NULL UNIQUE CHECK(name GLOB '[a-zA-Z0-9_-]*' AND length(name) > 0),
+            parent             TEXT REFERENCES tasks_new(name) ON UPDATE CASCADE ON DELETE RESTRICT,
+            description        TEXT NOT NULL DEFAULT '',
+            status             TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'paused', 'active', 'done')),
+            assignee           TEXT,
+            status_changed_at  TEXT,
+            created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            CHECK((status = 'active') = (assignee IS NOT NULL))
+        );
+
+        INSERT INTO tasks_new (id, name, parent, description, status, assignee, status_changed_at, created_at, updated_at)
+            SELECT id, name, parent, description,
+                   CASE WHEN done = 1 THEN 'done'
+                        WHEN assignee IS NOT NULL THEN 'active'
+                        ELSE 'open'
+                   END,
+                   CASE WHEN done = 1 THEN NULL ELSE assignee END,
+                   assigned_at,
+                   created_at,
+                   updated_at
+            FROM tasks;
+
+        DROP TABLE tasks;
+        ALTER TABLE tasks_new RENAME TO tasks;
+
+        PRAGMA user_version = 2;",
+    )?;
+
+    // Recreate triggers (DROP TABLE killed them)
+    conn.execute_batch(TRIGGERS)?;
+
+    // Rebuild FTS since the content table was recreated
+    conn.execute_batch("INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');")?;
 
     Ok(())
 }

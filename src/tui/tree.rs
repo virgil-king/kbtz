@@ -22,6 +22,24 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+fn status_style(status: &str) -> Style {
+    match status {
+        "done" => Style::default().fg(Color::DarkGray),
+        "active" => Style::default().fg(Color::Green),
+        "paused" => Style::default().fg(Color::Blue),
+        _ => Style::default().fg(Color::Yellow),
+    }
+}
+
+fn status_emoji(status: &str) -> &'static str {
+    match status {
+        "done" => "\u{2705} ",    // white check mark
+        "active" => "\u{1f7e2} ", // green circle
+        "paused" => "\u{23f8}\u{fe0f}  ",  // pause button
+        _ => "\u{26aa} ",         // white circle (open)
+    }
+}
+
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let (tree_area, error_area) = if app.error.is_some() {
         let chunks = Layout::default()
@@ -74,14 +92,8 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            let status_icon = row.icon();
-            let status_style = if row.done {
-                Style::default().fg(Color::DarkGray)
-            } else if row.has_assignee {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
+            let emoji = status_emoji(&row.status);
+            let style = status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
                 String::new()
@@ -98,7 +110,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::raw(collapse_indicator),
-                Span::styled(format!("{status_icon} "), status_style),
+                Span::styled(emoji, style),
                 Span::styled(
                     row.name.clone(),
                     Style::default().bold(),
