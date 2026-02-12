@@ -121,7 +121,7 @@ Install from the marketplace:
 
 ```
 /plugin marketplace add https://github.com/virgil-king/kbtz.git
-/plugin install kbtz-worker@kbtz
+/plugin install kbtz@kbtz
 ```
 
 ## Architecture

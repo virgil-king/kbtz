@@ -7,8 +7,8 @@
   },
   "plugins": [
     {
-      "name": "kbtz-worker",
-      "description": "Kbtz task worker agent that claims and works on tasks in a loop",
+      "name": "kbtz",
+      "description": "Plugin for the kbtz task tracker: worker agent and command reference",
       "version": "1.0.0",
       "author": {
         "name": "virgil"
