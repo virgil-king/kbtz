@@ -5,7 +5,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-env.sh && bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/session-env.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
           }
         ]
       }
@@ -26,6 +34,16 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh blocked && bash ${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
           }
         ]
       }
