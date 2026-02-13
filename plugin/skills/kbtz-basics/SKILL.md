@@ -9,16 +9,25 @@ description: This skill should be used when the user asks about "kbtz commands",
 
 | Command | Description |
 |---------|-------------|
-| `kbtz add <name> <description> [-p parent] [-c assignee]` | Create a task |
+| `kbtz add <name> <desc> [-p parent] [-c assignee] [--paused]` | Create a task |
 | `kbtz claim <name> <assignee>` | Claim a task |
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
+| `kbtz steal <name> <assignee>` | Atomically transfer task ownership (requires user approval) |
 | `kbtz release <name> <assignee>` | Release a claimed task |
 | `kbtz done <name>` | Mark task complete |
-| `kbtz list [--status S] [--json] [--tree] [--all]` | List tasks |
+| `kbtz reopen <name>` | Reopen a completed task |
+| `kbtz pause <name>` | Pause a task (remove from active work and default listing) |
+| `kbtz unpause <name>` | Unpause a paused task (return to open) |
+| `kbtz describe <name> <desc>` | Update a task's description |
+| `kbtz reparent <name> [-p parent]` | Change a task's parent (omit -p to make root-level) |
+| `kbtz rm <name> [--recursive]` | Remove a task (--recursive to remove children) |
+| `kbtz list [--status S] [--json] [--tree] [--all] [--root name]` | List tasks |
 | `kbtz show <name> [--json]` | Show task details and blockers |
-| `kbtz note <name> <content>` | Add a note to a task |
-| `kbtz notes <name>` | List notes for a task |
+| `kbtz note <name> [content]` | Add a note to a task (reads stdin if content omitted) |
+| `kbtz notes <name> [--json]` | List notes for a task |
 | `kbtz block <blocker> <blocked>` | Set dependency (blocker must finish before blocked can start) |
+| `kbtz unblock <blocker> <blocked>` | Remove a blocking relationship |
+| `kbtz watch [--root name]` | Launch interactive TUI |
 | `kbtz wait` | Block until database changes |
 
 ## Task Naming
@@ -50,6 +59,12 @@ Use `-c $KBTZ_SESSION_ID` to create and claim in one step:
 kbtz add my-subtask "Description" -p parent -c $KBTZ_SESSION_ID
 ```
 
+Use `--paused` to create a task that shouldn't be worked on yet:
+
+```bash
+kbtz add deferred-task "Not ready yet" --paused
+```
+
 ### Adding progress notes
 
 ```bash
@@ -69,4 +84,12 @@ kbtz block child-one child-two
 ```bash
 kbtz list --tree          # open tasks in tree form
 kbtz list --tree --all    # include completed tasks
+```
+
+### Transferring task ownership
+
+`steal` requires user approval before use. It atomically transfers an active task to a new assignee:
+
+```bash
+kbtz steal my-task $KBTZ_SESSION_ID
 ```
