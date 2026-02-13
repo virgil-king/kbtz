@@ -191,4 +191,7 @@ pub enum Command {
 
     /// Wait for database changes (blocks until a change occurs)
     Wait,
+
+    /// Execute commands from stdin atomically (all-or-nothing transaction)
+    Exec,
 }
