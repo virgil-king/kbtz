@@ -123,12 +123,20 @@ fn run_loop(
                             if let Some(task_name) = app.selected_name() {
                                 let task_name = task_name.to_string();
                                 let status = app.rows[app.cursor].status.as_str();
-                                if status == "done" {
-                                    app.error = Some("task is already done".into());
-                                } else if let Err(e) = ops::mark_done(conn, &task_name) {
-                                    app.error = Some(e.to_string());
-                                } else {
-                                    app.refresh(conn, root)?;
+                                match status {
+                                    "done" => {
+                                        app.error = Some("task is already done".into());
+                                    }
+                                    "active" => {
+                                        app.error = Some("task is assigned; release or pause it first".into());
+                                    }
+                                    _ => {
+                                        if let Err(e) = ops::mark_done(conn, &task_name) {
+                                            app.error = Some(e.to_string());
+                                        } else {
+                                            app.refresh(conn, root)?;
+                                        }
+                                    }
                                 }
                             }
                         }
