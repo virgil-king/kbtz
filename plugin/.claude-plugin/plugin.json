@@ -1,5 +1,5 @@
 {
-"name": "kbtz",
+  "name": "kbtz-tools",
   "version": "1.2.0",
   "description": "Plugin for the kbtz task tracker: worker agent and command reference",
   "author": {
