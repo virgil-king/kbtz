@@ -39,7 +39,7 @@ Rules:
 Use `claim-next` to atomically select and claim the best available task:
 
 ```bash
-TASK=$(kbtz claim-next $KBTZ_SESSION_ID --prefer "keywords from recent work")
+kbtz claim-next $KBTZ_SESSION_ID --prefer "keywords from recent work"
 ```
 
 `claim-next` automatically:
@@ -58,7 +58,7 @@ kbtz claim-next $KBTZ_SESSION_ID --prefer "frontend UI components"
 kbtz claim-next $KBTZ_SESSION_ID --prefer "$KBTZ_SESSION_ID"
 ```
 
-`claim-next` prints the task name to stdout on success, or exits with code 1 if no tasks are available.
+`claim-next` prints the claimed task details to stdout (same format as `kbtz show`) on success, or exits with code 1 if no tasks are available.
 
 ### Step 2: Wait for Tasks
 
@@ -185,7 +185,7 @@ kbtz add auth-middleware "Add JWT auth middleware to Express app. Validate token
 PREFER=""
 
 while true; do
-    TASK=$(kbtz claim-next "$KBTZ_SESSION_ID" --prefer "$PREFER" 2>/dev/null)
+    TASK=$(kbtz claim-next "$KBTZ_SESSION_ID" --prefer "$PREFER" 2>/dev/null | awk '/^Name:/{print $2}')
     if [ -z "$TASK" ]; then
         kbtz wait
         continue

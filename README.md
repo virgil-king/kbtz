@@ -65,7 +65,7 @@ Task names must match `[a-zA-Z0-9_-]+`.
 2. Number of other tasks this would unblock
 3. Age (oldest first)
 
-Prints the claimed task name to stdout on success, exits with code 1 if nothing is available.
+Prints the claimed task details to stdout (same format as `kbtz show`) on success, exits with code 1 if nothing is available.
 
 ### Dependencies
 
@@ -106,7 +106,7 @@ Multiple agents can safely share a single kbtz database. Claims use compare-and-
 ```bash
 while true; do
     kbtz wait
-    TASK=$(kbtz claim-next "$SESSION_ID" --prefer "$PREFER" 2>/dev/null) || continue
+    TASK=$(kbtz claim-next "$SESSION_ID" --prefer "$PREFER" 2>/dev/null | awk '/^Name:/{print $2}') || continue
     # ... work on $TASK ...
     kbtz done "$TASK"
     PREFER="$TASK"
