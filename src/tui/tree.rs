@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn status_style(status: &str) -> Style {
     match status {
-        "done" => Style::default().fg(Color::DarkGray),
+        "done" => Style::default().dim(),
         "active" => Style::default().fg(Color::Green),
         "paused" => Style::default().fg(Color::Blue),
         _ => Style::default().fg(Color::Yellow),
