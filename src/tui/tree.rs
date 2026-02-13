@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use super::app::{AddField, App, Mode};
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_notes {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -39,7 +39,7 @@ fn status_icon(status: &str) -> &'static str {
     }
 }
 
-fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
+fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     let (tree_area, error_area) = if app.error.is_some() {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -58,11 +58,13 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let area = tree_area;
+    // Store page size for Page Up/Down (inner height minus borders)
+    app.page_size = area.height.saturating_sub(2) as usize;
+
     let items: Vec<ListItem> = app
         .rows
         .iter()
-        .enumerate()
-        .map(|(i, row)| {
+        .map(|row| {
             let mut prefix = String::new();
 
             // Build tree lines
@@ -121,12 +123,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(desc),
             ]);
 
-            let item = ListItem::new(line);
-            if i == app.cursor {
-                item.style(Style::default().bg(Color::DarkGray))
-            } else {
-                item
-            }
+            ListItem::new(line)
         })
         .collect();
 
@@ -135,9 +132,10 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Tasks "),
-        );
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray));
 
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(list, area, &mut app.list_state);
 }
 
 fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
@@ -274,7 +272,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 }
 
 fn render_help(frame: &mut Frame) {
-    let area = centered_rect(50, 19, frame.area());
+    let area = centered_rect(50, 23, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -293,6 +291,14 @@ fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("k/Up    ", Style::default().fg(Color::Cyan)),
             Span::raw("Move up"),
+        ]),
+        Line::from(vec![
+            Span::styled("g/G     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Jump to top/bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("PgUp/Dn", Style::default().fg(Color::Cyan)),
+            Span::raw(" Page up/down"),
         ]),
         Line::from(vec![
             Span::styled("Space   ", Style::default().fg(Color::Cyan)),

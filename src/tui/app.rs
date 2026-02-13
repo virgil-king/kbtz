@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use ratatui::widgets::ListState;
 use rusqlite::Connection;
 
 use crate::model::{Note, Task};
@@ -95,6 +96,8 @@ impl AddForm {
 pub struct App {
     pub rows: Vec<TreeRow>,
     pub cursor: usize,
+    pub list_state: ListState,
+    pub page_size: usize,
     pub collapsed: HashSet<String>,
     pub show_notes: bool,
     pub notes: Vec<Note>,
@@ -108,6 +111,8 @@ impl App {
         let mut app = App {
             rows: Vec::new(),
             cursor: 0,
+            list_state: ListState::default().with_selected(Some(0)),
+            page_size: 20,
             collapsed: HashSet::new(),
             show_notes: false,
             notes: Vec::new(),
@@ -131,6 +136,7 @@ impl App {
         } else {
             self.cursor = 0;
         }
+        self.list_state.select(Some(self.cursor));
         // Refresh notes if panel is open
         if self.show_notes {
             self.load_notes(conn)?;
@@ -141,13 +147,39 @@ impl App {
     pub fn move_up(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
+            self.list_state.select(Some(self.cursor));
         }
     }
 
     pub fn move_down(&mut self) {
         if !self.rows.is_empty() && self.cursor < self.rows.len() - 1 {
             self.cursor += 1;
+            self.list_state.select(Some(self.cursor));
         }
+    }
+
+    pub fn move_to_top(&mut self) {
+        self.cursor = 0;
+        self.list_state.select(Some(self.cursor));
+    }
+
+    pub fn move_to_bottom(&mut self) {
+        if !self.rows.is_empty() {
+            self.cursor = self.rows.len() - 1;
+        }
+        self.list_state.select(Some(self.cursor));
+    }
+
+    pub fn page_up(&mut self, page_size: usize) {
+        self.cursor = self.cursor.saturating_sub(page_size);
+        self.list_state.select(Some(self.cursor));
+    }
+
+    pub fn page_down(&mut self, page_size: usize) {
+        if !self.rows.is_empty() {
+            self.cursor = (self.cursor + page_size).min(self.rows.len() - 1);
+        }
+        self.list_state.select(Some(self.cursor));
     }
 
     pub fn toggle_collapse(&mut self) {

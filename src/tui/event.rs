@@ -34,6 +34,22 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
             app.move_up();
             KeyAction::Continue
         }
+        KeyCode::Char('g') => {
+            app.move_to_top();
+            KeyAction::Continue
+        }
+        KeyCode::Char('G') => {
+            app.move_to_bottom();
+            KeyAction::Continue
+        }
+        KeyCode::PageUp => {
+            app.page_up(app.page_size);
+            KeyAction::Continue
+        }
+        KeyCode::PageDown => {
+            app.page_down(app.page_size);
+            KeyAction::Continue
+        }
         KeyCode::Char(' ') => {
             app.toggle_collapse();
             KeyAction::Refresh
