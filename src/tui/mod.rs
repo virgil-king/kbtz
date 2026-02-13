@@ -128,7 +128,7 @@ fn run_loop(
                                         app.error = Some("task is already done".into());
                                     }
                                     "active" => {
-                                        app.error = Some("task is assigned; release or pause it first".into());
+                                        app.error = Some("cannot close active task".into());
                                     }
                                     _ => {
                                         if let Err(e) = ops::mark_done(conn, &task_name) {
