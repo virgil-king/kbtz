@@ -213,6 +213,7 @@ impl App {
             &description,
             note.as_deref(),
             None,
+            false,
         ) {
             Ok(()) => {
                 self.add_form = None;

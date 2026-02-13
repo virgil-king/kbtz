@@ -70,11 +70,14 @@ fn run() -> Result<()> {
             desc,
             note,
             claim,
+            paused,
         } => {
             let conn = open_db(&db_path)?;
-            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref())?;
+            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref(), paused)?;
             eprintln!("Added task '{name}'");
-            if let Some(assignee) = &claim {
+            if paused {
+                eprintln!("Task '{name}' created in paused state");
+            } else if let Some(assignee) = &claim {
                 eprintln!("Claimed '{name}' for '{assignee}'");
             }
         }
@@ -97,6 +100,12 @@ fn run() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Command::Steal { name, assignee } => {
+            let conn = open_db(&db_path)?;
+            let prev = ops::steal_task(&conn, &name, &assignee)?;
+            eprintln!("Stole '{name}' from '{prev}' to '{assignee}'");
         }
 
         Command::Release { name, assignee } => {
