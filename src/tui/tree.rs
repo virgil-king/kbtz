@@ -1,6 +1,5 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-
 use super::app::{AddField, App, Mode};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -31,12 +30,12 @@ fn status_style(status: &str) -> Style {
     }
 }
 
-fn status_emoji(status: &str) -> &'static str {
+fn status_icon(status: &str) -> &'static str {
     match status {
-        "done" => "\u{2705} ",    // white check mark
-        "active" => "\u{1f7e2} ", // green circle
-        "paused" => "\u{23f8}\u{fe0f}  ",  // pause button
-        _ => "\u{26aa} ",         // white circle (open)
+        "done" => "\u{2713} ",  // ✓
+        "active" => "* ",
+        "paused" => "~ ",
+        _ => "\u{b7} ",         // ·
     }
 }
 
@@ -92,7 +91,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            let emoji = status_emoji(&row.status);
+            let icon = status_icon(&row.status);
             let style = status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
@@ -110,7 +109,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::raw(collapse_indicator),
-                Span::styled(emoji, style),
+                Span::styled(icon, style),
                 Span::styled(
                     row.name.clone(),
                     Style::default().bold(),
