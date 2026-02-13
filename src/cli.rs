@@ -28,6 +28,9 @@ pub enum Command {
         /// Create already claimed by this assignee
         #[arg(short, long)]
         claim: Option<String>,
+        /// Create in paused state (mutually exclusive with --claim)
+        #[arg(long)]
+        paused: bool,
     },
 
     /// Claim a task (set assignee)
@@ -46,6 +49,14 @@ pub enum Command {
         /// Soft preference text for ranking (matched against name, description, and notes)
         #[arg(long)]
         prefer: Option<String>,
+    },
+
+    /// Atomically transfer task ownership
+    Steal {
+        /// Task name
+        name: String,
+        /// New assignee ID
+        assignee: String,
     },
 
     /// Release a task (clear assignee if it matches)
