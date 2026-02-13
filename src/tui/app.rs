@@ -11,26 +11,12 @@ use crate::validate::validate_name;
 #[derive(Debug, Clone)]
 pub struct TreeRow {
     pub name: String,
-    pub done: bool,
-    pub has_assignee: bool,
+    pub status: String,
     pub description: String,
     pub depth: usize,
     pub has_children: bool,
     pub is_last_at_depth: Vec<bool>,
     pub blocked_by: Vec<String>,
-}
-
-impl TreeRow {
-    /// Returns display icon: x=done, *=assigned (active), .=open (unassigned)
-    pub fn icon(&self) -> &'static str {
-        if self.done {
-            "x"
-        } else if self.has_assignee {
-            "*"
-        } else {
-            "."
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,8 +287,7 @@ fn flatten_node(
 
     rows.push(TreeRow {
         name: task.name.clone(),
-        done: task.done,
-        has_assignee: task.assignee.is_some(),
+        status: task.status.clone(),
         description: task.description.clone(),
         depth,
         has_children,

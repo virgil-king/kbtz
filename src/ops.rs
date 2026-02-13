@@ -20,6 +20,22 @@ fn require_task(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
+fn read_task_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        parent: row.get(2)?,
+        description: row.get(3)?,
+        status: row.get(4)?,
+        assignee: row.get(5)?,
+        status_changed_at: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+const TASK_COLUMNS: &str = "id, name, parent, description, status, assignee, status_changed_at, created_at, updated_at";
+
 pub fn add_task(
     conn: &Connection,
     name: &str,
@@ -35,9 +51,10 @@ pub fn add_task(
     if let Some(p) = parent {
         require_task(conn, p)?;
     }
+    let status = if claim.is_some() { "active" } else { "open" };
     conn.execute(
-        "INSERT INTO tasks (name, parent, description, assignee, assigned_at) VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') END)",
-        rusqlite::params![name, parent, description, claim],
+        "INSERT INTO tasks (name, parent, description, status, assignee, status_changed_at) VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5 IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') END)",
+        rusqlite::params![name, parent, description, status, claim],
     )?;
     if let Some(content) = note {
         conn.execute(
@@ -51,18 +68,32 @@ pub fn add_task(
 pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
     let rows = conn.execute(
-        "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND (assignee IS NULL OR assignee = ?1)",
+        "UPDATE tasks SET status = 'active', assignee = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'open'",
         rusqlite::params![assignee, name],
     )?;
     if rows == 0 {
-        let current: Option<String> = conn.query_row(
-            "SELECT assignee FROM tasks WHERE name = ?1",
-            [name],
-            |row| row.get(0),
+        // Also allow idempotent re-claim by same assignee
+        let rows = conn.execute(
+            "UPDATE tasks SET status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'active' AND assignee = ?1",
+            rusqlite::params![assignee, name],
         )?;
-        match current {
-            Some(a) => bail!("task '{name}' is already claimed by '{a}'"),
-            None => bail!("task '{name}' was concurrently released; retry"),
+        if rows > 0 {
+            return Ok(());
+        }
+
+        let (status, current_assignee): (String, Option<String>) = conn.query_row(
+            "SELECT status, assignee FROM tasks WHERE name = ?1",
+            [name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        match status.as_str() {
+            "active" => {
+                let a = current_assignee.unwrap();
+                bail!("task '{name}' is already claimed by '{a}'");
+            }
+            "paused" => bail!("task '{name}' is paused"),
+            "done" => bail!("task '{name}' is done"),
+            _ => bail!("task '{name}' could not be claimed"),
         }
     }
     Ok(())
@@ -89,25 +120,25 @@ SELECT t.name FROM tasks t
 LEFT JOIN (
     SELECT rowid, rank FROM tasks_fts
     WHERE tasks_fts MATCH ?1
-      AND rowid IN (SELECT id FROM tasks WHERE done = 0 AND assignee IS NULL)
+      AND rowid IN (SELECT id FROM tasks WHERE status = 'open')
 ) tfts ON tfts.rowid = t.id
 LEFT JOIN (
     SELECT n.task, MIN(nfts.rank) as best_rank
     FROM notes_fts nfts
     JOIN notes n ON n.id = nfts.rowid
-    JOIN tasks t2 ON t2.name = n.task AND t2.done = 0 AND t2.assignee IS NULL
+    JOIN tasks t2 ON t2.name = n.task AND t2.status = 'open'
     WHERE notes_fts MATCH ?1
     GROUP BY n.task
 ) nfts ON nfts.task = t.name
 LEFT JOIN (
     SELECT td.blocker, COUNT(*) as cnt FROM task_deps td
-    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.done = 0
+    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.status NOT IN ('done')
     GROUP BY td.blocker
 ) uc ON uc.blocker = t.name
-WHERE t.done = 0 AND t.assignee IS NULL
+WHERE t.status = 'open'
   AND NOT EXISTS (
       SELECT 1 FROM task_deps td2
-      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.done = 0
+      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.status NOT IN ('done')
       WHERE td2.blocked = t.name
   )
 ORDER BY
@@ -122,13 +153,13 @@ const CLAIM_NEXT_NO_PREFER: &str = "
 SELECT t.name FROM tasks t
 LEFT JOIN (
     SELECT td.blocker, COUNT(*) as cnt FROM task_deps td
-    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.done = 0
+    INNER JOIN tasks bt ON bt.name = td.blocked AND bt.status NOT IN ('done')
     GROUP BY td.blocker
 ) uc ON uc.blocker = t.name
-WHERE t.done = 0 AND t.assignee IS NULL
+WHERE t.status = 'open'
   AND NOT EXISTS (
       SELECT 1 FROM task_deps td2
-      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.done = 0
+      INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.status NOT IN ('done')
       WHERE td2.blocked = t.name
   )
 ORDER BY
@@ -161,7 +192,7 @@ pub fn claim_next_task(
         };
 
         let rows = conn.execute(
-            "UPDATE tasks SET assignee = ?1, assigned_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND assignee IS NULL",
+            "UPDATE tasks SET status = 'active', assignee = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'open'",
             rusqlite::params![assignee, name],
         )?;
 
@@ -187,28 +218,28 @@ pub fn claim_next_task(
 
 pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
-    let current_assignee: Option<String> = conn.query_row(
-        "SELECT assignee FROM tasks WHERE name = ?1",
+    let (status, current_assignee): (String, Option<String>) = conn.query_row(
+        "SELECT status, assignee FROM tasks WHERE name = ?1",
         [name],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    match current_assignee {
-        Some(ref a) if a == assignee => {
+    match (status.as_str(), current_assignee) {
+        ("active", Some(ref a)) if a == assignee => {
             conn.execute(
-                "UPDATE tasks SET assignee = NULL, assigned_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+                "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
                 [name],
             )?;
             Ok(())
         }
-        Some(a) => bail!("task '{name}' is assigned to '{a}', not '{assignee}'"),
-        None => bail!("task '{name}' is not assigned"),
+        ("active", Some(a)) => bail!("task '{name}' is assigned to '{a}', not '{assignee}'"),
+        _ => bail!("task '{name}' is not assigned"),
     }
 }
 
 pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
     conn.execute(
-        "UPDATE tasks SET done = 1, assignee = NULL, assigned_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        "UPDATE tasks SET status = 'done', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
         [name],
     )?;
     Ok(())
@@ -217,7 +248,44 @@ pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
 pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
     conn.execute(
-        "UPDATE tasks SET done = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        [name],
+    )?;
+    Ok(())
+}
+
+pub fn pause_task(conn: &Connection, name: &str) -> Result<()> {
+    require_task(conn, name)?;
+    let status: String = conn.query_row(
+        "SELECT status FROM tasks WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    if status == "done" {
+        bail!("task '{name}' is done");
+    }
+    if status == "paused" {
+        bail!("task '{name}' is already paused");
+    }
+    conn.execute(
+        "UPDATE tasks SET status = 'paused', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        [name],
+    )?;
+    Ok(())
+}
+
+pub fn unpause_task(conn: &Connection, name: &str) -> Result<()> {
+    require_task(conn, name)?;
+    let status: String = conn.query_row(
+        "SELECT status FROM tasks WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    if status != "paused" {
+        bail!("task '{name}' is not paused");
+    }
+    conn.execute(
+        "UPDATE tasks SET status = 'open', status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
         [name],
     )?;
     Ok(())
@@ -289,32 +357,18 @@ fn collect_descendants(conn: &Connection, name: &str) -> Result<Vec<String>> {
 
 pub fn get_task(conn: &Connection, name: &str) -> Result<Task> {
     require_task(conn, name)?;
-    let task = conn.query_row(
-        "SELECT id, name, parent, description, done, assignee, assigned_at, created_at, updated_at FROM tasks WHERE name = ?1",
-        [name],
-        |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                parent: row.get(2)?,
-                description: row.get(3)?,
-                done: row.get::<_, i64>(4)? != 0,
-                assignee: row.get(5)?,
-                assigned_at: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        },
-    )?;
+    let query = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE name = ?1");
+    let task = conn.query_row(&query, [name], read_task_row)?;
     Ok(task)
 }
 
 /// Status filter for list_tasks
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusFilter {
-    Open,   // not done, no assignee
-    Active, // not done, has assignee
-    Done,   // done
+    Open,
+    Active,
+    Paused,
+    Done,
 }
 
 impl StatusFilter {
@@ -322,16 +376,18 @@ impl StatusFilter {
         match s {
             "open" => Ok(Self::Open),
             "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
             "done" => Ok(Self::Done),
-            _ => bail!("invalid status '{s}': must be open, active, or done"),
+            _ => bail!("invalid status '{s}': must be open, active, paused, or done"),
         }
     }
 
     fn matches(&self, task: &Task) -> bool {
         match self {
-            Self::Open => !task.done && task.assignee.is_none(),
-            Self::Active => !task.done && task.assignee.is_some(),
-            Self::Done => task.done,
+            Self::Open => task.status == "open",
+            Self::Active => task.status == "active",
+            Self::Paused => task.status == "paused",
+            Self::Done => task.status == "done",
         }
     }
 }
@@ -356,22 +412,9 @@ pub fn list_tasks(
             tasks.push(get_task(conn, d)?);
         }
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, parent, description, done, assignee, assigned_at, created_at, updated_at FROM tasks ORDER BY id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                parent: row.get(2)?,
-                description: row.get(3)?,
-                done: row.get::<_, i64>(4)? != 0,
-                assignee: row.get(5)?,
-                assigned_at: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?;
+        let query = format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY id");
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map([], read_task_row)?;
         for row in rows {
             tasks.push(row?);
         }
@@ -382,8 +425,8 @@ pub fn list_tasks(
         if let Some(s) = status {
             tasks.retain(|t| s.matches(t));
         } else {
-            // Default: exclude done tasks
-            tasks.retain(|t| !t.done);
+            // Default: exclude done and paused tasks
+            tasks.retain(|t| t.status != "done" && t.status != "paused");
         }
     }
 
@@ -473,7 +516,7 @@ mod tests {
         let task = get_task(&conn, "test-task").unwrap();
         assert_eq!(task.name, "test-task");
         assert_eq!(task.description, "A test");
-        assert!(!task.done);
+        assert_eq!(task.status, "open");
         assert!(task.assignee.is_none());
         assert!(task.parent.is_none());
     }
@@ -513,7 +556,8 @@ mod tests {
         claim_task(&conn, "t", "agent-123").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.assignee.as_deref(), Some("agent-123"));
-        assert!(task.assigned_at.is_some());
+        assert_eq!(task.status, "active");
+        assert!(task.status_changed_at.is_some());
 
         // Release with wrong assignee fails
         assert!(release_task(&conn, "t", "wrong-agent").is_err());
@@ -522,7 +566,7 @@ mod tests {
         release_task(&conn, "t", "agent-123").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert!(task.assignee.is_none());
-        assert!(task.assigned_at.is_none());
+        assert_eq!(task.status, "open");
     }
 
     #[test]
@@ -534,13 +578,13 @@ mod tests {
         // Mark done clears assignee
         mark_done(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
-        assert!(task.done);
+        assert_eq!(task.status, "done");
         assert!(task.assignee.is_none());
 
         // Reopen
         reopen_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
-        assert!(!task.done);
+        assert_eq!(task.status, "open");
     }
 
     #[test]
@@ -837,7 +881,7 @@ mod tests {
 
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.assignee.as_deref(), Some("my-agent"));
-        assert!(task.assigned_at.is_some());
+        assert!(task.status_changed_at.is_some());
     }
 
     #[test]
@@ -846,8 +890,8 @@ mod tests {
         add_task(&conn, "t", None, "work", None, Some("agent-1")).unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.assignee.as_deref(), Some("agent-1"));
-        assert!(task.assigned_at.is_some());
-        assert!(!task.done);
+        assert!(task.status_changed_at.is_some());
+        assert_eq!(task.status, "active");
     }
 
     #[test]
@@ -856,6 +900,107 @@ mod tests {
         add_task(&conn, "t", None, "work", None, None).unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert!(task.assignee.is_none());
-        assert!(task.assigned_at.is_none());
+        assert!(task.status_changed_at.is_none());
+    }
+
+    #[test]
+    fn pause_open_task() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.status, "paused");
+        assert!(task.assignee.is_none());
+        assert!(task.status_changed_at.is_some());
+    }
+
+    #[test]
+    fn pause_active_task() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        claim_task(&conn, "t", "agent").unwrap();
+        pause_task(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.status, "paused");
+        assert!(task.assignee.is_none());
+    }
+
+    #[test]
+    fn pause_done_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        mark_done(&conn, "t").unwrap();
+        let err = pause_task(&conn, "t").unwrap_err();
+        assert!(err.to_string().contains("is done"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn pause_already_paused_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let err = pause_task(&conn, "t").unwrap_err();
+        assert!(err.to_string().contains("already paused"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn unpause_paused_task() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        pause_task(&conn, "t").unwrap();
+        super::unpause_task(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn unpause_non_paused_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        let err = super::unpause_task(&conn, "t").unwrap_err();
+        assert!(err.to_string().contains("not paused"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn claim_paused_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let err = claim_task(&conn, "t", "agent").unwrap_err();
+        assert!(err.to_string().contains("paused"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn claim_next_skips_paused() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "paused-task", None, "", None, None).unwrap();
+        pause_task(&conn, "paused-task").unwrap();
+        add_task(&conn, "available", None, "", None, None).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        assert_eq!(picked.as_deref(), Some("available"));
+    }
+
+    #[test]
+    fn list_excludes_paused_by_default() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "open-task", None, "", None, None).unwrap();
+        add_task(&conn, "paused-task", None, "", None, None).unwrap();
+        pause_task(&conn, "paused-task").unwrap();
+        let tasks = list_tasks(&conn, None, false, None).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "open-task");
+    }
+
+    #[test]
+    fn list_filter_paused() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "open-task", None, "", None, None).unwrap();
+        add_task(&conn, "paused-task", None, "", None, None).unwrap();
+        pause_task(&conn, "paused-task").unwrap();
+
+        let paused = list_tasks(&conn, Some(StatusFilter::Paused), false, None).unwrap();
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].name, "paused-task");
     }
 }

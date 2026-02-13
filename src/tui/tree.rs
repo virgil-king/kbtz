@@ -1,6 +1,5 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-
 use super::app::{AddField, App, Mode};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -19,6 +18,24 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::AddTask => render_add_dialog(frame, app),
         Mode::Help => render_help(frame),
         Mode::Normal => {}
+    }
+}
+
+fn status_style(status: &str) -> Style {
+    match status {
+        "done" => Style::default().fg(Color::DarkGray),
+        "active" => Style::default().fg(Color::Green),
+        "paused" => Style::default().fg(Color::Blue),
+        _ => Style::default().fg(Color::Yellow),
+    }
+}
+
+fn status_icon(status: &str) -> &'static str {
+    match status {
+        "done" => "\u{2713} ",  // ✓
+        "active" => "* ",
+        "paused" => "~ ",
+        _ => "\u{b7} ",         // ·
     }
 }
 
@@ -74,14 +91,8 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            let status_icon = row.icon();
-            let status_style = if row.done {
-                Style::default().fg(Color::DarkGray)
-            } else if row.has_assignee {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
+            let icon = status_icon(&row.status);
+            let style = status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
                 String::new()
@@ -98,7 +109,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::raw(collapse_indicator),
-                Span::styled(format!("{status_icon} "), status_style),
+                Span::styled(icon, style),
                 Span::styled(
                     row.name.clone(),
                     Style::default().bold(),

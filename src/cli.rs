@@ -68,6 +68,18 @@ pub enum Command {
         name: String,
     },
 
+    /// Pause a task (remove from active work and default listing)
+    Pause {
+        /// Task name
+        name: String,
+    },
+
+    /// Unpause a paused task (return to open)
+    Unpause {
+        /// Task name
+        name: String,
+    },
+
     /// Change a task's parent
     Reparent {
         /// Task name
@@ -108,10 +120,10 @@ pub enum Command {
         /// Display as tree
         #[arg(long)]
         tree: bool,
-        /// Filter by status (open, active, done)
+        /// Filter by status (open, active, paused, done)
         #[arg(long)]
         status: Option<String>,
-        /// Show all tasks including done
+        /// Show all tasks including done and paused
         #[arg(long)]
         all: bool,
         /// Root task for subtree

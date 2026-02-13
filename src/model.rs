@@ -6,34 +6,27 @@ pub struct Task {
     pub name: String,
     pub parent: Option<String>,
     pub description: String,
-    pub done: bool,
+    pub status: String,
     pub assignee: Option<String>,
-    pub assigned_at: Option<String>,
+    pub status_changed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl Task {
-    /// Returns display icon: x=done, *=assigned (active), .=open (unassigned)
+    /// Returns display icon: x=done, *=active, ~=paused, .=open
     pub fn icon(&self) -> &'static str {
-        if self.done {
-            "x"
-        } else if self.assignee.is_some() {
-            "*"
-        } else {
-            "."
+        match self.status.as_str() {
+            "done" => "x",
+            "active" => "*",
+            "paused" => "~",
+            _ => ".",
         }
     }
 
     /// Returns status string for display
-    pub fn status_str(&self) -> &'static str {
-        if self.done {
-            "done"
-        } else if self.assignee.is_some() {
-            "active"
-        } else {
-            "open"
-        }
+    pub fn status_str(&self) -> &str {
+        &self.status
     }
 }
 
