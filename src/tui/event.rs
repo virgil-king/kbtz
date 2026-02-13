@@ -9,6 +9,7 @@ pub enum KeyAction {
     Refresh,
     OpenEditor,
     AddNote,
+    TogglePause,
     Continue,
 }
 
@@ -50,6 +51,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyAction::Continue
         }
         KeyCode::Char('N') => KeyAction::AddNote,
+        KeyCode::Char('p') => KeyAction::TogglePause,
         KeyCode::Char('?') => {
             app.toggle_help();
             KeyAction::Continue

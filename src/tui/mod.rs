@@ -100,6 +100,25 @@ fn run_loop(
                                 }
                             }
                         }
+                        KeyAction::TogglePause => {
+                            if let Some(task_name) = app.selected_name() {
+                                let task_name = task_name.to_string();
+                                let status = app.rows[app.cursor].status.as_str();
+                                let result = match status {
+                                    "paused" => ops::unpause_task(conn, &task_name),
+                                    "open" => ops::pause_task(conn, &task_name),
+                                    _ => {
+                                        app.error = Some(format!("cannot pause {status} task"));
+                                        Ok(())
+                                    }
+                                };
+                                if let Err(e) = result {
+                                    app.error = Some(e.to_string());
+                                } else {
+                                    app.refresh(conn, root)?;
+                                }
+                            }
+                        }
                         KeyAction::Refresh => {
                             app.refresh(conn, root)?;
                         }
