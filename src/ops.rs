@@ -183,7 +183,9 @@ pub fn claim_next_task(
     assignee: &str,
     prefer: Option<&str>,
 ) -> Result<Option<String>> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
+    // Use SAVEPOINT instead of BEGIN IMMEDIATE so this works both standalone
+    // and nested inside an existing transaction (e.g. `exec` batch).
+    conn.execute_batch("SAVEPOINT claim_next")?;
 
     let result = (|| -> Result<Option<String>> {
         let fts_query = prefer.and_then(sanitize_fts_query);
@@ -216,11 +218,12 @@ pub fn claim_next_task(
 
     match result {
         Ok(v) => {
-            conn.execute_batch("COMMIT")?;
+            conn.execute_batch("RELEASE claim_next")?;
             Ok(v)
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("ROLLBACK TO claim_next");
+            let _ = conn.execute_batch("RELEASE claim_next");
             Err(e)
         }
     }

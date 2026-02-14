@@ -51,19 +51,10 @@ fn open_db(db_path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-    let db_path = resolve_db_path(cli.db)?;
-    ensure_db_dir(&db_path)?;
-
-    match cli.command {
+/// Dispatch a single parsed command against an open database connection.
+/// Used both for direct invocations and within `exec` batches.
+fn dispatch(conn: &Connection, command: Command) -> Result<()> {
+    match command {
         Command::Add {
             name,
             parent,
@@ -72,7 +63,6 @@ fn run() -> Result<()> {
             claim,
             paused,
         } => {
-            let conn = open_db(&db_path)?;
             ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref(), paused)?;
             eprintln!("Added task '{name}'");
             if paused {
@@ -83,13 +73,11 @@ fn run() -> Result<()> {
         }
 
         Command::Claim { name, assignee } => {
-            let conn = open_db(&db_path)?;
             ops::claim_task(&conn, &name, &assignee)?;
             eprintln!("Claimed '{name}' for '{assignee}'");
         }
 
         Command::ClaimNext { assignee, prefer } => {
-            let conn = open_db(&db_path)?;
             match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
                 Some(name) => {
                     let task = ops::get_task(&conn, &name)?;
@@ -103,50 +91,42 @@ fn run() -> Result<()> {
                     eprintln!("Claimed '{name}' for '{assignee}'");
                 }
                 None => {
-                    eprintln!("No tasks available");
-                    std::process::exit(1);
+                    bail!("no tasks available");
                 }
             }
         }
 
         Command::Steal { name, assignee } => {
-            let conn = open_db(&db_path)?;
             let prev = ops::steal_task(&conn, &name, &assignee)?;
             eprintln!("Stole '{name}' from '{prev}' to '{assignee}'");
         }
 
         Command::Release { name, assignee } => {
-            let conn = open_db(&db_path)?;
             ops::release_task(&conn, &name, &assignee)?;
             eprintln!("Released '{name}'");
         }
 
         Command::Done { name } => {
-            let conn = open_db(&db_path)?;
             ops::mark_done(&conn, &name)?;
             eprintln!("Marked '{name}' as done");
         }
 
         Command::Reopen { name } => {
-            let conn = open_db(&db_path)?;
             ops::reopen_task(&conn, &name)?;
             eprintln!("Reopened '{name}'");
         }
 
         Command::Pause { name } => {
-            let conn = open_db(&db_path)?;
             ops::pause_task(&conn, &name)?;
             eprintln!("Paused '{name}'");
         }
 
         Command::Unpause { name } => {
-            let conn = open_db(&db_path)?;
             ops::unpause_task(&conn, &name)?;
             eprintln!("Unpaused '{name}'");
         }
 
         Command::Reparent { name, parent } => {
-            let conn = open_db(&db_path)?;
             ops::reparent_task(&conn, &name, parent.as_deref())?;
             match parent.as_deref() {
                 Some(p) => eprintln!("Moved '{name}' under '{p}'"),
@@ -155,19 +135,16 @@ fn run() -> Result<()> {
         }
 
         Command::Describe { name, desc } => {
-            let conn = open_db(&db_path)?;
             ops::update_description(&conn, &name, &desc)?;
             eprintln!("Updated description for '{name}'");
         }
 
         Command::Rm { name, recursive } => {
-            let conn = open_db(&db_path)?;
             ops::remove_task(&conn, &name, recursive)?;
             eprintln!("Removed task '{name}'");
         }
 
         Command::Show { name, json } => {
-            let conn = open_db(&db_path)?;
             let task = ops::get_task(&conn, &name)?;
             let notes = ops::list_notes(&conn, &name)?;
             let blockers = ops::get_blockers(&conn, &name)?;
@@ -195,7 +172,6 @@ fn run() -> Result<()> {
             root,
             json,
         } => {
-            let conn = open_db(&db_path)?;
             let status = status.map(|s| StatusFilter::parse(&s)).transpose()?;
             let tasks = ops::list_tasks(&conn, status, all, root.as_deref())?;
             if json {
@@ -205,6 +181,119 @@ fn run() -> Result<()> {
             } else {
                 print!("{}", output::format_task_list(&tasks));
             }
+        }
+
+        Command::Note { name, content } => {
+            let content = match content {
+                Some(c) => c,
+                None => bail!("note content must be provided explicitly (stdin is not available inside exec)"),
+            };
+            ops::add_note(&conn, &name, &content)?;
+            eprintln!("Added note to '{name}'");
+        }
+
+        Command::Notes { name, json } => {
+            let notes = ops::list_notes(&conn, &name)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&notes)?);
+            } else {
+                print!("{}", output::format_notes(&notes));
+            }
+        }
+
+        Command::Block { blocker, blocked } => {
+            ops::add_block(&conn, &blocker, &blocked)?;
+            eprintln!("'{blocker}' now blocks '{blocked}'");
+        }
+
+        Command::Unblock { blocker, blocked } => {
+            ops::remove_block(&conn, &blocker, &blocked)?;
+            eprintln!("'{blocker}' no longer blocks '{blocked}'");
+        }
+
+        Command::Watch { .. } => bail!("watch cannot be used inside exec"),
+        Command::Wait => bail!("wait cannot be used inside exec"),
+        Command::Exec => bail!("exec cannot be nested"),
+    }
+
+    Ok(())
+}
+
+fn parse_exec_line(line: &str) -> Result<Command> {
+    let tokens = shlex::split(line)
+        .with_context(|| format!("invalid shell quoting: {line}"))?;
+    // Prepend program name so Clap is happy
+    let mut args = vec!["kbtz".to_string()];
+    args.extend(tokens);
+    let cli = Cli::try_parse_from(&args)
+        .with_context(|| format!("failed to parse: {line}"))?;
+    Ok(cli.command)
+}
+
+fn run_exec(conn: &Connection, input: &str) -> Result<()> {
+    // Parse all lines first, before starting the transaction
+    let mut commands = Vec::new();
+    for (lineno, raw) in input.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let command = parse_exec_line(line)
+            .with_context(|| format!("line {}", lineno + 1))?;
+        // Reject commands that don't belong in a batch
+        match &command {
+            Command::Exec => bail!("line {}: exec cannot be nested", lineno + 1),
+            Command::Watch { .. } => bail!("line {}: watch cannot be used inside exec", lineno + 1),
+            Command::Wait => bail!("line {}: wait cannot be used inside exec", lineno + 1),
+            _ => {}
+        }
+        commands.push((lineno + 1, line.to_string(), command));
+    }
+
+    if commands.is_empty() {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+
+    let result = (|| -> Result<()> {
+        for (lineno, line, command) in commands {
+            dispatch(conn, command)
+                .with_context(|| format!("line {lineno}: {line}"))?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let db_path = resolve_db_path(cli.db)?;
+    ensure_db_dir(&db_path)?;
+
+    match cli.command {
+        Command::Exec => {
+            let conn = open_db(&db_path)?;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            run_exec(&conn, &input)?;
         }
 
         Command::Note { name, content } => {
@@ -224,28 +313,6 @@ fn run() -> Result<()> {
             eprintln!("Added note to '{name}'");
         }
 
-        Command::Notes { name, json } => {
-            let conn = open_db(&db_path)?;
-            let notes = ops::list_notes(&conn, &name)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&notes)?);
-            } else {
-                print!("{}", output::format_notes(&notes));
-            }
-        }
-
-        Command::Block { blocker, blocked } => {
-            let conn = open_db(&db_path)?;
-            ops::add_block(&conn, &blocker, &blocked)?;
-            eprintln!("'{blocker}' now blocks '{blocked}'");
-        }
-
-        Command::Unblock { blocker, blocked } => {
-            let conn = open_db(&db_path)?;
-            ops::remove_block(&conn, &blocker, &blocked)?;
-            eprintln!("'{blocker}' no longer blocks '{blocked}'");
-        }
-
         Command::Watch {
             root,
             poll_interval,
@@ -261,7 +328,184 @@ fn run() -> Result<()> {
             // Block until a change event
             watch::wait_for_change(&rx, std::time::Duration::MAX);
         }
+
+        Command::ClaimNext { assignee, prefer } => {
+            let conn = open_db(&db_path)?;
+            match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
+                Some(name) => {
+                    let task = ops::get_task(&conn, &name)?;
+                    let notes = ops::list_notes(&conn, &name)?;
+                    let blockers = ops::get_blockers(&conn, &name)?;
+                    let dependents = ops::get_dependents(&conn, &name)?;
+                    print!(
+                        "{}",
+                        output::format_task_detail(&task, &notes, &blockers, &dependents)
+                    );
+                    eprintln!("Claimed '{name}' for '{assignee}'");
+                }
+                None => {
+                    eprintln!("No tasks available");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        other => {
+            let conn = open_db(&db_path)?;
+            dispatch(&conn, other)?;
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        db::open_memory().unwrap()
+    }
+
+    #[test]
+    fn exec_batch_commits_all() {
+        let conn = test_conn();
+        let input = r#"
+add task-a "First task"
+add task-b "Second task" -p task-a
+block task-a task-b
+note task-a "a note on task-a"
+"#;
+        run_exec(&conn, input).unwrap();
+
+        // All operations should be visible
+        let a = ops::get_task(&conn, "task-a").unwrap();
+        assert_eq!(a.description, "First task");
+        let b = ops::get_task(&conn, "task-b").unwrap();
+        assert_eq!(b.parent.as_deref(), Some("task-a"));
+        let blockers = ops::get_blockers(&conn, "task-b").unwrap();
+        assert_eq!(blockers, vec!["task-a"]);
+        let notes = ops::list_notes(&conn, "task-a").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "a note on task-a");
+    }
+
+    #[test]
+    fn exec_batch_rolls_back_on_failure() {
+        let conn = test_conn();
+        // Second line refers to nonexistent parent — should fail and roll back the first add
+        let input = r#"
+add task-ok "This one is fine"
+add task-bad "This will fail" -p nonexistent
+"#;
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+
+        // task-ok should NOT exist because the batch was rolled back
+        assert!(ops::get_task(&conn, "task-ok").is_err());
+    }
+
+    #[test]
+    fn exec_skips_blanks_and_comments() {
+        let conn = test_conn();
+        let input = r#"
+# This is a comment
+add task-x "Created"
+
+# Another comment
+
+done task-x
+"#;
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "task-x").unwrap();
+        assert_eq!(task.status, "done");
+    }
+
+    #[test]
+    fn exec_empty_input_is_noop() {
+        let conn = test_conn();
+        run_exec(&conn, "").unwrap();
+        run_exec(&conn, "  \n  \n# only comments\n").unwrap();
+    }
+
+    #[test]
+    fn exec_rejects_nested_exec() {
+        let conn = test_conn();
+        let input = "exec\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("nested"),
+            "expected nested exec error"
+        );
+    }
+
+    #[test]
+    fn exec_rejects_watch() {
+        let conn = test_conn();
+        let input = "watch\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("watch"));
+    }
+
+    #[test]
+    fn exec_rejects_wait() {
+        let conn = test_conn();
+        let input = "wait\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("wait"));
+    }
+
+    #[test]
+    fn exec_parse_error_reports_line() {
+        let conn = test_conn();
+        let input = "add task-a \"good\"\nnot-a-command\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+    }
+
+    #[test]
+    fn exec_quoted_args() {
+        let conn = test_conn();
+        let input = "add my-task \"a description with spaces\"\n";
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "my-task").unwrap();
+        assert_eq!(task.description, "a description with spaces");
+    }
+
+    #[test]
+    fn exec_claim_next_inside_transaction() {
+        let conn = test_conn();
+        let input = r#"
+add task-1 "First"
+add task-2 "Second"
+claim-next agent-1
+"#;
+        run_exec(&conn, input).unwrap();
+        // One of the tasks should be claimed
+        let t1 = ops::get_task(&conn, "task-1").unwrap();
+        let t2 = ops::get_task(&conn, "task-2").unwrap();
+        let claimed_count = [&t1, &t2]
+            .iter()
+            .filter(|t| t.status == "active")
+            .count();
+        assert_eq!(claimed_count, 1);
+    }
+
+    #[test]
+    fn exec_runtime_error_reports_line() {
+        let conn = test_conn();
+        // done on a nonexistent task should fail at runtime
+        let input = "add real-task \"exists\"\ndone nonexistent\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+        // First task should be rolled back
+        assert!(ops::get_task(&conn, "real-task").is_err());
+    }
 }
