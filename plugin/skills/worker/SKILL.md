@@ -110,6 +110,18 @@ Before closing a task, release all resources acquired under it: merge or push br
 kbtz done <task-name>
 ```
 
+**PR merge gate**: For tasks that produce a pull request, the task is NOT
+complete until the PR is merged. After opening a PR:
+
+1. Add a note with the PR URL: `kbtz note <task-name> "PR: <url>"`
+2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
+   every 60 seconds) until the state is "MERGED".
+3. Only then mark the task done.
+
+Do NOT mark the task done after merely opening a PR. Keep the task active
+and wait for the merge. If the PR is closed without merging, add a note
+explaining why.
+
 If your session is ending before the task is finished, clean up resources and release the task so another worker can pick it up:
 
 ```bash
