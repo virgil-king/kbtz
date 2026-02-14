@@ -380,6 +380,12 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     // Ensure raw mode
     terminal::enable_raw_mode()?;
 
+    // Do NOT enter alternate screen here — the child (e.g. Claude Code)
+    // manages its own alternate screen.  Adding a second layer would
+    // prevent shift+pgup/pgdn from reaching the child (the terminal
+    // intercepts them for scrollback, which is empty in alt screen) and
+    // would conflict when the child's alt-screen escapes are forwarded.
+
     // Set scroll region to protect the status bar on the last line.
     // Child output stays within rows 1..(rows-1), last row is ours.
     let mut stdout = io::stdout();
@@ -398,12 +404,12 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
 
     let result = zoomed_loop(app, task, &session_id, running);
 
-    // Stop passthrough
+    // Stop passthrough (resets input modes like mouse tracking)
     if let Some(session) = app.sessions.get(&session_id) {
         let _ = session.stop_passthrough();
     }
 
-    // Reset scroll region to full terminal
+    // Reset scroll region
     let mut stdout = io::stdout();
     write!(stdout, "\x1b[r")?;
     stdout.flush()?;
@@ -611,12 +617,12 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 
     let result = toplevel_loop(app, running);
 
-    // Stop passthrough
+    // Stop passthrough (resets input modes like mouse tracking)
     if let Some(ref toplevel) = app.toplevel {
         let _ = toplevel.stop_passthrough();
     }
 
-    // Reset scroll region to full terminal
+    // Reset scroll region
     let mut stdout = io::stdout();
     write!(stdout, "\x1b[r")?;
     stdout.flush()?;
