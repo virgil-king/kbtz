@@ -276,6 +276,23 @@ pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn force_unassign_task(conn: &Connection, name: &str) -> Result<()> {
+    require_task(conn, name)?;
+    let status: String = conn.query_row(
+        "SELECT status FROM tasks WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    if status != "active" {
+        bail!("task '{name}' is not active (status: {status})");
+    }
+    conn.execute(
+        "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
+        [name],
+    )?;
+    Ok(())
+}
+
 pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
     conn.execute(
@@ -1081,6 +1098,62 @@ mod tests {
         let err = steal_task(&conn, "t", "agent-2").unwrap_err();
         assert!(
             err.to_string().contains("not active"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn force_unassign_active_task() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        claim_task(&conn, "t", "agent-1").unwrap();
+        force_unassign_task(&conn, "t").unwrap();
+        let task = get_task(&conn, "t").unwrap();
+        assert_eq!(task.status, "open");
+        assert!(task.assignee.is_none());
+    }
+
+    #[test]
+    fn force_unassign_open_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        let err = force_unassign_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not active"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn force_unassign_done_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        mark_done(&conn, "t").unwrap();
+        let err = force_unassign_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not active"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn force_unassign_paused_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let err = force_unassign_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not active"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn force_unassign_nonexistent_task_fails() {
+        let conn = db::open_memory().unwrap();
+        let err = force_unassign_task(&conn, "nope").unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
             "unexpected error: {err}"
         );
     }

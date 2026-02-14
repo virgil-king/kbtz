@@ -251,7 +251,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 }
 
 fn render_help(frame: &mut Frame) {
-    let area = centered_rect(50, 20, frame.area());
+    let area = centered_rect(50, 21, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -298,6 +298,10 @@ fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("d       ", Style::default().fg(Color::Cyan)),
             Span::raw("Close task (mark done)"),
+        ]),
+        Line::from(vec![
+            Span::styled("U       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Force-unassign task"),
         ]),
         Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),

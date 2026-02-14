@@ -280,6 +280,14 @@ fn tree_loop(
                             }
                         }
                     }
+                    KeyCode::Char('U') => {
+                        if let Some(name) = app.selected_name() {
+                            let name = name.to_string();
+                            if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
+                                app.error = Some(e.to_string());
+                            }
+                        }
+                    }
                     KeyCode::Char('r') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
@@ -781,6 +789,7 @@ TREE MODE KEYS:
     Space           Collapse/expand
     p               Pause/unpause task
     d               Mark task done
+    U               Force-unassign task
     ?               Help
     q               Quit
 

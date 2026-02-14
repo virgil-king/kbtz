@@ -140,6 +140,16 @@ fn run_loop(
                                 }
                             }
                         }
+                        KeyAction::ForceUnassign => {
+                            if let Some(task_name) = app.selected_name() {
+                                let task_name = task_name.to_string();
+                                if let Err(e) = ops::force_unassign_task(conn, &task_name) {
+                                    app.error = Some(e.to_string());
+                                } else {
+                                    app.refresh(conn, root)?;
+                                }
+                            }
+                        }
                         KeyAction::Refresh => {
                             app.refresh(conn, root)?;
                         }

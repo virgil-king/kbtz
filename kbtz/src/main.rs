@@ -100,6 +100,11 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             eprintln!("Released '{name}'");
         }
 
+        Command::ForceUnassign { name } => {
+            ops::force_unassign_task(&conn, &name)?;
+            eprintln!("Force-unassigned '{name}'");
+        }
+
         Command::Done { name } => {
             ops::mark_done(&conn, &name)?;
             eprintln!("Marked '{name}' as done");
