@@ -41,8 +41,10 @@ impl Passthrough {
     /// then set `active` so the reader thread starts forwarding live
     /// output.  Both happen under the same Mutex guard.
     fn start(&mut self) {
+        debug_assert!(!self.active, "start() called while already active");
         let screen = self.vte.screen();
         let contents = screen.contents_formatted();
+        let input_modes = screen.input_mode_formatted();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let hide = screen.hide_cursor();
 
@@ -58,13 +60,35 @@ impl Passthrough {
         } else {
             let _ = out.write_all(b"\x1b[?25h");
         }
+        // Restore input modes (mouse protocol, bracketed paste, etc.)
+        // so the real terminal matches the child's expected state.
+        let _ = out.write_all(&input_modes);
         let _ = out.flush();
 
         self.active = true;
     }
 
     fn stop(&mut self) {
+        if !self.active {
+            return;
+        }
         self.active = false;
+
+        // Reset input modes so they don't leak into other UI modes
+        // (tree view, etc.).
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(concat!(
+            "\x1b[?1000l",  // disable mouse tracking modes
+            "\x1b[?1002l",
+            "\x1b[?1003l",
+            "\x1b[?1006l",  // disable SGR mouse encoding
+            "\x1b[?2004l",  // disable bracketed paste
+            "\x1b[?1l",     // normal cursor keys
+            "\x1b>",        // normal keypad
+            "\x1b[?25h",    // show cursor
+        ).as_bytes());
+        let _ = out.flush();
     }
 
     fn process(&mut self, data: &[u8]) {
