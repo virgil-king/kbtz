@@ -26,6 +26,8 @@ pub struct Session {
 pub struct Passthrough {
     active: bool,
     vte: vt100::Parser,
+    bytes_processed: usize,
+    last_output: Option<Instant>,
 }
 
 impl Passthrough {
@@ -33,6 +35,8 @@ impl Passthrough {
         Self {
             active: false,
             vte: vt100::Parser::new(rows, cols, 0),
+            bytes_processed: 0,
+            last_output: None,
         }
     }
 
@@ -43,8 +47,33 @@ impl Passthrough {
     fn start(&mut self) {
         let screen = self.vte.screen();
         let contents = screen.contents_formatted();
+        let plain = screen.contents();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let hide = screen.hide_cursor();
+        let alt = screen.alternate_screen();
+        let (rows, cols) = screen.size();
+
+        // Debug dump
+        if let Ok(mut f) = std::fs::File::create("/tmp/kbtz-vte-debug.txt") {
+            let _ = write!(f, "VTE size: {}x{}\n", rows, cols);
+            let _ = write!(f, "alternate_screen: {}\n", alt);
+            let _ = write!(f, "cursor: ({}, {})\n", cursor_row, cursor_col);
+            let _ = write!(f, "hide_cursor: {}\n", hide);
+            let _ = write!(f, "contents_formatted len: {}\n", contents.len());
+            let _ = write!(f, "plain text len: {}\n", plain.len());
+            let _ = write!(f, "bytes_processed: {}\n", self.bytes_processed);
+            let _ = write!(f, "--- plain text ---\n{}\n", plain);
+            // Hex dump of first 512 bytes of contents_formatted
+            let _ = write!(f, "--- contents_formatted hex (first 512) ---\n");
+            for (i, chunk) in contents[..contents.len().min(512)].chunks(32).enumerate() {
+                let hex: String = chunk.iter().map(|b| format!("{:02x} ", b)).collect();
+                let ascii: String = chunk
+                    .iter()
+                    .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' })
+                    .collect();
+                let _ = write!(f, "{:04x}: {}  {}\n", i * 32, hex, ascii);
+            }
+        }
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -68,6 +97,8 @@ impl Passthrough {
     }
 
     fn process(&mut self, data: &[u8]) {
+        self.bytes_processed += data.len();
+        self.last_output = Some(Instant::now());
         self.vte.process(data);
     }
 
@@ -230,13 +261,70 @@ impl Session {
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
     let mut buf = [0u8; 4096];
     let stdout = std::io::stdout();
+    let mut total_bytes: usize = 0;
+    let mut read_count: usize = 0;
+    let mut last_alt_screen = false;
+
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/kbtz-reader-debug.log");
+    let mut log_file = log.ok();
+
+    macro_rules! dbg_log {
+        ($($arg:tt)*) => {
+            if let Some(ref mut f) = log_file {
+                let _ = writeln!(f, $($arg)*);
+                let _ = f.flush();
+            }
+        };
+    }
+
+    dbg_log!("=== reader thread started ===");
 
     loop {
         match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                dbg_log!("reader exiting after {read_count} reads, {total_bytes} total bytes");
+                break;
+            }
             Ok(n) => {
+                read_count += 1;
+                total_bytes += n;
+
                 let mut pt = passthrough.lock().unwrap();
                 pt.process(&buf[..n]);
+
+                // Log first 10 reads with raw byte snippets
+                if read_count <= 10 {
+                    let snippet: String = buf[..n.min(120)]
+                        .iter()
+                        .map(|b| {
+                            if b.is_ascii_graphic() || *b == b' ' {
+                                *b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    let alt = pt.vte.screen().alternate_screen();
+                    dbg_log!(
+                        "read #{read_count}: {n} bytes (total {total_bytes}), alt_screen={alt}, snippet=[{snippet}]"
+                    );
+                }
+
+                // Log alternate screen transitions
+                let alt = pt.vte.screen().alternate_screen();
+                if alt != last_alt_screen {
+                    dbg_log!(
+                        "ALT SCREEN CHANGED: {last_alt_screen} -> {alt} at read #{read_count}, {total_bytes} total bytes"
+                    );
+                    // Dump screen contents at transition
+                    let plain = pt.vte.screen().contents();
+                    let lines: Vec<&str> = plain.lines().take(5).collect();
+                    dbg_log!("  screen first 5 lines: {:?}", lines);
+                    last_alt_screen = alt;
+                }
 
                 if pt.active {
                     let mut out = stdout.lock();

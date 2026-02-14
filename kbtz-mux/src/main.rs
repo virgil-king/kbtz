@@ -136,9 +136,6 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
                 let task = task.clone();
                 action = zoomed_mode(app, &task, running)?;
             }
-            Action::TopLevel => {
-                action = toplevel_mode(app, running)?;
-            }
             Action::NextSession | Action::PrevSession => {
                 // Shouldn't happen at top level, treat as tree
                 action = Action::Continue;
@@ -285,9 +282,6 @@ fn tree_loop(
                             let name = name.to_string();
                             app.restart_session(&name);
                         }
-                    }
-                    KeyCode::Char('c') => {
-                        return Ok(Action::TopLevel);
                     }
                     KeyCode::Char('?') => {
                         mode = TreeMode::Help;
@@ -466,12 +460,6 @@ fn zoomed_loop(
                 };
                 match cmd {
                     b't' | b'd' => return Ok(Action::ReturnToTree),
-                    b'c' => {
-                        if let Some(session) = app.sessions.get(session_id) {
-                            session.stop_passthrough();
-                        }
-                        return Ok(Action::TopLevel);
-                    }
                     b'n' => {
                         if let Some(next_task) =
                             app.cycle_session(&Action::NextSession, task)
@@ -523,197 +511,6 @@ fn zoomed_loop(
     }
 }
 
-// ── Top-level mode ─────────────────────────────────────────────────────
-
-fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
-    // Ensure the top-level session exists (respawn if exited).
-    app.ensure_toplevel()?;
-
-    // Ensure raw mode
-    terminal::enable_raw_mode()?;
-
-    // Set scroll region to protect the status bar on the last line.
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
-
-    // Start passthrough
-    if let Some(ref toplevel) = app.toplevel {
-        toplevel.start_passthrough();
-    }
-
-    let result = toplevel_loop(app, running);
-
-    // Stop passthrough
-    if let Some(ref toplevel) = app.toplevel {
-        toplevel.stop_passthrough();
-    }
-
-    // Reset scroll region to full terminal
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[r")?;
-    stdout.flush()?;
-
-    terminal::disable_raw_mode()?;
-
-    result
-}
-
-fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
-    let mut buf = [0u8; 4096];
-
-    // Watch DB and mux status for UI updates.
-    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
-
-    draw_toplevel_status_bar(app.rows, app.cols, None);
-
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            return Ok(Action::Quit);
-        }
-
-        // If top-level session has exited, return to tree.
-        if app.toplevel.as_mut().map_or(true, |s| !s.is_alive()) {
-            return Ok(Action::ReturnToTree);
-        }
-
-        // Handle DB changes
-        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&db_rx);
-            app.refresh_tree()?;
-        }
-
-        // Handle mux status file changes
-        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&mux_rx);
-            app.read_status_files()?;
-        }
-
-        // Run lifecycle tick for worker sessions.
-        app.tick()?;
-
-        // Poll stdin with a timeout.
-        let stdin_fd = stdin.as_raw_fd();
-        let mut pfd = libc::pollfd {
-            fd: stdin_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
-        if ready <= 0 {
-            continue;
-        }
-        let n = match stdin.read(&mut buf) {
-            Ok(0) => return Ok(Action::Quit),
-            Err(_) => return Ok(Action::Quit),
-            Ok(n) => n,
-        };
-
-        // Process the buffer, scanning for PREFIX_KEY
-        let mut i = 0;
-        while i < n {
-            if buf[i] == PREFIX_KEY {
-                i += 1;
-                let cmd = if i < n {
-                    let b = buf[i];
-                    i += 1;
-                    b
-                } else {
-                    let mut cmd_buf = [0u8; 1];
-                    match stdin.read(&mut cmd_buf) {
-                        Ok(0) | Err(_) => return Ok(Action::Quit),
-                        Ok(_) => cmd_buf[0],
-                    }
-                };
-                match cmd {
-                    b't' | b'd' => return Ok(Action::ReturnToTree),
-                    b'n' => {
-                        // Cycle to first worker session.
-                        let ids = app.session_ids_ordered();
-                        if let Some(first_sid) = ids.first() {
-                            if let Some(session) = app.sessions.get(first_sid) {
-                                let task = session.task_name.clone();
-                                return Ok(Action::ZoomIn(task));
-                            }
-                        }
-                    }
-                    b'p' => {
-                        // Cycle to last worker session.
-                        let ids = app.session_ids_ordered();
-                        if let Some(last_sid) = ids.last() {
-                            if let Some(session) = app.sessions.get(last_sid) {
-                                let task = session.task_name.clone();
-                                return Ok(Action::ZoomIn(task));
-                            }
-                        }
-                    }
-                    PREFIX_KEY => {
-                        if let Some(ref mut toplevel) = app.toplevel {
-                            toplevel.write_input(&[PREFIX_KEY])?;
-                        }
-                    }
-                    b'?' => {
-                        draw_toplevel_help_bar(app.rows, app.cols);
-                        let mut discard = [0u8; 1];
-                        let _ = stdin.read(&mut discard);
-                        draw_toplevel_status_bar(app.rows, app.cols, None);
-                    }
-                    b'q' => return Ok(Action::Quit),
-                    _ => {}
-                }
-            } else {
-                let start = i;
-                while i < n && buf[i] != PREFIX_KEY {
-                    i += 1;
-                }
-                if let Some(ref mut toplevel) = app.toplevel {
-                    toplevel.write_input(&buf[start..i])?;
-                }
-            }
-        }
-    }
-}
-
-fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
-    let left = " ^B ? help \u{2502} task manager";
-    let content = if let Some(dbg) = debug {
-        let right = format!(" [{dbg}]");
-        let gap = (cols as usize).saturating_sub(left.len() + right.len());
-        format!("{left}{:gap$}{right}", "")
-    } else {
-        left.to_string()
-    };
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
-}
-
-fn draw_toplevel_help_bar(rows: u16, cols: u16) {
-    let content = " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
-}
-
 fn draw_status_bar(
     rows: u16,
     cols: u16,
@@ -748,7 +545,7 @@ fn draw_status_bar(
 }
 
 fn draw_help_bar(rows: u16, cols: u16) {
-    let content = " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+    let content = " ^B t:tree  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -777,16 +574,14 @@ OPTIONS:
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
-    c               Switch to task manager session
     Space           Collapse/expand
     p               Pause/unpause task
     d               Mark task done
     ?               Help
     q               Quit
 
-ZOOMED MODE / TASK MANAGER:
+ZOOMED MODE:
     ^B t            Return to tree
-    ^B c            Switch to task manager session
     ^B n/p          Next/prev session
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help

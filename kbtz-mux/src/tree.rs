@@ -116,8 +116,6 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":nav  "),
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(":zoom  "),
-            Span::styled("c", Style::default().fg(Color::Cyan)),
-            Span::raw(":manager  "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
             Span::raw(":collapse  "),
             Span::styled("p", Style::default().fg(Color::Cyan)),
@@ -135,7 +133,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = ui::centered_rect(55, 22, frame.area());
+    let area = ui::centered_rect(55, 18, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -158,10 +156,6 @@ pub fn render_help(frame: &mut Frame) {
             Span::raw("Zoom into session"),
         ]),
         Line::from(vec![
-            Span::styled("  c          ", Style::default().fg(Color::Cyan)),
-            Span::raw("Task manager session"),
-        ]),
-        Line::from(vec![
             Span::styled("  Space      ", Style::default().fg(Color::Cyan)),
             Span::raw("Collapse/expand"),
         ]),
@@ -179,15 +173,11 @@ pub fn render_help(frame: &mut Frame) {
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Zoomed / Manager mode:", Style::default().bold()),
+            Span::styled("Zoomed mode:", Style::default().bold()),
         ]),
         Line::from(vec![
             Span::styled("  ^B t       ", Style::default().fg(Color::Cyan)),
             Span::raw("Return to tree"),
-        ]),
-        Line::from(vec![
-            Span::styled("  ^B c       ", Style::default().fg(Color::Cyan)),
-            Span::raw("Task manager session"),
         ]),
         Line::from(vec![
             Span::styled("  ^B n/p     ", Style::default().fg(Color::Cyan)),

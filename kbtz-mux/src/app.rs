@@ -27,9 +27,6 @@ pub struct App {
     pub prefer: Option<String>,
     pub command: String,
 
-    // Top-level task management session (not tied to any task)
-    pub toplevel: Option<Session>,
-
     // Terminal
     pub rows: u16,
     pub cols: u16,
@@ -47,7 +44,6 @@ pub enum Action {
     NextSession,
     PrevSession,
     ReturnToTree,
-    TopLevel,
     Quit,
 }
 
@@ -73,7 +69,6 @@ impl App {
             max_concurrency,
             prefer,
             command,
-            toplevel: None,
             rows,
             cols,
             cursor: 0,
@@ -81,7 +76,6 @@ impl App {
             error: None,
         };
         app.refresh_tree()?;
-        app.spawn_toplevel()?;
         Ok(app)
     }
 
@@ -220,44 +214,6 @@ impl App {
         Ok(())
     }
 
-    /// Spawn the top-level task management session.
-    fn spawn_toplevel(&mut self) -> Result<()> {
-        let prompt = "You are the top-level task management agent. Help the user manage the kbtz task list.".to_string();
-        let args: Vec<String> = vec![
-            "--append-system-prompt".into(),
-            crate::skill::TOPLEVEL_SKILL.into(),
-            prompt,
-        ];
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let session_id = "mux/toplevel";
-        let env_vars: Vec<(&str, &str)> = vec![
-            ("KBTZ_DB", &self.db_path),
-        ];
-        let session = Session::spawn(
-            &self.command,
-            &arg_refs,
-            "toplevel",
-            session_id,
-            self.rows,
-            self.cols,
-            &env_vars,
-        )?;
-        self.toplevel = Some(session);
-        Ok(())
-    }
-
-    /// Respawn the top-level session if it has exited.
-    pub fn ensure_toplevel(&mut self) -> Result<()> {
-        let needs_respawn = match &mut self.toplevel {
-            Some(s) => !s.is_alive(),
-            None => true,
-        };
-        if needs_respawn {
-            self.spawn_toplevel()?;
-        }
-        Ok(())
-    }
-
     fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Session> {
         let prompt = format!("Work on task '{}': {}", task.name, task.description);
         let args: Vec<String> = vec![
@@ -316,9 +272,6 @@ impl App {
         self.rows = rows;
         for session in self.sessions.values() {
             let _ = session.resize(rows, cols);
-        }
-        if let Some(ref toplevel) = self.toplevel {
-            let _ = toplevel.resize(rows, cols);
         }
     }
 
@@ -396,28 +349,20 @@ impl App {
     /// Sends `/exit` to all sessions in parallel, then waits up to
     /// GRACEFUL_TIMEOUT for them to exit before force-killing.
     pub fn shutdown(&mut self) {
-        // Send /exit to all sessions (workers + toplevel).
+        // Send /exit to all sessions.
         for session in self.sessions.values_mut() {
             session.stop_passthrough();
             session.request_exit();
-        }
-        if let Some(ref mut toplevel) = self.toplevel {
-            toplevel.stop_passthrough();
-            toplevel.request_exit();
         }
 
         // Wait for all to exit, up to the timeout.
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
-            let workers_dead = self
+            let all_dead = self
                 .sessions
                 .values_mut()
                 .all(|s| !s.is_alive());
-            let toplevel_dead = self
-                .toplevel
-                .as_mut()
-                .map_or(true, |s| !s.is_alive());
-            if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
+            if all_dead || std::time::Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -431,14 +376,6 @@ impl App {
             let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
         }
         self.task_to_session.clear();
-
-        // Force-kill top-level if still alive.
-        if let Some(ref mut toplevel) = self.toplevel {
-            if toplevel.is_alive() {
-                toplevel.force_kill();
-            }
-        }
-        self.toplevel = None;
 
         // Clean up status files.
         if let Ok(entries) = std::fs::read_dir(&self.mux_dir) {
