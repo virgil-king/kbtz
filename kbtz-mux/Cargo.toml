@@ -1,0 +1,16 @@
+[package]
+name = "kbtz-mux"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kbtz = { path = "../kbtz" }
+ratatui = { version = "0.30", features = ["crossterm_0_28"] }
+crossterm = "0.28"
+portable-pty = "0.9"
+notify = "7"
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ctrlc = "3"
+libc = "0.2"
+vt100 = "0.16"

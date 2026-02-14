@@ -1,0 +1,197 @@
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+
+use kbtz::ui;
+use crate::app::App;
+
+pub fn render(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame.area());
+
+    render_tree(frame, app, chunks[0]);
+    render_footer(frame, app, chunks[1]);
+}
+
+fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
+    if app.tree_rows.is_empty() {
+        let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" kbtz-mux "),
+            );
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .tree_rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let prefix = ui::tree_prefix(row);
+
+            let collapse_indicator = if row.has_children {
+                if app.collapsed.contains(&row.name) {
+                    "> "
+                } else {
+                    "v "
+                }
+            } else {
+                "  "
+            };
+
+            // Unified status: session indicator when a session exists,
+            // task status otherwise.
+            let (icon, session_suffix) =
+                if let Some(sid) = app.task_to_session.get(&row.name) {
+                    if let Some(session) = app.sessions.get(sid) {
+                        (
+                            format!("{} ", session.status.indicator()),
+                            format!(" {}", sid),
+                        )
+                    } else {
+                        (ui::icon_for_task(row).to_string(), String::new())
+                    }
+                } else {
+                    (ui::icon_for_task(row).to_string(), String::new())
+                };
+            let style = ui::status_style(&row.status);
+
+            let blocked_info = if row.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!(" [blocked by: {}]", row.blocked_by.join(", "))
+            };
+
+            let desc = if row.description.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", row.description)
+            };
+
+            let line = Line::from(vec![
+                Span::raw(prefix),
+                Span::raw(collapse_indicator),
+                Span::styled(icon, style),
+                Span::styled(row.name.clone(), Style::default().bold()),
+                Span::styled(session_suffix, Style::default().fg(Color::Cyan)),
+                Span::styled(blocked_info, Style::default().fg(Color::Red)),
+                Span::raw(desc),
+            ]);
+
+            let item = ListItem::new(line);
+            if i == app.cursor {
+                item.style(Style::default().bg(Color::DarkGray))
+            } else {
+                item
+            }
+        })
+        .collect();
+
+    let active = app.sessions.len();
+    let max = app.max_concurrency;
+    let title = format!(" kbtz-mux ({active}/{max} sessions) ");
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title),
+    );
+
+    frame.render_widget(list, area);
+}
+
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let text = if let Some(err) = &app.error {
+        Line::from(vec![
+            Span::styled(err.as_str(), Style::default().fg(Color::Red)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(":nav  "),
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(":zoom  "),
+            Span::styled("Space", Style::default().fg(Color::Cyan)),
+            Span::raw(":collapse  "),
+            Span::styled("p", Style::default().fg(Color::Cyan)),
+            Span::raw(":pause  "),
+            Span::styled("d", Style::default().fg(Color::Cyan)),
+            Span::raw(":done  "),
+            Span::styled("?", Style::default().fg(Color::Cyan)),
+            Span::raw(":help  "),
+            Span::styled("q", Style::default().fg(Color::Cyan)),
+            Span::raw(":quit"),
+        ])
+    };
+
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+pub fn render_help(frame: &mut Frame) {
+    let area = ui::centered_rect(55, 18, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Help ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("Tree mode:", Style::default().bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  j/k, Up/Down  ", Style::default().fg(Color::Cyan)),
+            Span::raw("Navigate tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Zoom into session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Space      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Collapse/expand"),
+        ]),
+        Line::from(vec![
+            Span::styled("  p          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Pause/unpause task"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Mark task done"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q/Esc      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Quit (releases all sessions)"),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Zoomed mode:", Style::default().bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  ^B t       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Return to tree"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ^B n/p     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Next/prev session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ^B ^B      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Send literal Ctrl-B"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ^B ?       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Show help"),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(help_text), inner);
+}
