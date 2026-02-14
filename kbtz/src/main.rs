@@ -1,11 +1,4 @@
 mod cli;
-mod db;
-mod model;
-mod ops;
-mod output;
-mod tui;
-mod validate;
-mod watch;
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -15,6 +8,7 @@ use clap::Parser;
 use rusqlite::Connection;
 
 use cli::{Cli, Command};
+use kbtz::{db, ops, output, tui, watch};
 use ops::StatusFilter;
 
 fn default_db_path() -> Result<PathBuf> {

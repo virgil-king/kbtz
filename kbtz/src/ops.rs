@@ -520,8 +520,11 @@ pub fn remove_block(conn: &Connection, blocker: &str, blocked: &str) -> Result<(
 }
 
 pub fn get_blockers(conn: &Connection, task_name: &str) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare_cached("SELECT blocker FROM task_deps WHERE blocked = ?1 ORDER BY blocker")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT td.blocker FROM task_deps td \
+         INNER JOIN tasks t ON t.name = td.blocker AND t.status != 'done' \
+         WHERE td.blocked = ?1 ORDER BY td.blocker",
+    )?;
     let rows = stmt.query_map([task_name], |row| row.get(0))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
