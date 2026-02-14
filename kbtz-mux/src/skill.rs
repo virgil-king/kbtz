@@ -25,6 +25,23 @@ kbtz done $KBTZ_TASK
 
 Then exit. The mux will detect the exit and clean up.
 
+### Waiting for PR merge
+
+For tasks that produce a pull request, the task is NOT complete until the
+PR is merged. After opening a PR:
+
+1. Add a note with the PR URL:
+   ```
+   kbtz note $KBTZ_TASK "PR: <url>"
+   ```
+2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
+   every 60 seconds) until the state is "MERGED".
+3. Only then mark the task done with `kbtz done`.
+
+Do NOT mark the task done after merely opening a PR. Keep the task and
+wait for the merge. If the PR is closed without merging, add a note
+explaining why and exit without marking done.
+
 ## Decomposing into subtasks
 
 If a task is too large to complete in one session, break it into subtasks.
