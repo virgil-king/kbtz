@@ -88,6 +88,17 @@ kbtz note <task-name> "Started investigating the issue"
 kbtz note <task-name> "Found root cause: ..."
 ```
 
+**Track branches and PRs.** Always note the branch name and PR URL so the
+associated code changes are easy to find from the task:
+
+```bash
+# When you create a branch:
+kbtz note <task-name> "Branch: <branch-name>"
+
+# When you open a PR:
+kbtz note <task-name> "PR: <url>"
+```
+
 ### Step 4: Handle Blockers
 
 If blocked by another task owned by a different session, create subtasks or wait:

@@ -79,6 +79,20 @@ kbtz note $KBTZ_TASK "Chose X approach because Y"
 Notes persist across session restarts and are visible to any agent that
 later works on this task.
 
+## Tracking branches and PRs
+
+Always note the branch name and PR URL so the associated code changes
+are easy to find from the task:
+
+- When you create a branch, immediately add a note:
+  ```
+  kbtz note $KBTZ_TASK "Branch: <branch-name>"
+  ```
+- When you open a PR, immediately add a note:
+  ```
+  kbtz note $KBTZ_TASK "PR: <url>"
+  ```
+
 ## Checking task state
 
 - Show your task details: `kbtz show $KBTZ_TASK`
@@ -100,6 +114,8 @@ later works on this task.
    Only a-z, A-Z, 0-9, _, - are allowed in task names.
 6. If you resume a previously-started task, check notes and subtask
    status first with `kbtz show` and `kbtz notes` before starting work.
+7. Always note branch names and PR URLs on your task (see "Tracking
+   branches and PRs" above).
 "#;
 
 /// Protocol instructions for the top-level task management session.
