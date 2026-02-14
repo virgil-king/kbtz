@@ -51,6 +51,27 @@ pub fn watch_db(db_path: &str) -> Result<(RecommendedWatcher, Receiver<()>)> {
     Ok((watcher, rx))
 }
 
+/// Creates a watcher for a directory and returns a receiver for change events.
+pub fn watch_dir(dir: &Path) -> Result<(RecommendedWatcher, Receiver<()>)> {
+    let (tx, rx) = mpsc::channel();
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            if matches!(event.kind, EventKind::Access(_)) {
+                return;
+            }
+            let _ = tx.send(());
+        }
+    })
+    .context("failed to create file watcher")?;
+
+    watcher
+        .watch(dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch {}", dir.display()))?;
+
+    Ok((watcher, rx))
+}
+
 /// Waits for a database change event with timeout.
 /// Returns true if an event was received, false on timeout.
 pub fn wait_for_change(rx: &Receiver<()>, timeout: Duration) -> bool {

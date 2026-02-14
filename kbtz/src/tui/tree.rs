@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+
+use crate::ui;
 use super::app::{AddField, App, Mode};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -22,22 +24,10 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn status_style(status: &str) -> Style {
-    match status {
-        "done" => Style::default().dim(),
-        "active" => Style::default().fg(Color::Green),
-        "paused" => Style::default().fg(Color::Blue),
-        _ => Style::default().fg(Color::Yellow),
-    }
+    ui::status_style(status)
 }
 
-fn status_icon(status: &str) -> &'static str {
-    match status {
-        "done" => "\u{2713} ",  // ✓
-        "active" => "* ",
-        "paused" => "~ ",
-        _ => "\u{b7} ",         // ·
-    }
-}
+
 
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let (tree_area, error_area) = if app.error.is_some() {
@@ -63,22 +53,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let mut prefix = String::new();
-
-            // Build tree lines
-            for d in 1..row.depth + 1 {
-                if d == row.depth {
-                    if row.is_last_at_depth[d] {
-                        prefix.push_str("└── ");
-                    } else {
-                        prefix.push_str("├── ");
-                    }
-                } else if row.is_last_at_depth[d] {
-                    prefix.push_str("    ");
-                } else {
-                    prefix.push_str("│   ");
-                }
-            }
+            let prefix = ui::tree_prefix(row);
 
             // Collapse indicator for nodes with children
             let collapse_indicator = if row.has_children {
@@ -91,8 +66,12 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            let icon = status_icon(&row.status);
-            let style = status_style(&row.status);
+            let icon = ui::icon_for_task(row);
+            let style = if !row.blocked_by.is_empty() {
+                status_style("blocked")
+            } else {
+                status_style(&row.status)
+            };
 
             let blocked_info = if row.blocked_by.is_empty() {
                 String::new()
@@ -168,9 +147,7 @@ fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width.min(area.width), height.min(area.height))
+    ui::centered_rect(width, height, area)
 }
 
 fn render_field(

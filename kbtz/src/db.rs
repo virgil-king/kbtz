@@ -174,7 +174,7 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+/// Open an in-memory database for tests. Available to all crate targets.
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     set_pragmas(&conn)?;

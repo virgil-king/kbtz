@@ -1,0 +1,590 @@
+mod app;
+mod lifecycle;
+mod session;
+mod skill;
+mod tree;
+
+use std::io::{self, Read, Write};
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use crossterm::event::{self as ct_event, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::prelude::*;
+
+use app::{Action, App};
+use session::SessionStatus;
+
+const PREFIX_KEY: u8 = 0x02; // Ctrl-B
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("kbtz-mux: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse CLI args
+    let mut db_path: Option<String> = None;
+    let mut concurrency: usize = 4;
+    let mut prefer: Option<String> = None;
+    let mut command = "claude".to_string();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--db" => {
+                i += 1;
+                db_path = Some(args.get(i).context("--db requires a path")?.clone());
+            }
+            "-j" | "--concurrency" => {
+                i += 1;
+                concurrency = args
+                    .get(i)
+                    .context("-j requires a number")?
+                    .parse()
+                    .context("-j must be a positive integer")?;
+            }
+            "--prefer" => {
+                i += 1;
+                prefer = Some(args.get(i).context("--prefer requires a value")?.clone());
+            }
+            "--command" => {
+                i += 1;
+                command = args.get(i).context("--command requires a value")?.clone();
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            other => {
+                bail!("unknown argument: {other}\nRun with --help for usage.");
+            }
+        }
+        i += 1;
+    }
+
+    // Resolve DB path from env or default
+    let db_path = db_path
+        .or_else(|| std::env::var("KBTZ_DB").ok())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            format!("{home}/.kbtz/kbtz.db")
+        });
+
+    // Ensure the DB exists
+    if !std::path::Path::new(&db_path).exists() {
+        bail!(
+            "database not found at {db_path}\nRun 'kbtz add <task> <description>' to create it."
+        );
+    }
+
+    // Mux status directory
+    let mux_dir = PathBuf::from(
+        std::env::var("KBTZ_MUX_DIR").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            format!("{home}/.kbtz/mux")
+        }),
+    );
+    std::fs::create_dir_all(&mux_dir).context("failed to create mux directory")?;
+
+    let (cols, rows) = terminal::size().context("failed to get terminal size")?;
+
+    let mut app = App::new(db_path, mux_dir, concurrency, prefer, command, rows, cols)?;
+
+    // Initial session spawning
+    app.tick()?;
+
+    // Set up Ctrl+C handler for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .context("failed to set Ctrl+C handler")?;
+
+    // Main loop
+    let result = main_loop(&mut app, &running);
+
+    // Graceful shutdown
+    app.shutdown();
+
+    result
+}
+
+fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
+    let mut action = Action::Continue;
+
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        match action {
+            Action::Continue | Action::ReturnToTree => {
+                action = tree_mode(app, running)?;
+            }
+            Action::ZoomIn(ref task) => {
+                let task = task.clone();
+                action = zoomed_mode(app, &task, running)?;
+            }
+            Action::NextSession | Action::PrevSession => {
+                // Shouldn't happen at top level, treat as tree
+                action = Action::Continue;
+            }
+            Action::Quit => return Ok(()),
+        }
+    }
+}
+
+// ── Tree mode ──────────────────────────────────────────────────────────
+
+fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
+    terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = tree_loop(&mut terminal, app, running);
+
+    terminal::disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    result
+}
+
+enum TreeMode {
+    Normal,
+    Help,
+}
+
+fn tree_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    running: &Arc<AtomicBool>,
+) -> Result<Action> {
+    // Catch any DB changes that happened during zoomed mode.
+    app.refresh_tree()?;
+    app.tick()?;
+
+    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
+    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+    let mut mode = TreeMode::Normal;
+
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            return Ok(Action::Quit);
+        }
+
+        terminal.draw(|frame| {
+            tree::render(frame, app);
+            if matches!(mode, TreeMode::Help) {
+                tree::render_help(frame);
+            }
+        })?;
+
+        if ct_event::poll(Duration::from_millis(100))? {
+            let event = ct_event::read()?;
+            if let Event::Resize(cols, rows) = event {
+                app.handle_resize(cols, rows);
+                continue;
+            }
+            if let Event::Key(key) = event {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                if matches!(mode, TreeMode::Help) {
+                    match key.code {
+                        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                            mode = TreeMode::Normal;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                app.error = None;
+
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        return Ok(Action::Quit);
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        app.move_down();
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        app.move_up();
+                    }
+                    KeyCode::Char(' ') => {
+                        app.toggle_collapse();
+                        app.refresh_tree()?;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(name) = app.selected_name() {
+                            if app.task_to_session.contains_key(name) {
+                                return Ok(Action::ZoomIn(name.to_string()));
+                            } else {
+                                app.error =
+                                    Some("no active session for this task".into());
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(name) = app.selected_name() {
+                            let name = name.to_string();
+                            let status = app.tree_rows[app.cursor].status.as_str();
+                            let result = match status {
+                                "paused" => kbtz::ops::unpause_task(&app.conn, &name),
+                                "open" => kbtz::ops::pause_task(&app.conn, &name),
+                                _ => {
+                                    app.error =
+                                        Some(format!("cannot pause {status} task"));
+                                    Ok(())
+                                }
+                            };
+                            if let Err(e) = result {
+                                app.error = Some(e.to_string());
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(name) = app.selected_name() {
+                            let name = name.to_string();
+                            let status = app.tree_rows[app.cursor].status.as_str();
+                            match status {
+                                "done" => {
+                                    app.error = Some("task is already done".into());
+                                }
+                                "active" => {
+                                    app.error =
+                                        Some("cannot close active task".into());
+                                }
+                                _ => {
+                                    if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                        app.error = Some(e.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(name) = app.selected_name() {
+                            let name = name.to_string();
+                            app.restart_session(&name);
+                        }
+                    }
+                    KeyCode::Char('?') => {
+                        mode = TreeMode::Help;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Check for DB changes
+        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&db_rx);
+            app.refresh_tree()?;
+        }
+
+        // Check for status file changes
+        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&mux_rx);
+            app.read_status_files()?;
+        }
+
+        app.tick()?;
+    }
+}
+
+// ── Zoomed mode ────────────────────────────────────────────────────────
+
+fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<Action> {
+    let session_id = match app.task_to_session.get(task) {
+        Some(sid) => sid.clone(),
+        None => return Ok(Action::ReturnToTree),
+    };
+
+    // Ensure raw mode
+    terminal::enable_raw_mode()?;
+
+    // Set scroll region to protect the status bar on the last line.
+    // Child output stays within rows 1..(rows-1), last row is ours.
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r", app.rows - 1)?;
+    execute!(
+        stdout,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+
+    // Start passthrough: flushes buffered output to stdout (everything
+    // the child wrote while we were in tree mode), then goes live.
+    if let Some(session) = app.sessions.get(&session_id) {
+        session.start_passthrough();
+    }
+
+    let result = zoomed_loop(app, task, &session_id, running);
+
+    // Stop passthrough
+    if let Some(session) = app.sessions.get(&session_id) {
+        session.stop_passthrough();
+    }
+
+    // Reset scroll region to full terminal
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[r")?;
+    stdout.flush()?;
+
+    terminal::disable_raw_mode()?;
+
+    result
+}
+
+fn zoomed_loop(
+    app: &mut App,
+    task: &str,
+    session_id: &str,
+    running: &Arc<AtomicBool>,
+) -> Result<Action> {
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+    let mut buf = [0u8; 4096];
+    let mut last_status = SessionStatus::Starting;
+
+    // Watch DB and mux status so we detect task completion / status changes.
+    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
+    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+
+    let mut debug_msg: Option<String> = None;
+
+    draw_status_bar(app.rows, app.cols, task, session_id, &last_status, None);
+
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            return Ok(Action::Quit);
+        }
+
+        if !app.sessions.contains_key(session_id) {
+            return Ok(Action::ReturnToTree);
+        }
+
+        // Handle DB changes
+        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&db_rx);
+            app.refresh_tree()?;
+        }
+
+        // Handle mux status file changes
+        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&mux_rx);
+            app.read_status_files()?;
+        }
+
+        // Run lifecycle tick (reaps exited, enforces timeouts, spawns)
+        if let Some(msg) = app.tick()? {
+            debug_msg = Some(msg);
+        }
+
+        if !app.sessions.contains_key(session_id) {
+            return Ok(Action::ReturnToTree);
+        }
+
+        // Redraw status bar when status or debug info changes
+        let mut redraw = false;
+        if let Some(session) = app.sessions.get(session_id) {
+            let status = session.status.clone();
+            if status != last_status {
+                last_status = status;
+                redraw = true;
+            }
+        }
+        if debug_msg.is_some() {
+            redraw = true;
+        }
+        if redraw {
+            draw_status_bar(
+                app.rows,
+                app.cols,
+                task,
+                session_id,
+                &last_status,
+                debug_msg.take().as_deref(),
+            );
+        }
+
+        // Poll stdin with a timeout so we can check session liveness
+        // and watcher channels even when the user isn't typing.
+        let stdin_fd = stdin.as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd: stdin_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
+        if ready <= 0 {
+            continue;
+        }
+        let n = match stdin.read(&mut buf) {
+            Ok(0) => return Ok(Action::Quit),
+            Err(_) => return Ok(Action::Quit),
+            Ok(n) => n,
+        };
+
+        // Process the buffer, scanning for PREFIX_KEY
+        let mut i = 0;
+        while i < n {
+            if buf[i] == PREFIX_KEY {
+                i += 1;
+                // Get the command byte (from remaining buffer or a fresh read)
+                let cmd = if i < n {
+                    let b = buf[i];
+                    i += 1;
+                    b
+                } else {
+                    let mut cmd_buf = [0u8; 1];
+                    match stdin.read(&mut cmd_buf) {
+                        Ok(0) | Err(_) => return Ok(Action::Quit),
+                        Ok(_) => cmd_buf[0],
+                    }
+                };
+                match cmd {
+                    b't' | b'd' => return Ok(Action::ReturnToTree),
+                    b'n' => {
+                        if let Some(next_task) =
+                            app.cycle_session(&Action::NextSession, task)
+                        {
+                            if let Some(session) = app.sessions.get(session_id) {
+                                session.stop_passthrough();
+                            }
+                            return Ok(Action::ZoomIn(next_task));
+                        }
+                    }
+                    b'p' => {
+                        if let Some(prev_task) =
+                            app.cycle_session(&Action::PrevSession, task)
+                        {
+                            if let Some(session) = app.sessions.get(session_id) {
+                                session.stop_passthrough();
+                            }
+                            return Ok(Action::ZoomIn(prev_task));
+                        }
+                    }
+                    PREFIX_KEY => {
+                        if let Some(session) = app.sessions.get_mut(session_id) {
+                            session.write_input(&[PREFIX_KEY])?;
+                        }
+                    }
+                    b'?' => {
+                        draw_help_bar(app.rows, app.cols);
+                        let mut discard = [0u8; 1];
+                        let _ = stdin.read(&mut discard);
+                        draw_status_bar(
+                            app.rows, app.cols, task, session_id, &last_status, None,
+                        );
+                    }
+                    b'q' => return Ok(Action::Quit),
+                    _ => {}
+                }
+            } else {
+                // Find the next PREFIX_KEY or end of buffer and write the
+                // entire chunk to the PTY in one call.
+                let start = i;
+                while i < n && buf[i] != PREFIX_KEY {
+                    i += 1;
+                }
+                if let Some(session) = app.sessions.get_mut(session_id) {
+                    session.write_input(&buf[start..i])?;
+                }
+            }
+        }
+    }
+}
+
+fn draw_status_bar(
+    rows: u16,
+    cols: u16,
+    task: &str,
+    session_id: &str,
+    status: &SessionStatus,
+    debug: Option<&str>,
+) {
+    let left = format!(
+        " ^B ? help │ {} ({}) │ {} {}",
+        task,
+        session_id,
+        status.indicator(),
+        status.label(),
+    );
+    let content = if let Some(dbg) = debug {
+        let right = format!(" [{dbg}]");
+        let gap = (cols as usize).saturating_sub(left.len() + right.len());
+        format!("{left}{:gap$}{right}", "")
+    } else {
+        left.clone()
+    };
+    let padding = (cols as usize).saturating_sub(content.len());
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = write!(
+        out,
+        "\x1b7\x1b[{rows};1H\x1b[7m{content}{:padding$}\x1b[0m\x1b8",
+        "",
+    );
+    let _ = out.flush();
+}
+
+fn draw_help_bar(rows: u16, cols: u16) {
+    let content = " ^B t:tree  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+    let padding = (cols as usize).saturating_sub(content.len());
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = write!(
+        out,
+        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
+        "",
+    );
+    let _ = out.flush();
+}
+
+fn print_usage() {
+    eprintln!(
+        "kbtz-mux - task multiplexer for kbtz
+
+USAGE:
+    kbtz-mux [OPTIONS]
+
+OPTIONS:
+    --db <path>            Path to kbtz database (default: $KBTZ_DB or ~/.kbtz/tasks.db)
+    -j, --concurrency <n>  Max concurrent sessions (default: 4)
+    --prefer <text>        Preference hint for task selection (FTS match)
+    --command <cmd>        Command to run per session (default: claude)
+    -h, --help             Show this help
+
+TREE MODE KEYS:
+    j/k, Up/Down   Navigate
+    Enter           Zoom into session
+    Space           Collapse/expand
+    p               Pause/unpause task
+    d               Mark task done
+    ?               Help
+    q               Quit
+
+ZOOMED MODE:
+    ^B t            Return to tree
+    ^B n/p          Next/prev session
+    ^B ^B           Send literal Ctrl-B
+    ^B ?            Help
+    ^B q            Quit"
+    );
+}
