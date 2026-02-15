@@ -143,7 +143,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = ui::centered_rect(55, 24, frame.area());
+    let term = frame.area();
+    let width = 55.min(term.width.saturating_sub(4));
+    let height = 24.min(term.height.saturating_sub(2));
+    let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
