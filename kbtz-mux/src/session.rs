@@ -120,7 +120,7 @@ impl SessionStatus {
         match s.trim() {
             "active" => Self::Active,
             "idle" => Self::Idle,
-            "needs_input" => Self::NeedsInput,
+            "needs_input" | "needs input" => Self::NeedsInput,
             _ => Self::Starting,
         }
     }
@@ -360,6 +360,7 @@ mod tests {
         // from_str(label()) should return the same variant (except Starting)
         assert_eq!(SessionStatus::from_str(SessionStatus::Active.label()), SessionStatus::Active);
         assert_eq!(SessionStatus::from_str(SessionStatus::Idle.label()), SessionStatus::Idle);
+        assert_eq!(SessionStatus::from_str(SessionStatus::NeedsInput.label()), SessionStatus::NeedsInput);
     }
 
     #[test]
