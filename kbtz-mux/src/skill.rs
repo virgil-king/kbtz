@@ -88,6 +88,23 @@ release $KBTZ_TASK $KBTZ_SESSION_ID
 EOF
 ```
 
+Subtasks can also depend on each other. For example, to define
+interfaces first and then run tests and implementation in parallel:
+
+```
+kbtz exec <<'EOF'
+add feat-interfaces "Define interfaces" -p $KBTZ_TASK
+add feat-tests "Add tests" -p $KBTZ_TASK
+add feat-impl "Implement interfaces" -p $KBTZ_TASK
+block feat-interfaces feat-tests
+block feat-interfaces feat-impl
+block feat-interfaces $KBTZ_TASK
+block feat-tests $KBTZ_TASK
+block feat-impl $KBTZ_TASK
+release $KBTZ_TASK $KBTZ_SESSION_ID
+EOF
+```
+
 All commands run in a single transaction — if any command fails, none take
 effect. The release MUST be last. The mux will then kill your session,
 claim the subtasks, and spawn new agents for them. When all subtasks are
