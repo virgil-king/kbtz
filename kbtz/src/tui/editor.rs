@@ -44,8 +44,8 @@ pub fn open_editor(
         bail!("editor exited with status {status}");
     }
 
-    let content = std::fs::read_to_string(&path)
-        .context("failed to read temp file after editor closed")?;
+    let content =
+        std::fs::read_to_string(&path).context("failed to read temp file after editor closed")?;
 
     Ok(content)
 }

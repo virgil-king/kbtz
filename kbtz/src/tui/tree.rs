@@ -1,8 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::ui;
 use super::app::{AddField, App, Mode};
+use crate::ui;
 
 pub fn render(frame: &mut Frame, app: &App) {
     if app.show_notes {
@@ -83,14 +83,8 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(prefix),
                 Span::raw(collapse_indicator),
                 Span::styled(icon, style),
-                Span::styled(
-                    row.name.clone(),
-                    Style::default().bold(),
-                ),
-                Span::styled(
-                    blocked_info,
-                    Style::default().fg(Color::Red),
-                ),
+                Span::styled(row.name.clone(), Style::default().bold()),
+                Span::styled(blocked_info, Style::default().fg(Color::Red)),
                 Span::raw(desc),
             ]);
 
@@ -103,12 +97,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Tasks "),
-        );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks "));
 
     frame.render_widget(list, area);
 }
@@ -130,11 +119,7 @@ fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let paragraph = Paragraph::new(text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
@@ -157,16 +142,12 @@ fn render_field(
     } else {
         Style::default()
     };
-    frame.render_widget(
-        Paragraph::new(label).style(label_style),
-        chunks[*idx],
-    );
+    frame.render_widget(Paragraph::new(label).style(label_style), chunks[*idx]);
     *idx += 1;
 
     let cursor = if focused { "_" } else { "" };
     frame.render_widget(
-        Paragraph::new(format!("  {value}{cursor}"))
-            .style(Style::default().fg(Color::White)),
+        Paragraph::new(format!("  {value}{cursor}")).style(Style::default().fg(Color::White)),
         chunks[*idx],
     );
     *idx += 1;
@@ -227,9 +208,30 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
     );
     idx += 1;
 
-    render_field(frame, "Name:", &form.name, form.focused == AddField::Name, &chunks, &mut idx);
-    render_field(frame, "Description:", &form.description, form.focused == AddField::Description, &chunks, &mut idx);
-    render_field(frame, "Note:", &form.note, form.focused == AddField::Note, &chunks, &mut idx);
+    render_field(
+        frame,
+        "Name:",
+        &form.name,
+        form.focused == AddField::Name,
+        &chunks,
+        &mut idx,
+    );
+    render_field(
+        frame,
+        "Description:",
+        &form.description,
+        form.focused == AddField::Description,
+        &chunks,
+        &mut idx,
+    );
+    render_field(
+        frame,
+        "Note:",
+        &form.note,
+        form.focused == AddField::Note,
+        &chunks,
+        &mut idx,
+    );
 
     // Error
     if let Some(err) = &form.error {
@@ -313,9 +315,10 @@ fn render_help(frame: &mut Frame) {
             Span::raw("Quit"),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::styled("Add Task Dialog:", Style::default().bold()),
-        ]),
+        Line::from(vec![Span::styled(
+            "Add Task Dialog:",
+            Style::default().bold(),
+        )]),
         Line::from(vec![
             Span::styled("  Tab/S-Tab ", Style::default().fg(Color::Cyan)),
             Span::raw("Next/prev field"),

@@ -6,10 +6,11 @@ use crate::model::{Note, Task};
 use crate::validate::{detect_dep_cycle, detect_parent_cycle, validate_name};
 
 fn task_exists(conn: &Connection, name: &str) -> Result<bool> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM tasks WHERE name = ?1", [name], |row| {
-            row.get(0)
-        })?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
     Ok(count > 0)
 }
 
@@ -34,7 +35,8 @@ fn read_task_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     })
 }
 
-const TASK_COLUMNS: &str = "id, name, parent, description, status, assignee, status_changed_at, created_at, updated_at";
+const TASK_COLUMNS: &str =
+    "id, name, parent, description, status, assignee, status_changed_at, created_at, updated_at";
 
 const INSERT_TASK: &str = "
 INSERT INTO tasks (name, parent, description, status, assignee, status_changed_at)
@@ -152,16 +154,10 @@ pub fn add_task(
 
 pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
-    let rows = conn.execute(
-        CLAIM_OPEN,
-        rusqlite::params![assignee, name],
-    )?;
+    let rows = conn.execute(CLAIM_OPEN, rusqlite::params![assignee, name])?;
     if rows == 0 {
         // Also allow idempotent re-claim by same assignee
-        let rows = conn.execute(
-            RECLAIM_ACTIVE,
-            rusqlite::params![assignee, name],
-        )?;
+        let rows = conn.execute(RECLAIM_ACTIVE, rusqlite::params![assignee, name])?;
         if rows > 0 {
             return Ok(());
         }
@@ -278,10 +274,7 @@ pub fn claim_next_task(
             return Ok(None);
         };
 
-        let rows = conn.execute(
-            CLAIM_OPEN,
-            rusqlite::params![assignee, name],
-        )?;
+        let rows = conn.execute(CLAIM_OPEN, rusqlite::params![assignee, name])?;
 
         if rows == 0 {
             // Another writer claimed it between our SELECT and UPDATE
@@ -315,10 +308,7 @@ pub fn steal_task(conn: &Connection, name: &str, new_assignee: &str) -> Result<S
         bail!("task '{name}' is not active (status: {status})");
     }
     let prev = current_assignee.unwrap();
-    conn.execute(
-        REASSIGN_ACTIVE,
-        rusqlite::params![new_assignee, name],
-    )?;
+    conn.execute(REASSIGN_ACTIVE, rusqlite::params![new_assignee, name])?;
     Ok(prev)
 }
 
@@ -347,11 +337,10 @@ pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn force_unassign_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
-    let status: String = conn.query_row(
-        "SELECT status FROM tasks WHERE name = ?1",
-        [name],
-        |row| row.get(0),
-    )?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
     if status != "active" {
         bail!("task '{name}' is not active (status: {status})");
     }
@@ -367,11 +356,10 @@ pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn pause_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
-    let status: String = conn.query_row(
-        "SELECT status FROM tasks WHERE name = ?1",
-        [name],
-        |row| row.get(0),
-    )?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
     if status == "done" {
         bail!("task '{name}' is done");
     }
@@ -384,11 +372,10 @@ pub fn pause_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn unpause_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
-    let status: String = conn.query_row(
-        "SELECT status FROM tasks WHERE name = ?1",
-        [name],
-        |row| row.get(0),
-    )?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
     if status != "paused" {
         bail!("task '{name}' is not paused");
     }
@@ -398,10 +385,7 @@ pub fn unpause_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn update_description(conn: &Connection, name: &str, description: &str) -> Result<()> {
     require_task(conn, name)?;
-    conn.execute(
-        SET_DESCRIPTION,
-        rusqlite::params![description, name],
-    )?;
+    conn.execute(SET_DESCRIPTION, rusqlite::params![description, name])?;
     Ok(())
 }
 
@@ -413,10 +397,7 @@ pub fn reparent_task(conn: &Connection, name: &str, parent: Option<&str>) -> Res
             bail!("setting parent to '{new_parent}' would create a cycle");
         }
     }
-    conn.execute(
-        SET_PARENT,
-        rusqlite::params![parent, name],
-    )?;
+    conn.execute(SET_PARENT, rusqlite::params![parent, name])?;
     Ok(())
 }
 
@@ -549,9 +530,8 @@ pub fn add_note(conn: &Connection, task_name: &str, content: &str) -> Result<()>
 
 pub fn list_notes(conn: &Connection, task_name: &str) -> Result<Vec<Note>> {
     require_task(conn, task_name)?;
-    let mut stmt = conn.prepare(
-        "SELECT id, task, content, created_at FROM notes WHERE task = ?1 ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, task, content, created_at FROM notes WHERE task = ?1 ORDER BY id")?;
     let rows = stmt.query_map([task_name], |row| {
         Ok(Note {
             id: row.get(0)?,
@@ -951,8 +931,26 @@ mod tests {
     fn claim_next_with_preference() {
         let conn = db::open_memory().unwrap();
         // "backend" is older but doesn't match preference
-        add_task(&conn, "backend", None, "server-side API work", None, None, false).unwrap();
-        add_task(&conn, "frontend", None, "UI components for dashboard", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "backend",
+            None,
+            "server-side API work",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            "frontend",
+            None,
+            "UI components for dashboard",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         let picked = claim_next_task(&conn, "agent", Some("UI components")).unwrap();
         assert_eq!(picked.as_deref(), Some("frontend"));
@@ -962,7 +960,16 @@ mod tests {
     fn claim_next_preference_matches_notes() {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "task-a", None, "generic task", None, None, false).unwrap();
-        add_task(&conn, "task-b", None, "another generic task", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "task-b",
+            None,
+            "another generic task",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         add_note(&conn, "task-b", "needs database migration work").unwrap();
 
         let picked = claim_next_task(&conn, "agent", Some("database migration")).unwrap();
@@ -1039,7 +1046,10 @@ mod tests {
         add_task(&conn, "t", None, "", None, None, false).unwrap();
         mark_done(&conn, "t").unwrap();
         let err = pause_task(&conn, "t").unwrap_err();
-        assert!(err.to_string().contains("is done"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("is done"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1048,7 +1058,10 @@ mod tests {
         add_task(&conn, "t", None, "", None, None, false).unwrap();
         pause_task(&conn, "t").unwrap();
         let err = pause_task(&conn, "t").unwrap_err();
-        assert!(err.to_string().contains("already paused"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("already paused"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1066,7 +1079,10 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "t", None, "", None, None, false).unwrap();
         let err = super::unpause_task(&conn, "t").unwrap_err();
-        assert!(err.to_string().contains("not paused"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("not paused"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1075,7 +1091,10 @@ mod tests {
         add_task(&conn, "t", None, "", None, None, false).unwrap();
         pause_task(&conn, "t").unwrap();
         let err = claim_task(&conn, "t", "agent").unwrap_err();
-        assert!(err.to_string().contains("paused"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("paused"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -13,7 +13,12 @@ pub struct TaskDetail<'a> {
     pub blocks: &'a [String],
 }
 
-pub fn format_task_detail(task: &Task, notes: &[Note], blockers: &[String], dependents: &[String]) -> String {
+pub fn format_task_detail(
+    task: &Task,
+    notes: &[Note],
+    blockers: &[String],
+    dependents: &[String],
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("Name:        {}\n", task.name));
     out.push_str(&format!("Status:      {}\n", task.status_str()));
@@ -81,7 +86,8 @@ pub fn format_task_tree(tasks: &[Task]) -> String {
 
     // Build parent -> children map
     let mut children_map: HashMap<Option<&str>, Vec<&Task>> = HashMap::new();
-    let task_names: std::collections::HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+    let task_names: std::collections::HashSet<&str> =
+        tasks.iter().map(|t| t.name.as_str()).collect();
 
     for task in tasks {
         let parent_key = match task.parent.as_deref() {
@@ -157,7 +163,13 @@ pub fn format_notes(notes: &[Note]) -> String {
 mod tests {
     use super::*;
 
-    fn make_task(name: &str, parent: Option<&str>, status: &str, assignee: Option<&str>, desc: &str) -> Task {
+    fn make_task(
+        name: &str,
+        parent: Option<&str>,
+        status: &str,
+        assignee: Option<&str>,
+        desc: &str,
+    ) -> Task {
         Task {
             id: 0,
             name: name.to_string(),
@@ -173,7 +185,13 @@ mod tests {
 
     #[test]
     fn tree_single_root() {
-        let tasks = vec![make_task("root", None, "active", Some("agent"), "Root task")];
+        let tasks = vec![make_task(
+            "root",
+            None,
+            "active",
+            Some("agent"),
+            "Root task",
+        )];
         let out = format_task_tree(&tasks);
         assert_eq!(out, "* root  Root task\n");
     }

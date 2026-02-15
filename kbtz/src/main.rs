@@ -57,7 +57,15 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             claim,
             paused,
         } => {
-            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref(), paused)?;
+            ops::add_task(
+                conn,
+                &name,
+                parent.as_deref(),
+                &desc,
+                note.as_deref(),
+                claim.as_deref(),
+                paused,
+            )?;
             eprintln!("Added task '{name}'");
             if paused {
                 eprintln!("Task '{name}' created in paused state");
@@ -67,17 +75,17 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Claim { name, assignee } => {
-            ops::claim_task(&conn, &name, &assignee)?;
+            ops::claim_task(conn, &name, &assignee)?;
             eprintln!("Claimed '{name}' for '{assignee}'");
         }
 
         Command::ClaimNext { assignee, prefer } => {
-            match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
+            match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
                 Some(name) => {
-                    let task = ops::get_task(&conn, &name)?;
-                    let notes = ops::list_notes(&conn, &name)?;
-                    let blockers = ops::get_blockers(&conn, &name)?;
-                    let dependents = ops::get_dependents(&conn, &name)?;
+                    let task = ops::get_task(conn, &name)?;
+                    let notes = ops::list_notes(conn, &name)?;
+                    let blockers = ops::get_blockers(conn, &name)?;
+                    let dependents = ops::get_dependents(conn, &name)?;
                     print!(
                         "{}",
                         output::format_task_detail(&task, &notes, &blockers, &dependents)
@@ -91,42 +99,42 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Steal { name, assignee } => {
-            let prev = ops::steal_task(&conn, &name, &assignee)?;
+            let prev = ops::steal_task(conn, &name, &assignee)?;
             eprintln!("Stole '{name}' from '{prev}' to '{assignee}'");
         }
 
         Command::Release { name, assignee } => {
-            ops::release_task(&conn, &name, &assignee)?;
+            ops::release_task(conn, &name, &assignee)?;
             eprintln!("Released '{name}'");
         }
 
         Command::ForceUnassign { name } => {
-            ops::force_unassign_task(&conn, &name)?;
+            ops::force_unassign_task(conn, &name)?;
             eprintln!("Force-unassigned '{name}'");
         }
 
         Command::Done { name } => {
-            ops::mark_done(&conn, &name)?;
+            ops::mark_done(conn, &name)?;
             eprintln!("Marked '{name}' as done");
         }
 
         Command::Reopen { name } => {
-            ops::reopen_task(&conn, &name)?;
+            ops::reopen_task(conn, &name)?;
             eprintln!("Reopened '{name}'");
         }
 
         Command::Pause { name } => {
-            ops::pause_task(&conn, &name)?;
+            ops::pause_task(conn, &name)?;
             eprintln!("Paused '{name}'");
         }
 
         Command::Unpause { name } => {
-            ops::unpause_task(&conn, &name)?;
+            ops::unpause_task(conn, &name)?;
             eprintln!("Unpaused '{name}'");
         }
 
         Command::Reparent { name, parent } => {
-            ops::reparent_task(&conn, &name, parent.as_deref())?;
+            ops::reparent_task(conn, &name, parent.as_deref())?;
             match parent.as_deref() {
                 Some(p) => eprintln!("Moved '{name}' under '{p}'"),
                 None => eprintln!("Moved '{name}' to root level"),
@@ -134,20 +142,20 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Describe { name, desc } => {
-            ops::update_description(&conn, &name, &desc)?;
+            ops::update_description(conn, &name, &desc)?;
             eprintln!("Updated description for '{name}'");
         }
 
         Command::Rm { name, recursive } => {
-            ops::remove_task(&conn, &name, recursive)?;
+            ops::remove_task(conn, &name, recursive)?;
             eprintln!("Removed task '{name}'");
         }
 
         Command::Show { name, json } => {
-            let task = ops::get_task(&conn, &name)?;
-            let notes = ops::list_notes(&conn, &name)?;
-            let blockers = ops::get_blockers(&conn, &name)?;
-            let dependents = ops::get_dependents(&conn, &name)?;
+            let task = ops::get_task(conn, &name)?;
+            let notes = ops::list_notes(conn, &name)?;
+            let blockers = ops::get_blockers(conn, &name)?;
+            let dependents = ops::get_dependents(conn, &name)?;
             if json {
                 let detail = output::TaskDetail {
                     task: &task,
@@ -172,7 +180,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             json,
         } => {
             let status = status.map(|s| StatusFilter::parse(&s)).transpose()?;
-            let tasks = ops::list_tasks(&conn, status, all, root.as_deref())?;
+            let tasks = ops::list_tasks(conn, status, all, root.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tasks)?);
             } else if tree {
@@ -185,14 +193,16 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         Command::Note { name, content } => {
             let content = match content {
                 Some(c) => c,
-                None => bail!("note content must be provided explicitly (stdin is not available inside exec)"),
+                None => bail!(
+                    "note content must be provided explicitly (stdin is not available inside exec)"
+                ),
             };
-            ops::add_note(&conn, &name, &content)?;
+            ops::add_note(conn, &name, &content)?;
             eprintln!("Added note to '{name}'");
         }
 
         Command::Notes { name, json } => {
-            let notes = ops::list_notes(&conn, &name)?;
+            let notes = ops::list_notes(conn, &name)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&notes)?);
             } else {
@@ -201,12 +211,12 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Block { blocker, blocked } => {
-            ops::add_block(&conn, &blocker, &blocked)?;
+            ops::add_block(conn, &blocker, &blocked)?;
             eprintln!("'{blocker}' now blocks '{blocked}'");
         }
 
         Command::Unblock { blocker, blocked } => {
-            ops::remove_block(&conn, &blocker, &blocked)?;
+            ops::remove_block(conn, &blocker, &blocked)?;
             eprintln!("'{blocker}' no longer blocks '{blocked}'");
         }
 
@@ -219,13 +229,11 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
 }
 
 fn parse_exec_line(line: &str) -> Result<Command> {
-    let tokens = shlex::split(line)
-        .with_context(|| format!("invalid shell quoting: {line}"))?;
+    let tokens = shlex::split(line).with_context(|| format!("invalid shell quoting: {line}"))?;
     // Prepend program name so Clap is happy
     let mut args = vec!["kbtz".to_string()];
     args.extend(tokens);
-    let cli = Cli::try_parse_from(&args)
-        .with_context(|| format!("failed to parse: {line}"))?;
+    let cli = Cli::try_parse_from(&args).with_context(|| format!("failed to parse: {line}"))?;
     Ok(cli.command)
 }
 
@@ -237,8 +245,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let command = parse_exec_line(line)
-            .with_context(|| format!("line {}", lineno + 1))?;
+        let command = parse_exec_line(line).with_context(|| format!("line {}", lineno + 1))?;
         // Reject commands that don't belong in a batch
         match &command {
             Command::Exec => bail!("line {}: exec cannot be nested", lineno + 1),
@@ -257,8 +264,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
 
     let result = (|| -> Result<()> {
         for (lineno, line, command) in commands {
-            dispatch(conn, command)
-                .with_context(|| format!("line {lineno}: {line}"))?;
+            dispatch(conn, command).with_context(|| format!("line {lineno}: {line}"))?;
         }
         Ok(())
     })();
@@ -443,7 +449,10 @@ done task-x
         let result = run_exec(&conn, input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+        assert!(
+            msg.contains("line 2"),
+            "expected line number in error: {msg}"
+        );
     }
 
     #[test]
@@ -467,10 +476,7 @@ claim-next agent-1
         // One of the tasks should be claimed
         let t1 = ops::get_task(&conn, "task-1").unwrap();
         let t2 = ops::get_task(&conn, "task-2").unwrap();
-        let claimed_count = [&t1, &t2]
-            .iter()
-            .filter(|t| t.status == "active")
-            .count();
+        let claimed_count = [&t1, &t2].iter().filter(|t| t.status == "active").count();
         assert_eq!(claimed_count, 1);
     }
 
@@ -482,7 +488,10 @@ claim-next agent-1
         let result = run_exec(&conn, input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+        assert!(
+            msg.contains("line 2"),
+            "expected line number in error: {msg}"
+        );
         // First task should be rolled back
         assert!(ops::get_task(&conn, "real-task").is_err());
     }

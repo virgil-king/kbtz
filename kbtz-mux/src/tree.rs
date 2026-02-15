@@ -1,8 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use kbtz::ui;
 use crate::app::App;
+use kbtz::ui;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -18,11 +18,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     if app.tree_rows.is_empty() {
         let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
             .style(Style::default().fg(Color::DarkGray))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" kbtz-mux "),
-            );
+            .block(Block::default().borders(Borders::ALL).title(" kbtz-mux "));
         frame.render_widget(msg, area);
         return;
     }
@@ -46,19 +42,18 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
 
             // Unified status: session indicator when a session exists,
             // task status otherwise.
-            let (icon, session_suffix) =
-                if let Some(sid) = app.task_to_session.get(&row.name) {
-                    if let Some(session) = app.sessions.get(sid) {
-                        (
-                            format!("{} ", session.status.indicator()),
-                            format!(" {}", sid),
-                        )
-                    } else {
-                        (ui::icon_for_task(row).to_string(), String::new())
-                    }
+            let (icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name) {
+                if let Some(session) = app.sessions.get(sid) {
+                    (
+                        format!("{} ", session.status.indicator()),
+                        format!(" {}", sid),
+                    )
                 } else {
                     (ui::icon_for_task(row).to_string(), String::new())
-                };
+                }
+            } else {
+                (ui::icon_for_task(row).to_string(), String::new())
+            };
             let style = ui::status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
@@ -100,20 +95,17 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         format!(" kbtz-mux ({active}/{max} sessions) ")
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
 
     frame.render_widget(list, area);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = if let Some(err) = &app.error {
-        Line::from(vec![
-            Span::styled(err.as_str(), Style::default().fg(Color::Red)),
-        ])
+        Line::from(vec![Span::styled(
+            err.as_str(),
+            Style::default().fg(Color::Red),
+        )])
     } else {
         Line::from(vec![
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
@@ -157,9 +149,7 @@ pub fn render_help(frame: &mut Frame) {
     frame.render_widget(block, area);
 
     let help_text = vec![
-        Line::from(vec![
-            Span::styled("Tree mode:", Style::default().bold()),
-        ]),
+        Line::from(vec![Span::styled("Tree mode:", Style::default().bold())]),
         Line::from(vec![
             Span::styled("  j/k, Up/Down  ", Style::default().fg(Color::Cyan)),
             Span::raw("Navigate tasks"),
@@ -197,9 +187,10 @@ pub fn render_help(frame: &mut Frame) {
             Span::raw("Quit (releases all sessions)"),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::styled("Zoomed / Manager mode:", Style::default().bold()),
-        ]),
+        Line::from(vec![Span::styled(
+            "Zoomed / Manager mode:",
+            Style::default().bold(),
+        )]),
         Line::from(vec![
             Span::styled("  ^B t       ", Style::default().fg(Color::Cyan)),
             Span::raw("Return to tree"),

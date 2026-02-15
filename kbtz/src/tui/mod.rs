@@ -18,12 +18,7 @@ use crate::watch;
 use app::App;
 use event::KeyAction;
 
-pub fn run(
-    db_path: &str,
-    conn: &Connection,
-    root: Option<&str>,
-    poll_interval: u64,
-) -> Result<()> {
+pub fn run(db_path: &str, conn: &Connection, root: Option<&str>, poll_interval: u64) -> Result<()> {
     let mut app = App::new(conn, root)?;
 
     terminal::enable_raw_mode()?;
@@ -73,8 +68,7 @@ fn run_loop(
                                     form.error = None;
                                 }
                                 Err(e) => {
-                                    app.add_form.as_mut().unwrap().error =
-                                        Some(e.to_string());
+                                    app.add_form.as_mut().unwrap().error = Some(e.to_string());
                                 }
                             }
                         }
@@ -86,7 +80,8 @@ fn run_loop(
                                     Ok(content) => {
                                         let content = content.trim_end();
                                         if !content.is_empty() {
-                                            if let Err(e) = ops::add_note(conn, &task_name, content) {
+                                            if let Err(e) = ops::add_note(conn, &task_name, content)
+                                            {
                                                 app.error = Some(e.to_string());
                                             } else {
                                                 app.show_notes = true;

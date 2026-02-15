@@ -108,7 +108,11 @@ fn should_reap_task(session_id: &str, task: &TaskSnapshot) -> bool {
 mod tests {
     use super::*;
 
-    fn snapshot(session_id: &str, phase: SessionPhase, task: Option<TaskSnapshot>) -> SessionSnapshot {
+    fn snapshot(
+        session_id: &str,
+        phase: SessionPhase,
+        task: Option<TaskSnapshot>,
+    ) -> SessionSnapshot {
         SessionSnapshot {
             session_id: session_id.into(),
             phase,
@@ -142,52 +146,73 @@ mod tests {
     #[test]
     fn exited_session_removed_and_slot_filled() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Exited, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Exited,
+                active_task("mux/1"),
+            )],
             2,
         );
         let actions = tick(&w);
-        assert_eq!(actions, vec![
-            SessionAction::Remove { session_id: "mux/1".into() },
-            SessionAction::SpawnUpTo { count: 2 },
-        ]);
+        assert_eq!(
+            actions,
+            vec![
+                SessionAction::Remove {
+                    session_id: "mux/1".into()
+                },
+                SessionAction::SpawnUpTo { count: 2 },
+            ]
+        );
     }
 
     // 2. Done task -> RequestExit
     #[test]
     fn done_task_triggers_request_exit() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Running, task_with_status("done"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Running,
+                task_with_status("done"),
+            )],
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
+        assert!(actions.contains(&SessionAction::RequestExit {
+            session_id: "mux/1".into()
+        }));
     }
 
     // 3. Healthy session -> no action (only SpawnUpTo for free slots)
     #[test]
     fn healthy_session_no_action() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Running, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Running,
+                active_task("mux/1"),
+            )],
             2,
         );
         let actions = tick(&w);
-        assert_eq!(actions, vec![
-            SessionAction::SpawnUpTo { count: 1 },
-        ]);
+        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 1 },]);
     }
 
     // 4. Stopping within timeout -> no ForceKill
     #[test]
     fn stopping_within_timeout_no_force_kill() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Stopping { since: Instant::now() }, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Stopping {
+                    since: Instant::now(),
+                },
+                active_task("mux/1"),
+            )],
             2,
         );
         let actions = tick(&w);
         // Should only get SpawnUpTo (stopping doesn't count toward concurrency)
-        assert_eq!(actions, vec![
-            SessionAction::SpawnUpTo { count: 2 },
-        ]);
+        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 2 },]);
     }
 
     // 5. Stopping past timeout -> ForceKill + Remove
@@ -195,12 +220,20 @@ mod tests {
     fn stopping_past_timeout_force_killed() {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Stopping { since: past }, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Stopping { since: past },
+                active_task("mux/1"),
+            )],
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::ForceKill { session_id: "mux/1".into() }));
-        assert!(actions.contains(&SessionAction::Remove { session_id: "mux/1".into() }));
+        assert!(actions.contains(&SessionAction::ForceKill {
+            session_id: "mux/1".into()
+        }));
+        assert!(actions.contains(&SessionAction::Remove {
+            session_id: "mux/1".into()
+        }));
     }
 
     // 6. Stopping sessions don't count toward concurrency
@@ -209,7 +242,13 @@ mod tests {
         let w = world(
             vec![
                 snapshot("mux/1", SessionPhase::Running, active_task("mux/1")),
-                snapshot("mux/2", SessionPhase::Stopping { since: Instant::now() }, active_task("mux/2")),
+                snapshot(
+                    "mux/2",
+                    SessionPhase::Stopping {
+                        since: Instant::now(),
+                    },
+                    active_task("mux/2"),
+                ),
             ],
             2,
         );
@@ -224,11 +263,17 @@ mod tests {
     fn spawn_after_force_kill() {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Stopping { since: past }, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Stopping { since: past },
+                active_task("mux/1"),
+            )],
             1,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::ForceKill { session_id: "mux/1".into() }));
+        assert!(actions.contains(&SessionAction::ForceKill {
+            session_id: "mux/1".into()
+        }));
         assert!(actions.contains(&SessionAction::SpawnUpTo { count: 1 }));
     }
 
@@ -249,23 +294,28 @@ mod tests {
     // 9. Deleted task -> RequestExit
     #[test]
     fn deleted_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot("mux/1", SessionPhase::Running, None)],
-            2,
-        );
+        let w = world(vec![snapshot("mux/1", SessionPhase::Running, None)], 2);
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
+        assert!(actions.contains(&SessionAction::RequestExit {
+            session_id: "mux/1".into()
+        }));
     }
 
     // 10. Reassigned task -> RequestExit
     #[test]
     fn reassigned_task_triggers_request_exit() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Running, active_task("mux/2"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Running,
+                active_task("mux/2"),
+            )],
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
+        assert!(actions.contains(&SessionAction::RequestExit {
+            session_id: "mux/1".into()
+        }));
     }
 
     // 11. Manual mode (max_concurrency=0) -> no SpawnUpTo
@@ -280,24 +330,39 @@ mod tests {
     #[test]
     fn manual_mode_still_reaps_exited() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Exited, active_task("mux/1"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Exited,
+                active_task("mux/1"),
+            )],
             0,
         );
         let actions = tick(&w);
-        assert_eq!(actions, vec![
-            SessionAction::Remove { session_id: "mux/1".into() },
-        ]);
+        assert_eq!(
+            actions,
+            vec![SessionAction::Remove {
+                session_id: "mux/1".into()
+            },]
+        );
     }
 
     // 13. Manual mode still requests exit for done tasks
     #[test]
     fn manual_mode_still_reaps_done() {
         let w = world(
-            vec![snapshot("mux/1", SessionPhase::Running, task_with_status("done"))],
+            vec![snapshot(
+                "mux/1",
+                SessionPhase::Running,
+                task_with_status("done"),
+            )],
             0,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
-        assert!(!actions.iter().any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
+        assert!(actions.contains(&SessionAction::RequestExit {
+            session_id: "mux/1".into()
+        }));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
     }
 }

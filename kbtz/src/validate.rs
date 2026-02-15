@@ -51,9 +51,7 @@ pub fn detect_dep_cycle(conn: &Connection, blocker: &str, blocked: &str) -> Resu
     visited.insert(blocker.to_string());
 
     while let Some(current) = queue.pop_front() {
-        let mut stmt = conn.prepare_cached(
-            "SELECT blocker FROM task_deps WHERE blocked = ?1",
-        )?;
+        let mut stmt = conn.prepare_cached("SELECT blocker FROM task_deps WHERE blocked = ?1")?;
         let blockers = stmt.query_map([&current], |row| row.get::<_, String>(0))?;
         for b in blockers {
             let b = b?;

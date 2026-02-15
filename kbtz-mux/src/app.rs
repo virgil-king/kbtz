@@ -9,7 +9,10 @@ use kbtz::model::Task;
 use kbtz::ops;
 use kbtz::ui::TreeRow;
 
-use crate::lifecycle::{self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot, GRACEFUL_TIMEOUT};
+use crate::lifecycle::{
+    self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
+    GRACEFUL_TIMEOUT,
+};
 use crate::session::{Session, SessionStatus};
 
 pub struct App {
@@ -19,7 +22,7 @@ pub struct App {
     pub tree_rows: Vec<TreeRow>,
 
     // Session management
-    pub sessions: HashMap<String, Session>,     // session_id -> session
+    pub sessions: HashMap<String, Session>, // session_id -> session
     pub task_to_session: HashMap<String, String>, // task_name -> session_id
     counter: u64,
     pub mux_dir: PathBuf,
@@ -47,7 +50,7 @@ pub struct App {
 /// What the top-level loop should do next.
 pub enum Action {
     Continue,
-    ZoomIn(String),   // task_name
+    ZoomIn(String), // task_name
     NextSession,
     PrevSession,
     ReturnToTree,
@@ -60,6 +63,7 @@ fn session_id_to_filename(session_id: &str) -> String {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
         mux_dir: PathBuf,
@@ -216,8 +220,7 @@ impl App {
                         }
                         Err(e) => {
                             // Failed to spawn — release the claim
-                            let _ =
-                                ops::release_task(&self.conn, &task_name, &session_id);
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
                             self.counter -= 1;
                             self.error = Some(format!("failed to spawn session: {e}"));
                             break;
@@ -270,7 +273,9 @@ impl App {
 
     /// Spawn the top-level task management session.
     fn spawn_toplevel(&mut self) -> Result<()> {
-        let prompt = "You are the top-level task management agent. Help the user manage the kbtz task list.".to_string();
+        let prompt =
+            "You are the top-level task management agent. Help the user manage the kbtz task list."
+                .to_string();
         let args: Vec<String> = vec![
             "--append-system-prompt".into(),
             crate::prompt::TOPLEVEL_PROMPT.into(),
@@ -278,9 +283,7 @@ impl App {
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "mux/toplevel";
-        let env_vars: Vec<(&str, &str)> = vec![
-            ("KBTZ_DB", &self.db_path),
-        ];
+        let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
         let session = Session::spawn(
             &self.command,
             &arg_refs,
@@ -453,14 +456,8 @@ impl App {
         // Wait for all to exit, up to the timeout.
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
-            let workers_dead = self
-                .sessions
-                .values_mut()
-                .all(|s| !s.is_alive());
-            let toplevel_dead = self
-                .toplevel
-                .as_mut()
-                .map_or(true, |s| !s.is_alive());
+            let workers_dead = self.sessions.values_mut().all(|s| !s.is_alive());
+            let toplevel_dead = self.toplevel.as_mut().is_none_or(|s| !s.is_alive());
             if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
                 break;
             }

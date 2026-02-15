@@ -256,20 +256,16 @@ mod tests {
         init(&conn).unwrap();
 
         let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE name = 'child'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT status FROM tasks WHERE name = 'child'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "open");
 
         let parent: Option<String> = conn
-            .query_row(
-                "SELECT parent FROM tasks WHERE name = 'child'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT parent FROM tasks WHERE name = 'child'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(parent.as_deref(), Some("parent"));
     }
@@ -288,11 +284,9 @@ mod tests {
         init(&conn).unwrap();
 
         let note_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM notes WHERE task = 'a'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM notes WHERE task = 'a'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(note_count, 1);
 
