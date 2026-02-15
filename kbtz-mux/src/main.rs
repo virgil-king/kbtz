@@ -393,6 +393,7 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     execute!(
         stdout,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
         crossterm::cursor::MoveTo(0, 0)
     )?;
 
@@ -607,6 +608,7 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     execute!(
         stdout,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
         crossterm::cursor::MoveTo(0, 0)
     )?;
 
