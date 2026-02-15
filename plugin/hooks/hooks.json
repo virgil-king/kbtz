@@ -13,7 +13,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh active"
           }
         ]
       }
@@ -23,7 +27,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh active"
           }
         ]
       }
@@ -33,17 +41,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh blocked && bash ${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh blocked"
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "hooks": [
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input"
+          },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh needs_input"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh needs_input"
           }
         ]
       }
@@ -53,7 +59,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh active"
           }
         ]
       }
@@ -63,7 +73,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle && bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/mux-status.sh idle"
           }
         ]
       }

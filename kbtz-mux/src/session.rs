@@ -81,7 +81,6 @@ pub enum SessionStatus {
     Starting,
     Active,
     Idle,
-    Blocked,
     NeedsInput,
 }
 
@@ -90,8 +89,7 @@ impl SessionStatus {
         match s.trim() {
             "active" => Self::Active,
             "idle" => Self::Idle,
-            "blocked" => Self::Blocked,
-            "needs_input" => Self::NeedsInput,
+            "needs_input" | "needs input" => Self::NeedsInput,
             _ => Self::Starting,
         }
     }
@@ -101,7 +99,6 @@ impl SessionStatus {
             Self::Starting => "starting",
             Self::Active => "active",
             Self::Idle => "idle",
-            Self::Blocked => "blocked",
             Self::NeedsInput => "needs input",
         }
     }
@@ -111,7 +108,6 @@ impl SessionStatus {
             Self::Starting => "\u{23f3}",   // ⏳
             Self::Active => "\u{1f7e2}",    // 🟢
             Self::Idle => "\u{1f7e1}",      // 🟡
-            Self::Blocked => "\u{1f534}",   // 🔴
             Self::NeedsInput => "\u{1f514}", // 🔔
         }
     }
@@ -256,7 +252,6 @@ mod tests {
     fn session_status_from_str_known_values() {
         assert_eq!(SessionStatus::from_str("active"), SessionStatus::Active);
         assert_eq!(SessionStatus::from_str("idle"), SessionStatus::Idle);
-        assert_eq!(SessionStatus::from_str("blocked"), SessionStatus::Blocked);
         assert_eq!(SessionStatus::from_str("needs_input"), SessionStatus::NeedsInput);
     }
 
@@ -277,7 +272,7 @@ mod tests {
         // from_str(label()) should return the same variant (except Starting)
         assert_eq!(SessionStatus::from_str(SessionStatus::Active.label()), SessionStatus::Active);
         assert_eq!(SessionStatus::from_str(SessionStatus::Idle.label()), SessionStatus::Idle);
-        assert_eq!(SessionStatus::from_str(SessionStatus::Blocked.label()), SessionStatus::Blocked);
+        assert_eq!(SessionStatus::from_str(SessionStatus::NeedsInput.label()), SessionStatus::NeedsInput);
     }
 
     #[test]
@@ -286,7 +281,6 @@ mod tests {
             SessionStatus::Starting,
             SessionStatus::Active,
             SessionStatus::Idle,
-            SessionStatus::Blocked,
             SessionStatus::NeedsInput,
         ];
         for v in &variants {
