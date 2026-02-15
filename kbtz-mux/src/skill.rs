@@ -50,12 +50,33 @@ explaining why and exit without marking done.
 
 ## Decomposing into subtasks
 
-If a task is too large to complete in one session, break it into subtasks.
+The mux automatically assigns agents to new tasks. When your work has
+independent pieces, you can create subtasks and the mux will spawn
+separate agents to work on them in parallel. This is the primary way to
+get parallelism — take advantage of it when your task is parallelizable.
+
+### When to decompose
+
+- The work has **multiple independent pieces** (e.g. "add feature X"
+  involves separate backend and frontend changes that don't depend on
+  each other).
+- The scope is **large enough to benefit from parallelism** — the mux
+  will run subtasks concurrently, so splitting saves wall-clock time.
+
+### When NOT to decompose
+
+- The task is **small enough to complete in one session**. Splitting
+  simple work adds coordination overhead with no benefit.
+- The pieces are **tightly coupled** — if each step depends on the
+  previous one, there is nothing to parallelize.
+
+When in doubt, prefer completing the task directly.
+
+### How to decompose
+
 Use `kbtz exec` to create all subtasks, blocking relationships, and release
 your task atomically. This prevents the mux from seeing a partially-created
 decomposition.
-
-Pipe all the commands into `kbtz exec` via a heredoc:
 
 ```
 kbtz exec <<'EOF'
@@ -71,8 +92,16 @@ All commands run in a single transaction — if any command fails, none take
 effect. The release MUST be last. The mux will then kill your session,
 claim the subtasks, and spawn new agents for them. When all subtasks are
 done, your parent task becomes unblocked and the mux will respawn an agent
-for it. Use `kbtz note` to leave context so the new agent can pick up
-where you left off.
+for it.
+
+Name subtasks descriptively, scoped under the parent task name using "-"
+as a separator (e.g. if your task is "auth", name subtasks "auth-db",
+"auth-api"). Each subtask description should contain enough context for
+an agent with no prior knowledge to complete the work independently.
+
+Use `kbtz note` on the parent task to leave context about the
+decomposition strategy so the agent that resumes the parent after all
+subtasks complete understands what was done and why.
 
 ## Adding notes
 
@@ -115,9 +144,7 @@ are easy to find from the task:
    If you are done, use `kbtz done` instead.
 4. Use `kbtz note` to leave context for future agents working on this
    task or its parent.
-5. Subtask names should be scoped under the parent using "-" as separator:
-   e.g. if your task is "auth", name subtasks "auth-db", "auth-api".
-   Only a-z, A-Z, 0-9, _, - are allowed in task names.
+5. Only a-z, A-Z, 0-9, _, - are allowed in task names.
 6. If you resume a previously-started task, check notes and subtask
    status first with `kbtz show` and `kbtz notes` before starting work.
 7. Always note branch names and PR URLs on your task (see "Tracking
