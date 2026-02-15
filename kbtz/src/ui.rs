@@ -1,6 +1,6 @@
 //! Shared UI primitives for kbtz tree rendering.
 //!
-//! Used by both `kbtz watch` (the CLI TUI) and `kbtz-mux` (the multiplexer).
+//! Used by both `kbtz watch` (the CLI TUI) and `kbtz-workspace`.
 
 use std::collections::{HashMap, HashSet};
 

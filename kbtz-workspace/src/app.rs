@@ -25,7 +25,7 @@ pub struct App {
     pub sessions: HashMap<String, Session>, // session_id -> session
     pub task_to_session: HashMap<String, String>, // task_name -> session_id
     counter: u64,
-    pub mux_dir: PathBuf,
+    pub status_dir: PathBuf,
     /// In auto mode, caps how many sessions lifecycle::tick will auto-spawn.
     /// In manual mode (--manual), this field is ignored — the user controls
     /// spawning via the 's' keybinding with no concurrency limit.
@@ -66,7 +66,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
-        mux_dir: PathBuf,
+        status_dir: PathBuf,
         max_concurrency: usize,
         manual: bool,
         prefer: Option<String>,
@@ -82,7 +82,7 @@ impl App {
             sessions: HashMap::new(),
             task_to_session: HashMap::new(),
             counter: 0,
-            mux_dir,
+            status_dir,
             max_concurrency,
             manual,
             prefer,
@@ -207,7 +207,7 @@ impl App {
     fn spawn_up_to(&mut self, count: usize) -> Result<()> {
         for _ in 0..count {
             self.counter += 1;
-            let session_id = format!("mux/{}", self.counter);
+            let session_id = format!("ws/{}", self.counter);
 
             match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())? {
                 Some(task_name) => {
@@ -243,7 +243,7 @@ impl App {
         }
 
         self.counter += 1;
-        let session_id = format!("mux/{}", self.counter);
+        let session_id = format!("ws/{}", self.counter);
 
         ops::claim_task(&self.conn, task_name, &session_id)?;
 
@@ -282,7 +282,7 @@ impl App {
             prompt,
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let session_id = "mux/toplevel";
+        let session_id = "ws/toplevel";
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
         let session = Session::spawn(
             &self.command,
@@ -317,12 +317,12 @@ impl App {
             prompt,
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let mux_dir_str = self.mux_dir.to_string_lossy().to_string();
+        let status_dir_str = self.status_dir.to_string_lossy().to_string();
         let env_vars: Vec<(&str, &str)> = vec![
             ("KBTZ_DB", &self.db_path),
             ("KBTZ_SESSION_ID", session_id),
             ("KBTZ_TASK", &task.name),
-            ("KBTZ_MUX_DIR", &mux_dir_str),
+            ("KBTZ_WORKSPACE_DIR", &status_dir_str),
         ];
         let session = Session::spawn(
             &self.command,
@@ -336,10 +336,10 @@ impl App {
         Ok(session)
     }
 
-    /// Read status files from the mux directory and update session statuses.
+    /// Read status files from the status directory and update session statuses.
     pub fn read_status_files(&mut self) -> Result<()> {
         for (session_id, session) in &mut self.sessions {
-            let path = self.mux_dir.join(session_id_to_filename(session_id));
+            let path = self.status_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
                 session.status = SessionStatus::from_str(&content);
             }
@@ -353,7 +353,7 @@ impl App {
             let _ = session.stop_passthrough();
             let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
             self.task_to_session.remove(&session.task_name);
-            let _ = std::fs::remove_file(self.mux_dir.join(session_id_to_filename(session_id)));
+            let _ = std::fs::remove_file(self.status_dir.join(session_id_to_filename(session_id)));
         }
     }
 
@@ -482,7 +482,7 @@ impl App {
         self.toplevel = None;
 
         // Clean up status files.
-        if let Ok(entries) = std::fs::read_dir(&self.mux_dir) {
+        if let Ok(entries) = std::fs::read_dir(&self.status_dir) {
             for entry in entries.flatten() {
                 let _ = std::fs::remove_file(entry.path());
             }

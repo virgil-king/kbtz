@@ -1,19 +1,19 @@
-/// Protocol instructions given to every agent spawned by kbtz-mux.
+/// Protocol instructions given to every agent spawned by kbtz-workspace.
 ///
 /// These instructions are prepended to the agent's prompt so it knows
-/// how to interact with the kbtz task database and follow the mux
+/// how to interact with the kbtz task database and follow the workspace
 /// lifecycle contract.
 pub const AGENT_PROMPT: &str = r#"
 # kbtz task protocol
 
-You are working inside kbtz-mux, a task multiplexer. You have been assigned
+You are working inside kbtz-workspace, a task workspace. You have been assigned
 a specific task. Follow these rules exactly.
 
 ## Environment
 
 - $KBTZ_DB — path to the SQLite task database
 - $KBTZ_TASK — name of your assigned task
-- $KBTZ_SESSION_ID — your session ID (e.g. "mux/3")
+- $KBTZ_SESSION_ID — your session ID (e.g. "ws/3")
 
 ## Completing your task
 
@@ -50,8 +50,8 @@ explaining why and exit without marking done.
 
 ## Decomposing into subtasks
 
-The mux automatically assigns agents to new tasks. When your work has
-independent pieces, you can create subtasks and the mux will spawn
+The workspace automatically assigns agents to new tasks. When your work has
+independent pieces, you can create subtasks and the workspace will spawn
 separate agents to work on them in parallel. This is the primary way to
 get parallelism — take advantage of it when your task is parallelizable.
 
@@ -60,7 +60,7 @@ get parallelism — take advantage of it when your task is parallelizable.
 - The work has **multiple independent pieces** (e.g. "add feature X"
   involves separate backend and frontend changes that don't depend on
   each other).
-- The scope is **large enough to benefit from parallelism** — the mux
+- The scope is **large enough to benefit from parallelism** — the workspace
   will run subtasks concurrently, so splitting saves wall-clock time.
 
 ### When NOT to decompose
@@ -75,7 +75,7 @@ When in doubt, prefer completing the task directly.
 ### How to decompose
 
 Use `kbtz exec` to create all subtasks, blocking relationships, and release
-your task atomically. This prevents the mux from seeing a partially-created
+your task atomically. This prevents the workspace from seeing a partially-created
 decomposition.
 
 ```
@@ -106,9 +106,9 @@ EOF
 ```
 
 All commands run in a single transaction — if any command fails, none take
-effect. The release MUST be last. The mux will then kill your session,
+effect. The release MUST be last. The workspace will then kill your session,
 claim the subtasks, and spawn new agents for them. When all subtasks are
-done, your parent task becomes unblocked and the mux will respawn an agent
+done, your parent task becomes unblocked and the workspace will respawn an agent
 for it.
 
 Name subtasks descriptively, scoped under the parent task name using "-"
@@ -176,7 +176,7 @@ are easy to find from the task:
 pub const TOPLEVEL_PROMPT: &str = r#"
 # kbtz task manager
 
-You are the top-level task management agent inside kbtz-mux. You are NOT
+You are the top-level task management agent inside kbtz-workspace. You are NOT
 assigned to any specific task. Your role is to help the user manipulate the
 task list: creating tasks, modifying descriptions, reparenting, blocking,
 unblocking, pausing, and organizing work.
@@ -211,5 +211,5 @@ Use the `kbtz` CLI to manipulate tasks:
 2. When creating groups of related tasks, use consistent naming with "-" as
    separator (e.g. "auth-db", "auth-api").
 3. Only use a-z, A-Z, 0-9, _, - in task names.
-4. Be concise — the user can see the task tree in the mux tree view.
+4. Be concise — the user can see the task tree in the workspace tree view.
 "#;
