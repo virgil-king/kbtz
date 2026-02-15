@@ -117,6 +117,17 @@ fn run() -> Result<()> {
     // Graceful shutdown
     app.shutdown();
 
+    // Clear the terminal so the user returns to a clean shell prompt
+    // instead of stale rendering artifacts from zoomed/toplevel mode.
+    let mut stdout = io::stdout();
+    let _ = write!(stdout, "\x1b[r"); // reset scroll region
+    let _ = execute!(
+        stdout,
+        crossterm::cursor::Show,
+        terminal::Clear(terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    );
+
     result
 }
 
