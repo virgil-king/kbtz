@@ -105,9 +105,9 @@ impl SessionStatus {
 
     pub fn indicator(&self) -> &'static str {
         match self {
-            Self::Starting => "\u{23f3}",   // ⏳
-            Self::Active => "\u{1f7e2}",    // 🟢
-            Self::Idle => "\u{1f7e1}",      // 🟡
+            Self::Starting => "\u{23f3}",    // ⏳
+            Self::Active => "\u{1f7e2}",     // 🟢
+            Self::Idle => "\u{1f7e1}",       // 🟡
             Self::NeedsInput => "\u{1f514}", // 🔔
         }
     }
@@ -265,7 +265,10 @@ mod tests {
     fn session_status_from_str_known_values() {
         assert_eq!(SessionStatus::from_str("active"), SessionStatus::Active);
         assert_eq!(SessionStatus::from_str("idle"), SessionStatus::Idle);
-        assert_eq!(SessionStatus::from_str("needs_input"), SessionStatus::NeedsInput);
+        assert_eq!(
+            SessionStatus::from_str("needs_input"),
+            SessionStatus::NeedsInput
+        );
     }
 
     #[test]
@@ -283,9 +286,18 @@ mod tests {
     #[test]
     fn session_status_label_roundtrips() {
         // from_str(label()) should return the same variant (except Starting)
-        assert_eq!(SessionStatus::from_str(SessionStatus::Active.label()), SessionStatus::Active);
-        assert_eq!(SessionStatus::from_str(SessionStatus::Idle.label()), SessionStatus::Idle);
-        assert_eq!(SessionStatus::from_str(SessionStatus::NeedsInput.label()), SessionStatus::NeedsInput);
+        assert_eq!(
+            SessionStatus::from_str(SessionStatus::Active.label()),
+            SessionStatus::Active
+        );
+        assert_eq!(
+            SessionStatus::from_str(SessionStatus::Idle.label()),
+            SessionStatus::Idle
+        );
+        assert_eq!(
+            SessionStatus::from_str(SessionStatus::NeedsInput.label()),
+            SessionStatus::NeedsInput
+        );
     }
 
     #[test]

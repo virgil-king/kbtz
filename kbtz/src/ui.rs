@@ -123,11 +123,11 @@ pub fn status_style(status: &str) -> Style {
 /// Icon for a raw status string.
 pub fn icon_for_status(status: &str) -> &'static str {
     match status {
-        "done" => "\u{2705} ",    // ✅
-        "active" => "\u{1f7e2} ", // 🟢
+        "done" => "\u{2705} ",           // ✅
+        "active" => "\u{1f7e2} ",        // 🟢
         "paused" => "\u{23f8}\u{fe0f} ", // ⏸️
-        "blocked" => "\u{1f6a7} ", // 🚧
-        _ => "\u{26aa} ",          // ⚪
+        "blocked" => "\u{1f6a7} ",       // 🚧
+        _ => "\u{26aa} ",                // ⚪
     }
 }
 

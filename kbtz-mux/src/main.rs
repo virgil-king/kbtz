@@ -22,7 +22,10 @@ use app::{Action, App};
 use session::SessionStatus;
 
 #[derive(Parser)]
-#[command(name = "kbtz-mux", about = "Task multiplexer for kbtz", after_help = "\
+#[command(
+    name = "kbtz-mux",
+    about = "Task multiplexer for kbtz",
+    after_help = "\
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
@@ -41,7 +44,8 @@ ZOOMED MODE / TASK MANAGER:
     ^B n/p          Next/prev session
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
-    ^B q            Quit")]
+    ^B q            Quit"
+)]
 struct Cli {
     /// Path to kbtz database [default: $KBTZ_DB or ~/.kbtz/kbtz.db]
     #[arg(long, env = "KBTZ_DB")]
@@ -117,23 +121,28 @@ fn run() -> Result<()> {
 
     // Ensure the DB exists
     if !std::path::Path::new(&db_path).exists() {
-        bail!(
-            "database not found at {db_path}\nRun 'kbtz add <task> <description>' to create it."
-        );
+        bail!("database not found at {db_path}\nRun 'kbtz add <task> <description>' to create it.");
     }
 
     // Mux status directory
-    let mux_dir = PathBuf::from(
-        std::env::var("KBTZ_MUX_DIR").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            format!("{home}/.kbtz/mux")
-        }),
-    );
+    let mux_dir = PathBuf::from(std::env::var("KBTZ_MUX_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.kbtz/mux")
+    }));
     std::fs::create_dir_all(&mux_dir).context("failed to create mux directory")?;
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    let mut app = App::new(db_path, mux_dir, cli.concurrency, cli.manual, cli.prefer, cli.command, rows, cols)?;
+    let mut app = App::new(
+        db_path,
+        mux_dir,
+        cli.concurrency,
+        cli.manual,
+        cli.prefer,
+        cli.command,
+        rows,
+        cols,
+    )?;
 
     // Initial session spawning
     app.tick()?;
@@ -282,8 +291,7 @@ fn tree_loop(
                             if app.task_to_session.contains_key(name) {
                                 return Ok(Action::ZoomIn(name.to_string()));
                             } else {
-                                app.error =
-                                    Some("no active session for this task".into());
+                                app.error = Some("no active session for this task".into());
                             }
                         }
                     }
@@ -295,8 +303,7 @@ fn tree_loop(
                                 "paused" => kbtz::ops::unpause_task(&app.conn, &name),
                                 "open" => kbtz::ops::pause_task(&app.conn, &name),
                                 _ => {
-                                    app.error =
-                                        Some(format!("cannot pause {status} task"));
+                                    app.error = Some(format!("cannot pause {status} task"));
                                     Ok(())
                                 }
                             };
@@ -314,8 +321,7 @@ fn tree_loop(
                                     app.error = Some("task is already done".into());
                                 }
                                 "active" => {
-                                    app.error =
-                                        Some("cannot close active task".into());
+                                    app.error = Some("cannot close active task".into());
                                 }
                                 _ => {
                                     if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
@@ -747,7 +753,8 @@ fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
 }
 
 fn draw_toplevel_help_bar(rows: u16, cols: u16) {
-    let content = " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+    let content =
+        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -793,7 +800,8 @@ fn draw_status_bar(
 }
 
 fn draw_help_bar(rows: u16, cols: u16) {
-    let content = " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+    let content =
+        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -804,4 +812,3 @@ fn draw_help_bar(rows: u16, cols: u16) {
     );
     let _ = out.flush();
 }
-

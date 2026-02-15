@@ -57,7 +57,15 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             claim,
             paused,
         } => {
-            ops::add_task(&conn, &name, parent.as_deref(), &desc, note.as_deref(), claim.as_deref(), paused)?;
+            ops::add_task(
+                &conn,
+                &name,
+                parent.as_deref(),
+                &desc,
+                note.as_deref(),
+                claim.as_deref(),
+                paused,
+            )?;
             eprintln!("Added task '{name}'");
             if paused {
                 eprintln!("Task '{name}' created in paused state");
@@ -185,7 +193,9 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         Command::Note { name, content } => {
             let content = match content {
                 Some(c) => c,
-                None => bail!("note content must be provided explicitly (stdin is not available inside exec)"),
+                None => bail!(
+                    "note content must be provided explicitly (stdin is not available inside exec)"
+                ),
             };
             ops::add_note(&conn, &name, &content)?;
             eprintln!("Added note to '{name}'");
@@ -219,13 +229,11 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
 }
 
 fn parse_exec_line(line: &str) -> Result<Command> {
-    let tokens = shlex::split(line)
-        .with_context(|| format!("invalid shell quoting: {line}"))?;
+    let tokens = shlex::split(line).with_context(|| format!("invalid shell quoting: {line}"))?;
     // Prepend program name so Clap is happy
     let mut args = vec!["kbtz".to_string()];
     args.extend(tokens);
-    let cli = Cli::try_parse_from(&args)
-        .with_context(|| format!("failed to parse: {line}"))?;
+    let cli = Cli::try_parse_from(&args).with_context(|| format!("failed to parse: {line}"))?;
     Ok(cli.command)
 }
 
@@ -237,8 +245,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let command = parse_exec_line(line)
-            .with_context(|| format!("line {}", lineno + 1))?;
+        let command = parse_exec_line(line).with_context(|| format!("line {}", lineno + 1))?;
         // Reject commands that don't belong in a batch
         match &command {
             Command::Exec => bail!("line {}: exec cannot be nested", lineno + 1),
@@ -257,8 +264,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
 
     let result = (|| -> Result<()> {
         for (lineno, line, command) in commands {
-            dispatch(conn, command)
-                .with_context(|| format!("line {lineno}: {line}"))?;
+            dispatch(conn, command).with_context(|| format!("line {lineno}: {line}"))?;
         }
         Ok(())
     })();
@@ -443,7 +449,10 @@ done task-x
         let result = run_exec(&conn, input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+        assert!(
+            msg.contains("line 2"),
+            "expected line number in error: {msg}"
+        );
     }
 
     #[test]
@@ -467,10 +476,7 @@ claim-next agent-1
         // One of the tasks should be claimed
         let t1 = ops::get_task(&conn, "task-1").unwrap();
         let t2 = ops::get_task(&conn, "task-2").unwrap();
-        let claimed_count = [&t1, &t2]
-            .iter()
-            .filter(|t| t.status == "active")
-            .count();
+        let claimed_count = [&t1, &t2].iter().filter(|t| t.status == "active").count();
         assert_eq!(claimed_count, 1);
     }
 
@@ -482,7 +488,10 @@ claim-next agent-1
         let result = run_exec(&conn, input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("line 2"), "expected line number in error: {msg}");
+        assert!(
+            msg.contains("line 2"),
+            "expected line number in error: {msg}"
+        );
         // First task should be rolled back
         assert!(ops::get_task(&conn, "real-task").is_err());
     }
