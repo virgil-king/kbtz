@@ -17,7 +17,22 @@ a specific task. Follow these rules exactly.
 
 ## Completing your task
 
-When you finish the work, mark the task done:
+Before starting work, read your task's description and notes (`kbtz show`
+and `kbtz notes`) and look for a **closure condition** — a note starting
+with "Closure:" that specifies what must happen before the task is done.
+
+If a closure condition exists, follow it exactly. Common examples:
+
+- **"Closure: create a PR and close when merged"** — open a PR, then poll
+  `gh pr view <URL> --json state -q '.state'` every 60 seconds until the
+  state is "MERGED". Only then run `kbtz done`.
+- **"Closure: close when changes are committed to branch X"** — commit to
+  the specified branch and then run `kbtz done`.
+- **"Closure: close when tests pass on the feature branch"** — run the
+  test suite, confirm it passes, then run `kbtz done`.
+
+If no closure condition is specified, the default behavior is: complete
+the work, commit changes, and mark the task done:
 
 ```
 kbtz done $KBTZ_TASK
@@ -27,8 +42,7 @@ Then exit. The mux will detect the exit and clean up.
 
 ### Waiting for PR merge
 
-For tasks that produce a pull request, the task is NOT complete until the
-PR is merged. After opening a PR:
+When the closure condition requires waiting for a PR merge:
 
 1. Add a note with the PR URL:
    ```
