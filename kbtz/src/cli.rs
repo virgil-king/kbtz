@@ -67,6 +67,13 @@ pub enum Command {
         assignee: String,
     },
 
+    /// Forcibly clear a task's assignee (regardless of who holds it)
+    #[command(name = "force-unassign")]
+    ForceUnassign {
+        /// Task name
+        name: String,
+    },
+
     /// Mark a task as done
     Done {
         /// Task name

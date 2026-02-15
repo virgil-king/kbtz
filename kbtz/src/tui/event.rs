@@ -11,6 +11,7 @@ pub enum KeyAction {
     AddNote,
     TogglePause,
     MarkDone,
+    ForceUnassign,
     Continue,
 }
 
@@ -54,6 +55,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
         KeyCode::Char('N') => KeyAction::AddNote,
         KeyCode::Char('p') => KeyAction::TogglePause,
         KeyCode::Char('d') => KeyAction::MarkDone,
+        KeyCode::Char('U') => KeyAction::ForceUnassign,
         KeyCode::Char('?') => {
             app.toggle_help();
             KeyAction::Continue

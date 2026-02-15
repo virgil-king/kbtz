@@ -124,6 +124,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":pause  "),
             Span::styled("d", Style::default().fg(Color::Cyan)),
             Span::raw(":done  "),
+            Span::styled("U", Style::default().fg(Color::Cyan)),
+            Span::raw(":force-unassign  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -135,7 +137,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = ui::centered_rect(55, 22, frame.area());
+    let area = ui::centered_rect(55, 23, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -172,6 +174,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  d          ", Style::default().fg(Color::Cyan)),
             Span::raw("Mark task done"),
+        ]),
+        Line::from(vec![
+            Span::styled("  U          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Force-unassign task"),
         ]),
         Line::from(vec![
             Span::styled("  q/Esc      ", Style::default().fg(Color::Cyan)),
