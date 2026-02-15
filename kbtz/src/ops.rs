@@ -154,16 +154,10 @@ pub fn add_task(
 
 pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
-    let rows = conn.execute(
-        CLAIM_OPEN,
-        rusqlite::params![assignee, name],
-    )?;
+    let rows = conn.execute(CLAIM_OPEN, rusqlite::params![assignee, name])?;
     if rows == 0 {
         // Also allow idempotent re-claim by same assignee
-        let rows = conn.execute(
-            RECLAIM_ACTIVE,
-            rusqlite::params![assignee, name],
-        )?;
+        let rows = conn.execute(RECLAIM_ACTIVE, rusqlite::params![assignee, name])?;
         if rows > 0 {
             return Ok(());
         }
@@ -280,10 +274,7 @@ pub fn claim_next_task(
             return Ok(None);
         };
 
-        let rows = conn.execute(
-            CLAIM_OPEN,
-            rusqlite::params![assignee, name],
-        )?;
+        let rows = conn.execute(CLAIM_OPEN, rusqlite::params![assignee, name])?;
 
         if rows == 0 {
             // Another writer claimed it between our SELECT and UPDATE
@@ -317,10 +308,7 @@ pub fn steal_task(conn: &Connection, name: &str, new_assignee: &str) -> Result<S
         bail!("task '{name}' is not active (status: {status})");
     }
     let prev = current_assignee.unwrap();
-    conn.execute(
-        REASSIGN_ACTIVE,
-        rusqlite::params![new_assignee, name],
-    )?;
+    conn.execute(REASSIGN_ACTIVE, rusqlite::params![new_assignee, name])?;
     Ok(prev)
 }
 
@@ -397,10 +385,7 @@ pub fn unpause_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn update_description(conn: &Connection, name: &str, description: &str) -> Result<()> {
     require_task(conn, name)?;
-    conn.execute(
-        SET_DESCRIPTION,
-        rusqlite::params![description, name],
-    )?;
+    conn.execute(SET_DESCRIPTION, rusqlite::params![description, name])?;
     Ok(())
 }
 
@@ -412,10 +397,7 @@ pub fn reparent_task(conn: &Connection, name: &str, parent: Option<&str>) -> Res
             bail!("setting parent to '{new_parent}' would create a cycle");
         }
     }
-    conn.execute(
-        SET_PARENT,
-        rusqlite::params![parent, name],
-    )?;
+    conn.execute(SET_PARENT, rusqlite::params![parent, name])?;
     Ok(())
 }
 
