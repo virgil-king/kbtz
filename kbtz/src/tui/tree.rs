@@ -23,12 +23,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn status_style(status: &str) -> Style {
-    ui::status_style(status)
-}
-
-
-
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     let (tree_area, error_area) = if app.error.is_some() {
         let chunks = Layout::default()
@@ -68,9 +62,9 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
 
             let icon = ui::icon_for_task(row);
             let style = if !row.blocked_by.is_empty() {
-                status_style("blocked")
+                ui::status_style("blocked")
             } else {
-                status_style(&row.status)
+                ui::status_style(&row.status)
             };
 
             let blocked_info = if row.blocked_by.is_empty() {
