@@ -174,12 +174,20 @@ impl Session {
     }
 
     /// Enable passthrough, rendering the VTE screen to stdout first.
-    pub fn start_passthrough(&self) {
-        self.passthrough.lock().unwrap().start();
+    pub fn start_passthrough(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .start();
+        Ok(())
     }
 
-    pub fn stop_passthrough(&self) {
-        self.passthrough.lock().unwrap().stop();
+    pub fn stop_passthrough(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .stop();
+        Ok(())
     }
 
     pub fn write_input(&mut self, buf: &[u8]) -> Result<()> {
@@ -211,7 +219,10 @@ impl Session {
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         let pty_rows = rows.saturating_sub(1);
-        self.passthrough.lock().unwrap().set_size(pty_rows, cols);
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .set_size(pty_rows, cols);
         self.master
             .resize(PtySize {
                 rows: pty_rows,
@@ -231,7 +242,9 @@ fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passth
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut pt = passthrough.lock().unwrap();
+                let Ok(mut pt) = passthrough.lock() else {
+                    break;
+                };
                 pt.process(&buf[..n]);
 
                 if pt.active {
