@@ -273,7 +273,7 @@ impl App {
         let prompt = "You are the top-level task management agent. Help the user manage the kbtz task list.".to_string();
         let args: Vec<String> = vec![
             "--append-system-prompt".into(),
-            crate::skill::TOPLEVEL_SKILL.into(),
+            crate::prompt::TOPLEVEL_PROMPT.into(),
             prompt,
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -310,7 +310,7 @@ impl App {
         let prompt = format!("Work on task '{}': {}", task.name, task.description);
         let args: Vec<String> = vec![
             "--append-system-prompt".into(),
-            crate::skill::AGENT_SKILL.into(),
+            crate::prompt::AGENT_PROMPT.into(),
             prompt,
         ];
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

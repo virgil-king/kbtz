@@ -3,7 +3,7 @@
 /// These instructions are prepended to the agent's prompt so it knows
 /// how to interact with the kbtz task database and follow the mux
 /// lifecycle contract.
-pub const AGENT_SKILL: &str = r#"
+pub const AGENT_PROMPT: &str = r#"
 # kbtz task protocol
 
 You are working inside kbtz-mux, a task multiplexer. You have been assigned
@@ -173,7 +173,7 @@ are easy to find from the task:
 /// This session is not assigned to any specific task. Instead, it gives
 /// the user an interactive agent for manipulating the task list itself:
 /// creating task groups, modifying tasks, reparenting, blocking/unblocking.
-pub const TOPLEVEL_SKILL: &str = r#"
+pub const TOPLEVEL_PROMPT: &str = r#"
 # kbtz task manager
 
 You are the top-level task management agent inside kbtz-mux. You are NOT
