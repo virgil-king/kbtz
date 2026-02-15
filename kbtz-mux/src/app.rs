@@ -63,6 +63,7 @@ fn session_id_to_filename(session_id: &str) -> String {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
         mux_dir: PathBuf,
@@ -456,7 +457,7 @@ impl App {
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
             let workers_dead = self.sessions.values_mut().all(|s| !s.is_alive());
-            let toplevel_dead = self.toplevel.as_mut().map_or(true, |s| !s.is_alive());
+            let toplevel_dead = self.toplevel.as_mut().is_none_or(|s| !s.is_alive());
             if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
                 break;
             }

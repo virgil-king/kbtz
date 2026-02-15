@@ -641,7 +641,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
         }
 
         // If top-level session has exited, return to tree.
-        if app.toplevel.as_mut().map_or(true, |s| !s.is_alive()) {
+        if app.toplevel.as_mut().is_none_or(|s| !s.is_alive()) {
             return Ok(Action::ReturnToTree);
         }
 

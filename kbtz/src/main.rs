@@ -58,7 +58,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             paused,
         } => {
             ops::add_task(
-                &conn,
+                conn,
                 &name,
                 parent.as_deref(),
                 &desc,
@@ -75,17 +75,17 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Claim { name, assignee } => {
-            ops::claim_task(&conn, &name, &assignee)?;
+            ops::claim_task(conn, &name, &assignee)?;
             eprintln!("Claimed '{name}' for '{assignee}'");
         }
 
         Command::ClaimNext { assignee, prefer } => {
-            match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
+            match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
                 Some(name) => {
-                    let task = ops::get_task(&conn, &name)?;
-                    let notes = ops::list_notes(&conn, &name)?;
-                    let blockers = ops::get_blockers(&conn, &name)?;
-                    let dependents = ops::get_dependents(&conn, &name)?;
+                    let task = ops::get_task(conn, &name)?;
+                    let notes = ops::list_notes(conn, &name)?;
+                    let blockers = ops::get_blockers(conn, &name)?;
+                    let dependents = ops::get_dependents(conn, &name)?;
                     print!(
                         "{}",
                         output::format_task_detail(&task, &notes, &blockers, &dependents)
@@ -99,42 +99,42 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Steal { name, assignee } => {
-            let prev = ops::steal_task(&conn, &name, &assignee)?;
+            let prev = ops::steal_task(conn, &name, &assignee)?;
             eprintln!("Stole '{name}' from '{prev}' to '{assignee}'");
         }
 
         Command::Release { name, assignee } => {
-            ops::release_task(&conn, &name, &assignee)?;
+            ops::release_task(conn, &name, &assignee)?;
             eprintln!("Released '{name}'");
         }
 
         Command::ForceUnassign { name } => {
-            ops::force_unassign_task(&conn, &name)?;
+            ops::force_unassign_task(conn, &name)?;
             eprintln!("Force-unassigned '{name}'");
         }
 
         Command::Done { name } => {
-            ops::mark_done(&conn, &name)?;
+            ops::mark_done(conn, &name)?;
             eprintln!("Marked '{name}' as done");
         }
 
         Command::Reopen { name } => {
-            ops::reopen_task(&conn, &name)?;
+            ops::reopen_task(conn, &name)?;
             eprintln!("Reopened '{name}'");
         }
 
         Command::Pause { name } => {
-            ops::pause_task(&conn, &name)?;
+            ops::pause_task(conn, &name)?;
             eprintln!("Paused '{name}'");
         }
 
         Command::Unpause { name } => {
-            ops::unpause_task(&conn, &name)?;
+            ops::unpause_task(conn, &name)?;
             eprintln!("Unpaused '{name}'");
         }
 
         Command::Reparent { name, parent } => {
-            ops::reparent_task(&conn, &name, parent.as_deref())?;
+            ops::reparent_task(conn, &name, parent.as_deref())?;
             match parent.as_deref() {
                 Some(p) => eprintln!("Moved '{name}' under '{p}'"),
                 None => eprintln!("Moved '{name}' to root level"),
@@ -142,20 +142,20 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Describe { name, desc } => {
-            ops::update_description(&conn, &name, &desc)?;
+            ops::update_description(conn, &name, &desc)?;
             eprintln!("Updated description for '{name}'");
         }
 
         Command::Rm { name, recursive } => {
-            ops::remove_task(&conn, &name, recursive)?;
+            ops::remove_task(conn, &name, recursive)?;
             eprintln!("Removed task '{name}'");
         }
 
         Command::Show { name, json } => {
-            let task = ops::get_task(&conn, &name)?;
-            let notes = ops::list_notes(&conn, &name)?;
-            let blockers = ops::get_blockers(&conn, &name)?;
-            let dependents = ops::get_dependents(&conn, &name)?;
+            let task = ops::get_task(conn, &name)?;
+            let notes = ops::list_notes(conn, &name)?;
+            let blockers = ops::get_blockers(conn, &name)?;
+            let dependents = ops::get_dependents(conn, &name)?;
             if json {
                 let detail = output::TaskDetail {
                     task: &task,
@@ -180,7 +180,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             json,
         } => {
             let status = status.map(|s| StatusFilter::parse(&s)).transpose()?;
-            let tasks = ops::list_tasks(&conn, status, all, root.as_deref())?;
+            let tasks = ops::list_tasks(conn, status, all, root.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tasks)?);
             } else if tree {
@@ -197,12 +197,12 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                     "note content must be provided explicitly (stdin is not available inside exec)"
                 ),
             };
-            ops::add_note(&conn, &name, &content)?;
+            ops::add_note(conn, &name, &content)?;
             eprintln!("Added note to '{name}'");
         }
 
         Command::Notes { name, json } => {
-            let notes = ops::list_notes(&conn, &name)?;
+            let notes = ops::list_notes(conn, &name)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&notes)?);
             } else {
@@ -211,12 +211,12 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         }
 
         Command::Block { blocker, blocked } => {
-            ops::add_block(&conn, &blocker, &blocked)?;
+            ops::add_block(conn, &blocker, &blocked)?;
             eprintln!("'{blocker}' now blocks '{blocked}'");
         }
 
         Command::Unblock { blocker, blocked } => {
-            ops::remove_block(&conn, &blocker, &blocked)?;
+            ops::remove_block(conn, &blocker, &blocked)?;
             eprintln!("'{blocker}' no longer blocks '{blocked}'");
         }
 
