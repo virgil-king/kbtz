@@ -323,27 +323,6 @@ fn run() -> Result<()> {
             watch::wait_for_change(&rx, std::time::Duration::MAX);
         }
 
-        Command::ClaimNext { assignee, prefer } => {
-            let conn = open_db(&db_path)?;
-            match ops::claim_next_task(&conn, &assignee, prefer.as_deref())? {
-                Some(name) => {
-                    let task = ops::get_task(&conn, &name)?;
-                    let notes = ops::list_notes(&conn, &name)?;
-                    let blockers = ops::get_blockers(&conn, &name)?;
-                    let dependents = ops::get_dependents(&conn, &name)?;
-                    print!(
-                        "{}",
-                        output::format_task_detail(&task, &notes, &blockers, &dependents)
-                    );
-                    eprintln!("Claimed '{name}' for '{assignee}'");
-                }
-                None => {
-                    eprintln!("No tasks available");
-                    std::process::exit(1);
-                }
-            }
-        }
-
         other => {
             let conn = open_db(&db_path)?;
             dispatch(&conn, other)?;
