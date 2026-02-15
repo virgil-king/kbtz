@@ -36,6 +36,81 @@ fn read_task_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
 
 const TASK_COLUMNS: &str = "id, name, parent, description, status, assignee, status_changed_at, created_at, updated_at";
 
+const INSERT_TASK: &str = "
+INSERT INTO tasks (name, parent, description, status, assignee, status_changed_at)
+VALUES (?1, ?2, ?3, ?4, ?5,
+    CASE WHEN ?4 != 'open' THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') END)
+";
+
+const CLAIM_OPEN: &str = "
+UPDATE tasks
+SET status = 'active', assignee = ?1,
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?2 AND status = 'open'
+";
+
+const RECLAIM_ACTIVE: &str = "
+UPDATE tasks
+SET status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?2 AND status = 'active' AND assignee = ?1
+";
+
+const REASSIGN_ACTIVE: &str = "
+UPDATE tasks
+SET assignee = ?1,
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?2 AND status = 'active'
+";
+
+const RELEASE_TO_OPEN: &str = "
+UPDATE tasks
+SET status = 'open', assignee = NULL,
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?1
+";
+
+const SET_DONE: &str = "
+UPDATE tasks
+SET status = 'done', assignee = NULL,
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?1
+";
+
+const SET_PAUSED: &str = "
+UPDATE tasks
+SET status = 'paused', assignee = NULL,
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?1
+";
+
+const SET_OPEN: &str = "
+UPDATE tasks
+SET status = 'open',
+    status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?1
+";
+
+const SET_DESCRIPTION: &str = "
+UPDATE tasks
+SET description = ?1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?2
+";
+
+const SET_PARENT: &str = "
+UPDATE tasks
+SET parent = ?1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE name = ?2
+";
+
 pub fn add_task(
     conn: &Connection,
     name: &str,
@@ -63,7 +138,7 @@ pub fn add_task(
         "open"
     };
     conn.execute(
-        "INSERT INTO tasks (name, parent, description, status, assignee, status_changed_at) VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?4 != 'open' THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') END)",
+        INSERT_TASK,
         rusqlite::params![name, parent, description, status, claim],
     )?;
     if let Some(content) = note {
@@ -78,13 +153,13 @@ pub fn add_task(
 pub fn claim_task(conn: &Connection, name: &str, assignee: &str) -> Result<()> {
     require_task(conn, name)?;
     let rows = conn.execute(
-        "UPDATE tasks SET status = 'active', assignee = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'open'",
+        CLAIM_OPEN,
         rusqlite::params![assignee, name],
     )?;
     if rows == 0 {
         // Also allow idempotent re-claim by same assignee
         let rows = conn.execute(
-            "UPDATE tasks SET status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'active' AND assignee = ?1",
+            RECLAIM_ACTIVE,
             rusqlite::params![assignee, name],
         )?;
         if rows > 0 {
@@ -204,7 +279,7 @@ pub fn claim_next_task(
         };
 
         let rows = conn.execute(
-            "UPDATE tasks SET status = 'active', assignee = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'open'",
+            CLAIM_OPEN,
             rusqlite::params![assignee, name],
         )?;
 
@@ -241,7 +316,7 @@ pub fn steal_task(conn: &Connection, name: &str, new_assignee: &str) -> Result<S
     }
     let prev = current_assignee.unwrap();
     conn.execute(
-        "UPDATE tasks SET assignee = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2 AND status = 'active'",
+        REASSIGN_ACTIVE,
         rusqlite::params![new_assignee, name],
     )?;
     Ok(prev)
@@ -256,10 +331,7 @@ pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()>
     )?;
     match (status.as_str(), current_assignee) {
         ("active", Some(ref a)) if a == assignee => {
-            conn.execute(
-                "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-                [name],
-            )?;
+            conn.execute(RELEASE_TO_OPEN, [name])?;
             Ok(())
         }
         ("active", Some(a)) => bail!("task '{name}' is assigned to '{a}', not '{assignee}'"),
@@ -269,10 +341,7 @@ pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()>
 
 pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
-    conn.execute(
-        "UPDATE tasks SET status = 'done', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-        [name],
-    )?;
+    conn.execute(SET_DONE, [name])?;
     Ok(())
 }
 
@@ -286,19 +355,13 @@ pub fn force_unassign_task(conn: &Connection, name: &str) -> Result<()> {
     if status != "active" {
         bail!("task '{name}' is not active (status: {status})");
     }
-    conn.execute(
-        "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-        [name],
-    )?;
+    conn.execute(RELEASE_TO_OPEN, [name])?;
     Ok(())
 }
 
 pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
-    conn.execute(
-        "UPDATE tasks SET status = 'open', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-        [name],
-    )?;
+    conn.execute(RELEASE_TO_OPEN, [name])?;
     Ok(())
 }
 
@@ -315,10 +378,7 @@ pub fn pause_task(conn: &Connection, name: &str) -> Result<()> {
     if status == "paused" {
         bail!("task '{name}' is already paused");
     }
-    conn.execute(
-        "UPDATE tasks SET status = 'paused', assignee = NULL, status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-        [name],
-    )?;
+    conn.execute(SET_PAUSED, [name])?;
     Ok(())
 }
 
@@ -332,17 +392,14 @@ pub fn unpause_task(conn: &Connection, name: &str) -> Result<()> {
     if status != "paused" {
         bail!("task '{name}' is not paused");
     }
-    conn.execute(
-        "UPDATE tasks SET status = 'open', status_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?1",
-        [name],
-    )?;
+    conn.execute(SET_OPEN, [name])?;
     Ok(())
 }
 
 pub fn update_description(conn: &Connection, name: &str, description: &str) -> Result<()> {
     require_task(conn, name)?;
     conn.execute(
-        "UPDATE tasks SET description = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+        SET_DESCRIPTION,
         rusqlite::params![description, name],
     )?;
     Ok(())
@@ -357,7 +414,7 @@ pub fn reparent_task(conn: &Connection, name: &str, parent: Option<&str>) -> Res
         }
     }
     conn.execute(
-        "UPDATE tasks SET parent = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE name = ?2",
+        SET_PARENT,
         rusqlite::params![parent, name],
     )?;
     Ok(())
