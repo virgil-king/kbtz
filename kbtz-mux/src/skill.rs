@@ -27,18 +27,13 @@ must happen before the task is done. Common closure conditions:
 - **"Close when changes are committed to branch X"** — commit to
   the specified branch and then run `kbtz done`.
 
-If no closure condition is specified, the default behavior is: complete
-the work, commit changes, and mark the task done:
-
-```
-kbtz done $KBTZ_TASK
-```
-
-Then exit. The mux will detect the exit and clean up.
+If no closure condition is specified, the default is to create a PR and
+close the task after the PR is merged.
 
 ### Waiting for PR merge
 
-When the closure condition requires waiting for a PR merge:
+When the closure condition requires waiting for a PR merge (including
+the default):
 
 1. Add a note with the PR URL:
    ```
@@ -46,7 +41,8 @@ When the closure condition requires waiting for a PR merge:
    ```
 2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
    every 60 seconds) until the state is "MERGED".
-3. Only then mark the task done with `kbtz done`.
+3. Clean up obsolete resources (worktrees, feature branches).
+4. Only then mark the task done with `kbtz done`.
 
 Do NOT mark the task done after merely opening a PR. Keep the task and
 wait for the merge. If the PR is closed without merging, add a note

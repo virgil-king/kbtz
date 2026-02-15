@@ -67,13 +67,11 @@ kbtz add deferred-task "Not ready yet" --paused
 
 ### Specifying closure conditions
 
-When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the worker will simply mark the task done after committing changes.
+When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the default is to create a PR and close the task after the PR is merged.
 
 Examples:
 
 ```bash
-kbtz add fix-auth "Fix the auth token refresh bug" -n "Create a PR and close when merged"
-
 kbtz add update-deps "Update outdated dependencies" -n "Close when changes are committed to branch update-deps"
 ```
 
