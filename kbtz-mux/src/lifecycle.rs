@@ -26,6 +26,8 @@ pub struct SessionSnapshot {
 
 pub struct WorldSnapshot {
     pub sessions: Vec<SessionSnapshot>,
+    /// Max sessions that tick() will auto-spawn. Set to 0 in manual mode
+    /// to disable auto-spawning while preserving all reaping/cleanup logic.
     pub max_concurrency: usize,
     pub now: Instant,
 }
@@ -264,5 +266,38 @@ mod tests {
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
+    }
+
+    // 11. Manual mode (max_concurrency=0) -> no SpawnUpTo
+    #[test]
+    fn manual_mode_no_auto_spawn() {
+        let w = world(vec![], 0);
+        let actions = tick(&w);
+        assert!(actions.is_empty());
+    }
+
+    // 12. Manual mode still reaps exited sessions
+    #[test]
+    fn manual_mode_still_reaps_exited() {
+        let w = world(
+            vec![snapshot("mux/1", SessionPhase::Exited, active_task("mux/1"))],
+            0,
+        );
+        let actions = tick(&w);
+        assert_eq!(actions, vec![
+            SessionAction::Remove { session_id: "mux/1".into() },
+        ]);
+    }
+
+    // 13. Manual mode still requests exit for done tasks
+    #[test]
+    fn manual_mode_still_reaps_done() {
+        let w = world(
+            vec![snapshot("mux/1", SessionPhase::Running, task_with_status("done"))],
+            0,
+        );
+        let actions = tick(&w);
+        assert!(actions.contains(&SessionAction::RequestExit { session_id: "mux/1".into() }));
+        assert!(!actions.iter().any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
     }
 }
