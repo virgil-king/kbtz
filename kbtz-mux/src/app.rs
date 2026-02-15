@@ -51,6 +51,10 @@ pub enum Action {
     Quit,
 }
 
+fn session_id_to_filename(session_id: &str) -> String {
+    session_id.replace('/', "-")
+}
+
 impl App {
     pub fn new(
         db_path: String,
@@ -288,9 +292,7 @@ impl App {
     /// Read status files from the mux directory and update session statuses.
     pub fn read_status_files(&mut self) -> Result<()> {
         for (session_id, session) in &mut self.sessions {
-            // Status file path: mux_dir/mux/N → need to sanitize the slash
-            let filename = session_id.replace('/', "-");
-            let path = self.mux_dir.join(&filename);
+            let path = self.mux_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
                 session.status = SessionStatus::from_str(&content);
             }
@@ -304,9 +306,7 @@ impl App {
             let _ = session.stop_passthrough();
             let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
             self.task_to_session.remove(&session.task_name);
-            // Clean up status file
-            let filename = session_id.replace('/', "-");
-            let _ = std::fs::remove_file(self.mux_dir.join(filename));
+            let _ = std::fs::remove_file(self.mux_dir.join(session_id_to_filename(session_id)));
         }
     }
 
