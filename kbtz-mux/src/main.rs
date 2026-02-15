@@ -394,6 +394,60 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     result
 }
 
+fn handle_zoomed_prefix_command(
+    cmd: u8,
+    app: &mut App,
+    session_id: &str,
+    task: &str,
+    stdin: &mut io::StdinLock,
+    last_status: &SessionStatus,
+) -> Result<Option<Action>> {
+    match cmd {
+        b't' | b'd' => Ok(Some(Action::ReturnToTree)),
+        b'c' => {
+            if let Some(session) = app.sessions.get(session_id) {
+                let _ = session.stop_passthrough();
+            }
+            Ok(Some(Action::TopLevel))
+        }
+        b'n' => {
+            if let Some(next_task) = app.cycle_session(&Action::NextSession, task) {
+                if let Some(session) = app.sessions.get(session_id) {
+                    let _ = session.stop_passthrough();
+                }
+                Ok(Some(Action::ZoomIn(next_task)))
+            } else {
+                Ok(None)
+            }
+        }
+        b'p' => {
+            if let Some(prev_task) = app.cycle_session(&Action::PrevSession, task) {
+                if let Some(session) = app.sessions.get(session_id) {
+                    let _ = session.stop_passthrough();
+                }
+                Ok(Some(Action::ZoomIn(prev_task)))
+            } else {
+                Ok(None)
+            }
+        }
+        PREFIX_KEY => {
+            if let Some(session) = app.sessions.get_mut(session_id) {
+                session.write_input(&[PREFIX_KEY])?;
+            }
+            Ok(None)
+        }
+        b'?' => {
+            draw_help_bar(app.rows, app.cols);
+            let mut discard = [0u8; 1];
+            let _ = stdin.read(&mut discard);
+            draw_status_bar(app.rows, app.cols, task, session_id, last_status, None);
+            Ok(None)
+        }
+        b'q' => Ok(Some(Action::Quit)),
+        _ => Ok(None),
+    }
+}
+
 fn zoomed_loop(
     app: &mut App,
     task: &str,
@@ -488,49 +542,15 @@ fn zoomed_loop(
                         Ok(_) => cmd_buf[0],
                     }
                 };
-                match cmd {
-                    b't' | b'd' => return Ok(Action::ReturnToTree),
-                    b'c' => {
-                        if let Some(session) = app.sessions.get(session_id) {
-                            let _ = session.stop_passthrough();
-                        }
-                        return Ok(Action::TopLevel);
-                    }
-                    b'n' => {
-                        if let Some(next_task) =
-                            app.cycle_session(&Action::NextSession, task)
-                        {
-                            if let Some(session) = app.sessions.get(session_id) {
-                                let _ = session.stop_passthrough();
-                            }
-                            return Ok(Action::ZoomIn(next_task));
-                        }
-                    }
-                    b'p' => {
-                        if let Some(prev_task) =
-                            app.cycle_session(&Action::PrevSession, task)
-                        {
-                            if let Some(session) = app.sessions.get(session_id) {
-                                let _ = session.stop_passthrough();
-                            }
-                            return Ok(Action::ZoomIn(prev_task));
-                        }
-                    }
-                    PREFIX_KEY => {
-                        if let Some(session) = app.sessions.get_mut(session_id) {
-                            session.write_input(&[PREFIX_KEY])?;
-                        }
-                    }
-                    b'?' => {
-                        draw_help_bar(app.rows, app.cols);
-                        let mut discard = [0u8; 1];
-                        let _ = stdin.read(&mut discard);
-                        draw_status_bar(
-                            app.rows, app.cols, task, session_id, &last_status, None,
-                        );
-                    }
-                    b'q' => return Ok(Action::Quit),
-                    _ => {}
+                if let Some(action) = handle_zoomed_prefix_command(
+                    cmd,
+                    app,
+                    session_id,
+                    task,
+                    &mut stdin,
+                    &last_status,
+                )? {
+                    return Ok(action);
                 }
             } else {
                 // Find the next PREFIX_KEY or end of buffer and write the
