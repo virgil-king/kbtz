@@ -22,6 +22,40 @@ use session::SessionStatus;
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
 
+/// Watches the kbtz database and mux status directory for changes.
+/// Polling with `poll()` checks both channels and refreshes app state.
+struct Watchers {
+    _db_watcher: notify::RecommendedWatcher,
+    db_rx: std::sync::mpsc::Receiver<()>,
+    _mux_watcher: notify::RecommendedWatcher,
+    mux_rx: std::sync::mpsc::Receiver<()>,
+}
+
+impl Watchers {
+    fn new(app: &App) -> Result<Self> {
+        let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
+        let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+        Ok(Watchers {
+            _db_watcher,
+            db_rx,
+            _mux_watcher,
+            mux_rx,
+        })
+    }
+
+    fn poll(&self, app: &mut App) -> Result<()> {
+        if kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&self.db_rx);
+            app.refresh_tree()?;
+        }
+        if kbtz::watch::wait_for_change(&self.mux_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&self.mux_rx);
+            app.read_status_files()?;
+        }
+        Ok(())
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("kbtz-mux: {e:#}");
@@ -190,8 +224,7 @@ fn tree_loop(
     app.refresh_tree()?;
     app.tick()?;
 
-    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+    let watchers = Watchers::new(app)?;
     let mut mode = TreeMode::Normal;
 
     loop {
@@ -308,18 +341,7 @@ fn tree_loop(
             }
         }
 
-        // Check for DB changes
-        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&db_rx);
-            app.refresh_tree()?;
-        }
-
-        // Check for status file changes
-        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&mux_rx);
-            app.read_status_files()?;
-        }
-
+        watchers.poll(app)?;
         app.tick()?;
     }
 }
@@ -379,10 +401,7 @@ fn zoomed_loop(
     let mut buf = [0u8; 4096];
     let mut last_status = SessionStatus::Starting;
 
-    // Watch DB and mux status so we detect task completion / status changes.
-    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
-
+    let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
 
     draw_status_bar(app.rows, app.cols, task, session_id, &last_status, None);
@@ -396,17 +415,7 @@ fn zoomed_loop(
             return Ok(Action::ReturnToTree);
         }
 
-        // Handle DB changes
-        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&db_rx);
-            app.refresh_tree()?;
-        }
-
-        // Handle mux status file changes
-        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&mux_rx);
-            app.read_status_files()?;
-        }
+        watchers.poll(app)?;
 
         // Run lifecycle tick (reaps exited, enforces timeouts, spawns)
         if let Some(msg) = app.tick()? {
@@ -579,9 +588,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     let mut stdin = stdin.lock();
     let mut buf = [0u8; 4096];
 
-    // Watch DB and mux status for UI updates.
-    let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-    let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+    let watchers = Watchers::new(app)?;
 
     draw_toplevel_status_bar(app.rows, app.cols, None);
 
@@ -595,17 +602,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
             return Ok(Action::ReturnToTree);
         }
 
-        // Handle DB changes
-        if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&db_rx);
-            app.refresh_tree()?;
-        }
-
-        // Handle mux status file changes
-        if kbtz::watch::wait_for_change(&mux_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&mux_rx);
-            app.read_status_files()?;
-        }
+        watchers.poll(app)?;
 
         // Run lifecycle tick for worker sessions.
         app.tick()?;
