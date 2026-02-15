@@ -17,15 +17,21 @@ pub struct Session {
     pub stopping_since: Option<Instant>,
 }
 
+/// Max raw output we buffer per session for scrollback replay.
+const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
+
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
 /// every byte the child writes. When `active` is true the reader
 /// thread also forwards those bytes to stdout.  On zoom-in the main
-/// thread renders the VTE screen to stdout then sets `active`.
+/// thread replays the raw output buffer to recreate terminal
+/// scrollback, then sets `active` for live forwarding.
 pub struct Passthrough {
     active: bool,
     vte: vt100::Parser,
+    /// Bounded buffer of raw child output for scrollback replay.
+    output_buffer: Vec<u8>,
 }
 
 impl Passthrough {
@@ -33,36 +39,31 @@ impl Passthrough {
         Self {
             active: false,
             vte: vt100::Parser::new(rows, cols, 0),
+            output_buffer: Vec::new(),
         }
     }
 
-    /// Switch to passthrough mode.  Render the VTE's current screen
-    /// state to stdout so the user sees the child's UI immediately,
-    /// then set `active` so the reader thread starts forwarding live
-    /// output.  Both happen under the same Mutex guard.
+    /// Switch to passthrough mode.  Replay the raw output buffer to
+    /// recreate terminal scrollback, then fix up the visible screen
+    /// with the VTE's current state and set `active` for live
+    /// forwarding.  Both happen under the same Mutex guard so no
+    /// child output is lost.
     fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
-        let screen = self.vte.screen();
-        let contents = screen.contents_formatted();
-        let input_modes = screen.input_mode_formatted();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let hide = screen.hide_cursor();
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        // Reproduce the screen contents (cells + attributes).
-        let _ = out.write_all(&contents);
-        // Restore cursor position.
-        let _ = write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
-        // Restore cursor visibility.
-        if hide {
-            let _ = out.write_all(b"\x1b[?25l");
-        } else {
-            let _ = out.write_all(b"\x1b[?25h");
-        }
-        // Restore input modes (mouse protocol, bracketed paste, etc.)
-        // so the real terminal matches the child's expected state.
-        let _ = out.write_all(&input_modes);
+
+        // Replay raw output to recreate terminal scrollback.
+        let _ = out.write_all(&self.output_buffer);
+
+        // Fix up the visible screen: state_formatted() clears the
+        // screen (without touching scrollback), redraws cell contents,
+        // positions the cursor, and restores input modes.  This
+        // corrects any display issues from buffer trimming or
+        // resize-induced layout drift.
+        let _ = out.write_all(&self.vte.screen().state_formatted());
+
         let _ = out.flush();
 
         self.active = true;
@@ -93,6 +94,15 @@ impl Passthrough {
 
     fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
+        self.output_buffer.extend_from_slice(data);
+        if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
+            let keep_from = self.output_buffer.len() - OUTPUT_BUFFER_MAX / 2;
+            self.output_buffer.drain(..keep_from);
+            // Terminate any escape sequence that was cut mid-stream.
+            // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends
+            // OSC/DCS sequences.
+            self.output_buffer.splice(0..0, b"\x18\x1b\\".iter().copied());
+        }
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
@@ -336,5 +346,38 @@ mod tests {
             assert!(!v.indicator().is_empty(), "{:?} has empty indicator", v);
             assert!(!v.label().is_empty(), "{:?} has empty label", v);
         }
+    }
+
+    #[test]
+    fn passthrough_accumulates_output_buffer() {
+        let mut pt = Passthrough::new(24, 80);
+        pt.process(b"hello ");
+        pt.process(b"world");
+        assert_eq!(&pt.output_buffer, b"hello world");
+    }
+
+    #[test]
+    fn passthrough_trims_output_buffer_with_escape_cancel_prefix() {
+        let mut pt = Passthrough::new(24, 80);
+        // Fill just past OUTPUT_BUFFER_MAX to trigger trim.
+        let chunk = vec![b'x'; OUTPUT_BUFFER_MAX + 1];
+        pt.process(&chunk);
+        // After trim, buffer should contain CAN+ST prefix plus ~half of max.
+        assert!(pt.output_buffer.len() <= OUTPUT_BUFFER_MAX / 2 + 10);
+        // CAN (0x18) followed by ST (ESC + backslash) at the start.
+        assert_eq!(&pt.output_buffer[..3], b"\x18\x1b\\");
+    }
+
+    #[test]
+    fn passthrough_vte_state_survives_trim() {
+        let mut pt = Passthrough::new(24, 80);
+        // Write enough to trigger trim, then write identifiable text.
+        let filler = vec![b'\n'; OUTPUT_BUFFER_MAX + 1];
+        pt.process(&filler);
+        pt.process(b"\x1b[1;1Htest");
+        // VTE should reflect the text regardless of buffer trim.
+        let screen = pt.vte.screen();
+        let contents = screen.contents();
+        assert!(contents.starts_with("test"), "expected 'test' at top of screen, got: {contents:?}");
     }
 }
