@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use clap::Parser;
 use crossterm::event::{self as ct_event, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
@@ -19,6 +20,44 @@ use ratatui::prelude::*;
 
 use app::{Action, App};
 use session::SessionStatus;
+
+#[derive(Parser)]
+#[command(name = "kbtz-mux", about = "Task multiplexer for kbtz", after_help = "\
+TREE MODE KEYS:
+    j/k, Up/Down   Navigate
+    Enter           Zoom into session
+    c               Switch to task manager session
+    Space           Collapse/expand
+    p               Pause/unpause task
+    d               Mark task done
+    U               Force-unassign task
+    ?               Help
+    q               Quit
+
+ZOOMED MODE / TASK MANAGER:
+    ^B t            Return to tree
+    ^B c            Switch to task manager session
+    ^B n/p          Next/prev session
+    ^B ^B           Send literal Ctrl-B
+    ^B ?            Help
+    ^B q            Quit")]
+struct Cli {
+    /// Path to kbtz database [default: $KBTZ_DB or ~/.kbtz/kbtz.db]
+    #[arg(long, env = "KBTZ_DB")]
+    db: Option<String>,
+
+    /// Max concurrent sessions
+    #[arg(short = 'j', long, default_value_t = 4)]
+    concurrency: usize,
+
+    /// Preference hint for task selection (FTS match)
+    #[arg(long)]
+    prefer: Option<String>,
+
+    /// Command to run per session
+    #[arg(long, default_value = "claude")]
+    command: String,
+}
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
 
@@ -64,55 +103,12 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Parse CLI args
-    let mut db_path: Option<String> = None;
-    let mut concurrency: usize = 4;
-    let mut prefer: Option<String> = None;
-    let mut command = "claude".to_string();
-    let mut i = 1;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "--db" => {
-                i += 1;
-                db_path = Some(args.get(i).context("--db requires a path")?.clone());
-            }
-            "-j" | "--concurrency" => {
-                i += 1;
-                concurrency = args
-                    .get(i)
-                    .context("-j requires a number")?
-                    .parse()
-                    .context("-j must be a positive integer")?;
-            }
-            "--prefer" => {
-                i += 1;
-                prefer = Some(args.get(i).context("--prefer requires a value")?.clone());
-            }
-            "--command" => {
-                i += 1;
-                command = args.get(i).context("--command requires a value")?.clone();
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return Ok(());
-            }
-            other => {
-                bail!("unknown argument: {other}\nRun with --help for usage.");
-            }
-        }
-        i += 1;
-    }
-
-    // Resolve DB path from env or default
-    let db_path = db_path
-        .or_else(|| std::env::var("KBTZ_DB").ok())
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            format!("{home}/.kbtz/kbtz.db")
-        });
+    let db_path = cli.db.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.kbtz/kbtz.db")
+    });
 
     // Ensure the DB exists
     if !std::path::Path::new(&db_path).exists() {
@@ -132,7 +128,7 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    let mut app = App::new(db_path, mux_dir, concurrency, prefer, command, rows, cols)?;
+    let mut app = App::new(db_path, mux_dir, cli.concurrency, cli.prefer, cli.command, rows, cols)?;
 
     // Initial session spawning
     app.tick()?;
@@ -776,37 +772,3 @@ fn draw_help_bar(rows: u16, cols: u16) {
     let _ = out.flush();
 }
 
-fn print_usage() {
-    eprintln!(
-        "kbtz-mux - task multiplexer for kbtz
-
-USAGE:
-    kbtz-mux [OPTIONS]
-
-OPTIONS:
-    --db <path>            Path to kbtz database (default: $KBTZ_DB or ~/.kbtz/tasks.db)
-    -j, --concurrency <n>  Max concurrent sessions (default: 4)
-    --prefer <text>        Preference hint for task selection (FTS match)
-    --command <cmd>        Command to run per session (default: claude)
-    -h, --help             Show this help
-
-TREE MODE KEYS:
-    j/k, Up/Down   Navigate
-    Enter           Zoom into session
-    c               Switch to task manager session
-    Space           Collapse/expand
-    p               Pause/unpause task
-    d               Mark task done
-    U               Force-unassign task
-    ?               Help
-    q               Quit
-
-ZOOMED MODE / TASK MANAGER:
-    ^B t            Return to tree
-    ^B c            Switch to task manager session
-    ^B n/p          Next/prev session
-    ^B ^B           Send literal Ctrl-B
-    ^B ?            Help
-    ^B q            Quit"
-    );
-}
