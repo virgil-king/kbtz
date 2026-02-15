@@ -79,16 +79,19 @@ impl Passthrough {
         // (tree view, etc.).
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(concat!(
-            "\x1b[?1000l",  // disable mouse tracking modes
-            "\x1b[?1002l",
-            "\x1b[?1003l",
-            "\x1b[?1006l",  // disable SGR mouse encoding
-            "\x1b[?2004l",  // disable bracketed paste
-            "\x1b[?1l",     // normal cursor keys
-            "\x1b>",        // normal keypad
-            "\x1b[?25h",    // show cursor
-        ).as_bytes());
+        let _ = out.write_all(
+            concat!(
+                "\x1b[?1000l", // disable mouse tracking modes
+                "\x1b[?1002l",
+                "\x1b[?1003l",
+                "\x1b[?1006l", // disable SGR mouse encoding
+                "\x1b[?2004l", // disable bracketed paste
+                "\x1b[?1l",    // normal cursor keys
+                "\x1b>",       // normal keypad
+                "\x1b[?25h",   // show cursor
+            )
+            .as_bytes(),
+        );
         let _ = out.flush();
     }
 
@@ -101,7 +104,8 @@ impl Passthrough {
             // Terminate any escape sequence that was cut mid-stream.
             // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends
             // OSC/DCS sequences.
-            self.output_buffer.splice(0..0, b"\x18\x1b\\".iter().copied());
+            self.output_buffer
+                .splice(0..0, b"\x18\x1b\\".iter().copied());
         }
     }
 
@@ -378,6 +382,9 @@ mod tests {
         // VTE should reflect the text regardless of buffer trim.
         let screen = pt.vte.screen();
         let contents = screen.contents();
-        assert!(contents.starts_with("test"), "expected 'test' at top of screen, got: {contents:?}");
+        assert!(
+            contents.starts_with("test"),
+            "expected 'test' at top of screen, got: {contents:?}"
+        );
     }
 }
