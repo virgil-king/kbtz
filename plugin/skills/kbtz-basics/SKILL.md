@@ -9,7 +9,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 
 | Command | Description |
 |---------|-------------|
-| `kbtz add <name> <desc> [-p parent] [-c assignee] [--paused]` | Create a task |
+| `kbtz add <name> <desc> [-p parent] [-c assignee] [-n note] [--paused]` | Create a task |
 | `kbtz claim <name> <assignee>` | Claim a task |
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
 | `kbtz steal <name> <assignee>` | Atomically transfer task ownership (requires user approval) |
@@ -63,6 +63,16 @@ Use `--paused` to create a task that shouldn't be worked on yet:
 
 ```bash
 kbtz add deferred-task "Not ready yet" --paused
+```
+
+### Specifying closure conditions
+
+When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the default is to create a PR and close the task after the PR is merged.
+
+Examples:
+
+```bash
+kbtz add update-deps "Update outdated dependencies" -n "Close when changes are committed to branch update-deps"
 ```
 
 ### Adding progress notes
