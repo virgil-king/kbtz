@@ -178,7 +178,11 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
         None => return,
     };
 
-    let area = centered_rect(60, 14, frame.area());
+    let term = frame.area();
+    let width = 60.min(term.width.saturating_sub(4));
+    let content_rows: u16 = 8 + u16::from(form.error.is_some()); // parent + 3*(label+input) + hint
+    let height = (content_rows + 2).min(term.height.saturating_sub(2)); // +2 for borders
+    let area = centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
 
@@ -245,7 +249,10 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 }
 
 fn render_help(frame: &mut Frame) {
-    let area = centered_rect(50, 21, frame.area());
+    let term = frame.area();
+    let width = 50.min(term.width.saturating_sub(4));
+    let height = 21.min(term.height.saturating_sub(2));
+    let area = centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
 
