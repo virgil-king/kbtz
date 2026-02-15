@@ -5,12 +5,15 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
+/// SQLite auxiliary file suffixes appended to the database filename.
+const SQLITE_SUFFIXES: &[&str] = &["-wal", "-shm", "-journal"];
+
 /// Creates a watcher for the database file and returns a receiver for change events.
 /// The watcher must be kept alive for events to be received.
 ///
 /// We watch the parent directory (since SQLite uses temp files like -wal and -shm
 /// alongside the main database file), but filter events to only those affecting
-/// files whose name starts with the database filename.
+/// the database file itself or its known SQLite auxiliaries.
 pub fn watch_db(db_path: &str) -> Result<(RecommendedWatcher, Receiver<()>)> {
     let (tx, rx) = mpsc::channel();
 
@@ -32,7 +35,13 @@ pub fn watch_db(db_path: &str) -> Result<(RecommendedWatcher, Receiver<()>)> {
             // see events for every file in it; ignore unrelated files.
             let dominated = event.paths.iter().any(|p| {
                 p.file_name()
-                    .map(|f| f.to_string_lossy().starts_with(&*db_filename))
+                    .map(|f| {
+                        let name = f.to_string_lossy();
+                        name == *db_filename
+                            || name
+                                .strip_prefix(db_filename.as_str())
+                                .is_some_and(|rest| SQLITE_SUFFIXES.contains(&rest))
+                    })
                     .unwrap_or(false)
             });
             if dominated {
