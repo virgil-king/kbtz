@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Set tmux pane title to show Claude Code state and current kbtz task.
-# Usage: bash pane-title.sh <idle|active|needs_input|blocked>
+# Usage: bash pane-title.sh <idle|active|needs_input>
 
 set -euo pipefail
 
@@ -8,13 +8,12 @@ set -euo pipefail
 
 sid=$(jq -r '.session_id // empty' 2>/dev/null) || true
 
-state="${1:?Usage: pane-title.sh <idle|active|needs_input|blocked>}"
+state="${1:?Usage: pane-title.sh <idle|active|needs_input>}"
 
 case "$state" in
   idle)        emoji="🟡" ;;
   active)      emoji="🟢" ;;
   needs_input) emoji="🔔" ;;
-  blocked)     emoji="🔴" ;;
   *)           echo "Unknown state: $state" >&2; exit 1 ;;
 esac
 
