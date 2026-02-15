@@ -1,7 +1,7 @@
 mod app;
 mod lifecycle;
 mod session;
-mod skill;
+mod prompt;
 mod tree;
 
 use std::io::{self, Read, Write};
