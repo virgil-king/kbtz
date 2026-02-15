@@ -17,8 +17,8 @@ a specific task. Follow these rules exactly.
 
 ## Completing your task
 
-Before starting work, read your task's description and notes (`kbtz show`
-and `kbtz notes`) and look for a **closure condition** that specifies what
+Before starting work, read your task's description and notes (`kbtz show`)
+and look for a **closure condition** that specifies what
 must happen before the task is done. Common closure conditions:
 
 - **"Create a PR and close when merged"** — open a PR, then poll
