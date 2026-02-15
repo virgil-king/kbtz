@@ -67,16 +67,14 @@ kbtz add deferred-task "Not ready yet" --paused
 
 ### Specifying closure conditions
 
-When creating a task, include a **closure condition** in the description or an initial note so the worker knows what "done" means. Without a closure condition, the worker will simply mark the task done after committing changes.
+When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the worker will simply mark the task done after committing changes.
 
 Examples:
 
 ```bash
-kbtz add fix-auth "Fix the auth token refresh bug" -n "Closure: create a PR and close when merged"
+kbtz add fix-auth "Fix the auth token refresh bug" -n "Create a PR and close when merged"
 
-kbtz add add-tests "Add integration tests for payment flow" -n "Closure: close when tests pass on the feature branch"
-
-kbtz add update-deps "Update outdated dependencies" -n "Closure: close when changes are committed to branch update-deps"
+kbtz add update-deps "Update outdated dependencies" -n "Close when changes are committed to branch update-deps"
 ```
 
 ### Adding progress notes

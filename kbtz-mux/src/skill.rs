@@ -18,18 +18,14 @@ a specific task. Follow these rules exactly.
 ## Completing your task
 
 Before starting work, read your task's description and notes (`kbtz show`
-and `kbtz notes`) and look for a **closure condition** — a note starting
-with "Closure:" that specifies what must happen before the task is done.
+and `kbtz notes`) and look for a **closure condition** that specifies what
+must happen before the task is done. Common closure conditions:
 
-If a closure condition exists, follow it exactly. Common examples:
-
-- **"Closure: create a PR and close when merged"** — open a PR, then poll
+- **"Create a PR and close when merged"** — open a PR, then poll
   `gh pr view <URL> --json state -q '.state'` every 60 seconds until the
   state is "MERGED". Only then run `kbtz done`.
-- **"Closure: close when changes are committed to branch X"** — commit to
+- **"Close when changes are committed to branch X"** — commit to
   the specified branch and then run `kbtz done`.
-- **"Closure: close when tests pass on the feature branch"** — run the
-  test suite, confirm it passes, then run `kbtz done`.
 
 If no closure condition is specified, the default behavior is: complete
 the work, commit changes, and mark the task done:
