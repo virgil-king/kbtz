@@ -348,14 +348,14 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     // Start passthrough: flushes buffered output to stdout (everything
     // the child wrote while we were in tree mode), then goes live.
     if let Some(session) = app.sessions.get(&session_id) {
-        session.start_passthrough();
+        session.start_passthrough()?;
     }
 
     let result = zoomed_loop(app, task, &session_id, running);
 
     // Stop passthrough
     if let Some(session) = app.sessions.get(&session_id) {
-        session.stop_passthrough();
+        let _ = session.stop_passthrough();
     }
 
     // Reset scroll region to full terminal
@@ -479,7 +479,7 @@ fn zoomed_loop(
                     b't' | b'd' => return Ok(Action::ReturnToTree),
                     b'c' => {
                         if let Some(session) = app.sessions.get(session_id) {
-                            session.stop_passthrough();
+                            let _ = session.stop_passthrough();
                         }
                         return Ok(Action::TopLevel);
                     }
@@ -488,7 +488,7 @@ fn zoomed_loop(
                             app.cycle_session(&Action::NextSession, task)
                         {
                             if let Some(session) = app.sessions.get(session_id) {
-                                session.stop_passthrough();
+                                let _ = session.stop_passthrough();
                             }
                             return Ok(Action::ZoomIn(next_task));
                         }
@@ -498,7 +498,7 @@ fn zoomed_loop(
                             app.cycle_session(&Action::PrevSession, task)
                         {
                             if let Some(session) = app.sessions.get(session_id) {
-                                session.stop_passthrough();
+                                let _ = session.stop_passthrough();
                             }
                             return Ok(Action::ZoomIn(prev_task));
                         }
@@ -554,14 +554,14 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 
     // Start passthrough
     if let Some(ref toplevel) = app.toplevel {
-        toplevel.start_passthrough();
+        toplevel.start_passthrough()?;
     }
 
     let result = toplevel_loop(app, running);
 
     // Stop passthrough
     if let Some(ref toplevel) = app.toplevel {
-        toplevel.stop_passthrough();
+        let _ = toplevel.stop_passthrough();
     }
 
     // Reset scroll region to full terminal

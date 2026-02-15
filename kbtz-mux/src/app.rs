@@ -301,7 +301,7 @@ impl App {
     /// Remove a session, cleaning up its status file and releasing the task.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
-            session.stop_passthrough();
+            let _ = session.stop_passthrough();
             let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
             self.task_to_session.remove(&session.task_name);
             // Clean up status file
@@ -398,11 +398,11 @@ impl App {
     pub fn shutdown(&mut self) {
         // Send /exit to all sessions (workers + toplevel).
         for session in self.sessions.values_mut() {
-            session.stop_passthrough();
+            let _ = session.stop_passthrough();
             session.request_exit();
         }
         if let Some(ref mut toplevel) = self.toplevel {
-            toplevel.stop_passthrough();
+            let _ = toplevel.stop_passthrough();
             toplevel.request_exit();
         }
 
