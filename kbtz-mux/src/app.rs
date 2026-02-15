@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
 use kbtz::model::Task;
@@ -23,7 +23,11 @@ pub struct App {
     pub task_to_session: HashMap<String, String>, // task_name -> session_id
     counter: u64,
     pub mux_dir: PathBuf,
+    /// In auto mode, caps how many sessions lifecycle::tick will auto-spawn.
+    /// In manual mode (--manual), this field is ignored — the user controls
+    /// spawning via the 's' keybinding with no concurrency limit.
     pub max_concurrency: usize,
+    pub manual: bool,
     pub prefer: Option<String>,
     pub command: String,
 
@@ -60,6 +64,7 @@ impl App {
         db_path: String,
         mux_dir: PathBuf,
         max_concurrency: usize,
+        manual: bool,
         prefer: Option<String>,
         command: String,
         rows: u16,
@@ -75,6 +80,7 @@ impl App {
             counter: 0,
             mux_dir,
             max_concurrency,
+            manual,
             prefer,
             command,
             toplevel: None,
@@ -136,9 +142,12 @@ impl App {
             })
             .collect();
 
+        // In manual mode, report max_concurrency as 0 so lifecycle::tick
+        // never emits SpawnUpTo. Reaping/cleanup still runs normally.
+        let effective_concurrency = if self.manual { 0 } else { self.max_concurrency };
         WorldSnapshot {
             sessions,
-            max_concurrency: self.max_concurrency,
+            max_concurrency: effective_concurrency,
             now: std::time::Instant::now(),
         }
     }
@@ -222,6 +231,41 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Claim and spawn a session for a specific task by name.
+    pub fn spawn_for_task(&mut self, task_name: &str) -> Result<()> {
+        if self.task_to_session.contains_key(task_name) {
+            bail!("task already has an active session");
+        }
+
+        self.counter += 1;
+        let session_id = format!("mux/{}", self.counter);
+
+        ops::claim_task(&self.conn, task_name, &session_id)?;
+
+        let task = match ops::get_task(&self.conn, task_name) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = ops::release_task(&self.conn, task_name, &session_id);
+                self.counter -= 1;
+                return Err(e);
+            }
+        };
+
+        match self.spawn_session(&task, &session_id) {
+            Ok(session) => {
+                self.task_to_session
+                    .insert(task_name.to_string(), session_id.clone());
+                self.sessions.insert(session_id, session);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = ops::release_task(&self.conn, task_name, &session_id);
+                self.counter -= 1;
+                Err(e)
+            }
+        }
     }
 
     /// Spawn the top-level task management session.

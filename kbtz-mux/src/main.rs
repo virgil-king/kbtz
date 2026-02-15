@@ -26,6 +26,7 @@ use session::SessionStatus;
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
+    s               Spawn session for task
     c               Switch to task manager session
     Space           Collapse/expand
     p               Pause/unpause task
@@ -57,6 +58,10 @@ struct Cli {
     /// Command to run per session
     #[arg(long, default_value = "claude")]
     command: String,
+
+    /// Disable automatic session spawning; use 's' in tree mode to spawn manually
+    #[arg(long)]
+    manual: bool,
 }
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
@@ -128,7 +133,7 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    let mut app = App::new(db_path, mux_dir, cli.concurrency, cli.prefer, cli.command, rows, cols)?;
+    let mut app = App::new(db_path, mux_dir, cli.concurrency, cli.manual, cli.prefer, cli.command, rows, cols)?;
 
     // Initial session spawning
     app.tick()?;
@@ -324,6 +329,14 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
+                                app.error = Some(e.to_string());
+                            }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(name) = app.selected_name() {
+                            let name = name.to_string();
+                            if let Err(e) = app.spawn_for_task(&name) {
                                 app.error = Some(e.to_string());
                             }
                         }

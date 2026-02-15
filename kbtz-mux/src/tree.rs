@@ -93,8 +93,12 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let active = app.sessions.len();
-    let max = app.max_concurrency;
-    let title = format!(" kbtz-mux ({active}/{max} sessions) ");
+    let title = if app.manual {
+        format!(" kbtz-mux ({active} sessions, manual) ")
+    } else {
+        let max = app.max_concurrency;
+        format!(" kbtz-mux ({active}/{max} sessions) ")
+    };
 
     let list = List::new(items).block(
         Block::default()
@@ -116,6 +120,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":nav  "),
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(":zoom  "),
+            Span::styled("s", Style::default().fg(Color::Cyan)),
+            Span::raw(":spawn  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(":manager  "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
@@ -137,7 +143,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = ui::centered_rect(55, 23, frame.area());
+    let area = ui::centered_rect(55, 24, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -158,6 +164,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  Enter      ", Style::default().fg(Color::Cyan)),
             Span::raw("Zoom into session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  s          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Spawn session for task"),
         ]),
         Line::from(vec![
             Span::styled("  c          ", Style::default().fg(Color::Cyan)),
