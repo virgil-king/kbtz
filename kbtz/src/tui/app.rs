@@ -109,7 +109,7 @@ impl App {
     }
 
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
-        let mut tasks = ops::list_tasks(conn, None, true, root)?;
+        let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
         tasks.retain(|t| t.status != "done");
         self.rows = ui::flatten_tree(&tasks, &self.collapsed, conn)?;
         // Clamp cursor

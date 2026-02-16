@@ -190,13 +190,35 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             all,
             root,
             children,
+            assignee,
+            blocked,
+            unblocked,
             json,
         } => {
             let status = status.map(|s| StatusFilter::parse(&s)).transpose()?;
+            let blocked_filter = match (blocked, unblocked) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
             let tasks = if let Some(ref parent) = children {
-                ops::list_children(conn, parent, status, all)?
+                ops::list_children(
+                    conn,
+                    parent,
+                    status,
+                    all,
+                    assignee.as_deref(),
+                    blocked_filter,
+                )?
             } else {
-                ops::list_tasks(conn, status, all, root.as_deref())?
+                ops::list_tasks(
+                    conn,
+                    status,
+                    all,
+                    root.as_deref(),
+                    assignee.as_deref(),
+                    blocked_filter,
+                )?
             };
             if json {
                 let mut deps = ops::get_all_deps(conn)?;

@@ -103,7 +103,7 @@ impl App {
 
     /// Rebuild the tree view from the database.
     pub fn refresh_tree(&mut self) -> Result<()> {
-        let mut tasks = ops::list_tasks(&self.conn, None, true, None)?;
+        let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
         tasks.retain(|t| t.status != "done");
         self.tree_rows = kbtz::ui::flatten_tree(&tasks, &self.collapsed, &self.conn)?;
         if !self.tree_rows.is_empty() {

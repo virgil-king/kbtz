@@ -153,6 +153,15 @@ pub enum Command {
         /// Show only direct children of the given task (depth 1)
         #[arg(long, conflicts_with = "root")]
         children: Option<String>,
+        /// Filter by assignee
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Show only blocked tasks
+        #[arg(long, conflicts_with = "unblocked")]
+        blocked: bool,
+        /// Show only unblocked tasks
+        #[arg(long)]
+        unblocked: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
