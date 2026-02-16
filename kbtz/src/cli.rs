@@ -49,6 +49,9 @@ pub enum Command {
         /// Soft preference text for ranking (matched against name, description, and notes)
         #[arg(long)]
         prefer: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Atomically transfer task ownership
