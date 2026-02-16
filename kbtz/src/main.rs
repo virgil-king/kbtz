@@ -79,17 +79,31 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             eprintln!("Claimed '{name}' for '{assignee}'");
         }
 
-        Command::ClaimNext { assignee, prefer } => {
+        Command::ClaimNext {
+            assignee,
+            prefer,
+            json,
+        } => {
             match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
                 Some(name) => {
                     let task = ops::get_task(conn, &name)?;
                     let notes = ops::list_notes(conn, &name)?;
                     let blockers = ops::get_blockers(conn, &name)?;
                     let dependents = ops::get_dependents(conn, &name)?;
-                    print!(
-                        "{}",
-                        output::format_task_detail(&task, &notes, &blockers, &dependents)
-                    );
+                    if json {
+                        let detail = output::TaskDetail {
+                            task: &task,
+                            notes: &notes,
+                            blocked_by: &blockers,
+                            blocks: &dependents,
+                        };
+                        println!("{}", serde_json::to_string_pretty(&detail)?);
+                    } else {
+                        print!(
+                            "{}",
+                            output::format_task_detail(&task, &notes, &blockers, &dependents)
+                        );
+                    }
                     eprintln!("Claimed '{name}' for '{assignee}'");
                 }
                 None => {
