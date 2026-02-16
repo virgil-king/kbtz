@@ -98,9 +98,15 @@ mod tests {
     #[test]
     fn from_name_unknown_backend_fails() {
         let result = from_name("nonexistent", None);
-        let err = result.err().expect("should fail for unknown backend").to_string();
+        let err = result
+            .err()
+            .expect("should fail for unknown backend")
+            .to_string();
         assert!(err.contains("nonexistent"), "error should name the backend");
-        assert!(err.contains("claude"), "error should list available backends");
+        assert!(
+            err.contains("claude"),
+            "error should list available backends"
+        );
     }
 
     #[test]
@@ -109,7 +115,10 @@ mod tests {
             command: "claude".into(),
         };
         let args = backend.worker_args("protocol text", "task text");
-        assert_eq!(args, vec!["--append-system-prompt", "protocol text", "task text"]);
+        assert_eq!(
+            args,
+            vec!["--append-system-prompt", "protocol text", "task text"]
+        );
     }
 
     #[test]
