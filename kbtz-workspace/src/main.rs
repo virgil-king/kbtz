@@ -179,8 +179,7 @@ fn run() -> Result<()> {
     };
     let extra_args: Vec<String> = agent_config.map(|a| a.args.clone()).unwrap_or_default();
 
-    let backend =
-        backend::from_name(&backend_name, command_override, &prefix_args, &extra_args)?;
+    let backend = backend::from_name(&backend_name, command_override, &prefix_args, &extra_args)?;
 
     let mut app = App::new(
         db_path,
