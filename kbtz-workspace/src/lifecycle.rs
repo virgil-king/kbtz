@@ -146,11 +146,7 @@ mod tests {
     #[test]
     fn exited_session_removed_and_slot_filled() {
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Exited,
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
             2,
         );
         let actions = tick(&w);
@@ -186,11 +182,7 @@ mod tests {
     #[test]
     fn healthy_session_no_action() {
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Running,
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/1"))],
             2,
         );
         let actions = tick(&w);
@@ -305,11 +297,7 @@ mod tests {
     #[test]
     fn reassigned_task_triggers_request_exit() {
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Running,
-                active_task("ws/2"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/2"))],
             2,
         );
         let actions = tick(&w);
@@ -330,11 +318,7 @@ mod tests {
     #[test]
     fn manual_mode_still_reaps_exited() {
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Exited,
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
             0,
         );
         let actions = tick(&w);

@@ -18,7 +18,11 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     if app.tree_rows.is_empty() {
         let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title(" kbtz-workspace "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" kbtz-workspace "),
+            );
         frame.render_widget(msg, area);
         return;
     }
