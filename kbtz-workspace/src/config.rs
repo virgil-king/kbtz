@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize)]
@@ -21,12 +21,40 @@ pub struct WorkspaceConfig {
     pub backend: Option<String>,
 }
 
+/// The `command` field in agent config: either a plain string or an array
+/// whose first element is the binary and the rest are prefix args.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum AgentCommand {
+    Simple(String),
+    WithPrefix(Vec<String>),
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
-    pub command: Option<String>,
+    pub command: Option<AgentCommand>,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+impl AgentConfig {
+    /// The binary to run, if configured.
+    pub fn binary(&self) -> Option<&str> {
+        match &self.command {
+            Some(AgentCommand::Simple(s)) => Some(s),
+            Some(AgentCommand::WithPrefix(v)) => v.first().map(|s| s.as_str()),
+            None => None,
+        }
+    }
+
+    /// Prefix args from an array-valued command (elements after the binary).
+    pub fn prefix_args(&self) -> &[String] {
+        match &self.command {
+            Some(AgentCommand::WithPrefix(v)) if v.len() > 1 => &v[1..],
+            _ => &[],
+        }
+    }
 }
 
 impl Config {
@@ -39,12 +67,28 @@ impl Config {
     }
 
     fn load_from(path: &Path) -> Result<Self> {
-        match std::fs::read_to_string(path) {
+        let config: Config = match std::fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents)
-                .with_context(|| format!("failed to parse {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+                .with_context(|| format!("failed to parse {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+        };
+        config.validate(path)?;
+        Ok(config)
+    }
+
+    fn validate(&self, path: &Path) -> Result<()> {
+        for (name, agent) in &self.agent {
+            if let Some(AgentCommand::WithPrefix(v)) = &agent.command {
+                if v.is_empty() {
+                    bail!(
+                        "failed to parse {}: agent.{name}.command array must have at least one element",
+                        path.display()
+                    );
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -88,11 +132,13 @@ args = ["--model", "gemini-2.5-pro"]
         assert_eq!(config.workspace.backend.as_deref(), Some("claude"));
 
         let claude = config.agent.get("claude").unwrap();
-        assert_eq!(claude.command.as_deref(), Some("/usr/local/bin/claude"));
+        assert_eq!(claude.binary(), Some("/usr/local/bin/claude"));
+        assert!(claude.prefix_args().is_empty());
         assert_eq!(claude.args, vec!["--verbose"]);
 
         let gemini = config.agent.get("gemini").unwrap();
-        assert_eq!(gemini.command.as_deref(), Some("gemini-cli"));
+        assert_eq!(gemini.binary(), Some("gemini-cli"));
+        assert!(gemini.prefix_args().is_empty());
         assert_eq!(gemini.args, vec!["--model", "gemini-2.5-pro"]);
     }
 
@@ -123,7 +169,7 @@ args = ["--flag"]
         let config = Config::load_from(f.path()).unwrap();
         assert!(config.workspace.concurrency.is_none());
         let claude = config.agent.get("claude").unwrap();
-        assert!(claude.command.is_none());
+        assert!(claude.binary().is_none());
         assert_eq!(claude.args, vec!["--flag"]);
     }
 
@@ -168,5 +214,55 @@ commnd = "claude"
 
         let result = Config::load_from(f.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_array_command() {
+        let toml = r#"
+[agent.claude]
+command = ["wrapper", "--flag", "claude"]
+args = ["--verbose"]
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let claude = config.agent.get("claude").unwrap();
+        assert_eq!(claude.binary(), Some("wrapper"));
+        assert_eq!(claude.prefix_args(), &["--flag", "claude"]);
+        assert_eq!(claude.args, vec!["--verbose"]);
+    }
+
+    #[test]
+    fn parse_single_element_array_command() {
+        let toml = r#"
+[agent.claude]
+command = ["claude"]
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let claude = config.agent.get("claude").unwrap();
+        assert_eq!(claude.binary(), Some("claude"));
+        assert!(claude.prefix_args().is_empty());
+    }
+
+    #[test]
+    fn empty_array_command_rejected() {
+        let toml = r#"
+[agent.claude]
+command = []
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let result = Config::load_from(f.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("at least one element"),
+            "error should mention empty array: {err}"
+        );
     }
 }

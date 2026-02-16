@@ -168,10 +168,18 @@ fn run() -> Result<()> {
     let command_override = cli
         .command
         .as_deref()
-        .or_else(|| agent_config.and_then(|a| a.command.as_deref()));
+        .or_else(|| agent_config.and_then(|a| a.binary()));
+    // CLI --command is a plain string override with no prefix args.
+    let prefix_args: Vec<String> = if cli.command.is_some() {
+        vec![]
+    } else {
+        agent_config
+            .map(|a| a.prefix_args().to_vec())
+            .unwrap_or_default()
+    };
     let extra_args: Vec<String> = agent_config.map(|a| a.args.clone()).unwrap_or_default();
 
-    let backend = backend::from_name(&backend_name, command_override, &extra_args)?;
+    let backend = backend::from_name(&backend_name, command_override, &prefix_args, &extra_args)?;
 
     let mut app = App::new(
         db_path,
