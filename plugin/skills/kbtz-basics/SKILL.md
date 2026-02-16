@@ -1,6 +1,6 @@
 ---
 name: kbtz-basics
-description: This skill should be used when the user asks about "kbtz commands", "task tracking", "how to use kbtz", "create a task", "add a note", "list tasks", "task dependencies", or needs a reference for kbtz CLI usage outside of worker mode.
+description: This skill should be used when the user asks about "kbtz commands", "task tracking", "how to use kbtz", "create a task", "add a note", "list tasks", "task dependencies", or needs a reference for kbtz CLI usage.
 ---
 
 # kbtz Task Tracker Reference

@@ -124,7 +124,7 @@ done
 
 ### Claude Code plugin
 
-The `plugin/` directory contains a Claude Code plugin that teaches Claude how to operate as a kbtz worker agent. See `plugin/skills/worker/SKILL.md` for the full protocol.
+The `plugin/` directory contains a Claude Code plugin with a kbtz command reference and hooks.
 
 Install from the marketplace:
 

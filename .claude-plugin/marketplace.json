@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "kbtz-tools",
-      "description": "Plugin for the kbtz task tracker: worker agent and command reference",
+      "description": "Plugin for the kbtz task tracker: command reference and hooks",
       "version": "1.0.0",
       "author": {
         "name": "virgil"
