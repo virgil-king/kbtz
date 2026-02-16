@@ -205,6 +205,15 @@ pub enum Command {
     /// Wait for database changes (blocks until a change occurs)
     Wait,
 
+    /// Full-text search across tasks and notes
+    Search {
+        /// Search query
+        query: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Execute commands from stdin atomically (all-or-nothing transaction)
     ///
     /// Reads commands from stdin, one per line, and runs them in a single

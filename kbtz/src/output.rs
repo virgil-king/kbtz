@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::model::{Note, Task};
+use crate::model::{Note, SearchResult, Task};
 
 #[derive(Serialize)]
 pub struct TaskDetail<'a> {
@@ -157,6 +157,27 @@ fn write_tree(
             &format!("{child_prefix}{extension}"),
         );
     }
+}
+
+pub fn format_search_results(results: &[SearchResult]) -> String {
+    let mut out = String::new();
+    for result in results {
+        let task = &result.task;
+        let matched = result.matched_in.join(", ");
+        let desc = if task.description.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", task.description)
+        };
+        out.push_str(&format!(
+            "{} {}{} [{}]\n",
+            task.icon(),
+            task.name,
+            desc,
+            matched
+        ));
+    }
+    out
 }
 
 pub fn format_notes(notes: &[Note]) -> String {

@@ -37,3 +37,10 @@ pub struct Note {
     pub content: String,
     pub created_at: String,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    #[serde(flatten)]
+    pub task: Task,
+    pub matched_in: Vec<String>,
+}
