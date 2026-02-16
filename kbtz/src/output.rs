@@ -13,6 +13,14 @@ pub struct TaskDetail<'a> {
     pub blocks: &'a [String],
 }
 
+#[derive(Serialize)]
+pub struct TaskListItem<'a> {
+    #[serde(flatten)]
+    pub task: &'a Task,
+    pub blocked_by: Vec<String>,
+    pub blocks: Vec<String>,
+}
+
 pub fn format_task_detail(
     task: &Task,
     notes: &[Note],

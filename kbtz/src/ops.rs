@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -350,6 +352,13 @@ pub fn force_unassign_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
+    if status != "done" {
+        bail!("task '{name}' is not done (status: {status})");
+    }
     conn.execute(RELEASE_TO_OPEN, [name])?;
     Ok(())
 }
@@ -660,6 +669,38 @@ pub fn get_dependents(conn: &Connection, task_name: &str) -> Result<Vec<String>>
         .map_err(Into::into)
 }
 
+/// (blocked_by, blocks) for a single task.
+pub type TaskDeps = (Vec<String>, Vec<String>);
+
+/// Batch-fetch blocked_by and blocks for all tasks in two queries.
+/// Returns a map from task name to (blocked_by, blocks).
+pub fn get_all_deps(conn: &Connection) -> Result<HashMap<String, TaskDeps>> {
+    let mut map: HashMap<String, TaskDeps> = HashMap::new();
+
+    // blocked_by: for each blocked task, which non-done tasks block it
+    let mut stmt = conn.prepare(
+        "SELECT td.blocked, td.blocker FROM task_deps td \
+         INNER JOIN tasks t ON t.name = td.blocker AND t.status != 'done' \
+         ORDER BY td.blocked, td.blocker",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (blocked, blocker) = row?;
+        map.entry(blocked).or_default().0.push(blocker);
+    }
+
+    // blocks: for each blocker task, which tasks does it block
+    let mut stmt =
+        conn.prepare("SELECT blocker, blocked FROM task_deps ORDER BY blocker, blocked")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (blocker, blocked) = row?;
+        map.entry(blocker).or_default().1.push(blocked);
+    }
+
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +782,41 @@ mod tests {
         reopen_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn reopen_open_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
+    }
+
+    #[test]
+    fn reopen_active_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        claim_task(&conn, "t", "agent").unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
+    }
+
+    #[test]
+    fn reopen_paused_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
     }
 
     #[test]
@@ -1396,6 +1472,67 @@ mod tests {
             err.to_string().contains("mutually exclusive"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn get_all_deps_returns_blockers_and_dependents() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "a", None, "", None, None, false).unwrap();
+        add_task(&conn, "b", None, "", None, None, false).unwrap();
+        add_task(&conn, "c", None, "", None, None, false).unwrap();
+        add_block(&conn, "a", "b").unwrap();
+        add_block(&conn, "a", "c").unwrap();
+        add_block(&conn, "b", "c").unwrap();
+
+        let deps = get_all_deps(&conn).unwrap();
+
+        // a blocks b and c
+        let a = deps.get("a").unwrap();
+        assert!(a.0.is_empty()); // blocked_by
+        assert_eq!(a.1, vec!["b", "c"]); // blocks
+
+        // b is blocked by a, blocks c
+        let b = deps.get("b").unwrap();
+        assert_eq!(b.0, vec!["a"]); // blocked_by
+        assert_eq!(b.1, vec!["c"]); // blocks
+
+        // c is blocked by a and b
+        let c = deps.get("c").unwrap();
+        assert_eq!(c.0, vec!["a", "b"]); // blocked_by
+        assert!(c.1.is_empty()); // blocks
+    }
+
+    #[test]
+    fn get_all_deps_excludes_done_blockers() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "a", None, "", None, None, false).unwrap();
+        add_task(&conn, "b", None, "", None, None, false).unwrap();
+        add_block(&conn, "a", "b").unwrap();
+        mark_done(&conn, "a").unwrap();
+
+        let deps = get_all_deps(&conn).unwrap();
+
+        // b should have no blockers since a is done
+        let b_blocked_by = deps
+            .get("b")
+            .map(|(bb, _)| bb.clone())
+            .unwrap_or_default();
+        assert!(b_blocked_by.is_empty());
+
+        // a should still list b in blocks
+        let a_blocks = deps
+            .get("a")
+            .map(|(_, bl)| bl.clone())
+            .unwrap_or_default();
+        assert_eq!(a_blocks, vec!["b"]);
+    }
+
+    #[test]
+    fn get_all_deps_empty() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "a", None, "", None, None, false).unwrap();
+        let deps = get_all_deps(&conn).unwrap();
+        assert!(deps.is_empty());
     }
 
     #[test]

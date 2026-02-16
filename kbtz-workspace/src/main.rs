@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod config;
 mod lifecycle;
 mod prompt;
 mod session;
@@ -27,9 +28,22 @@ use session::SessionStatus;
     name = "kbtz-workspace",
     about = "Task workspace for kbtz",
     after_help = "\
+CONFIG FILE:
+    Settings are loaded from ~/.kbtz/workspace.toml (if it exists).
+    CLI args take precedence over config values. Example:
+
+        [workspace]
+        concurrency = 3
+        backend = \"claude\"
+
+        [agent.claude]
+        command = \"/usr/local/bin/claude\"
+        args = [\"--verbose\"]
+
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
+    Tab             Jump to next session needing input
     s               Spawn session for task
     c               Switch to task manager session
     Space           Collapse/expand
@@ -43,6 +57,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B t            Return to tree
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
+    ^B Tab          Jump to next session needing input
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -52,17 +67,17 @@ struct Cli {
     #[arg(long, env = "KBTZ_DB")]
     db: Option<String>,
 
-    /// Max concurrent sessions
-    #[arg(short = 'j', long, default_value_t = 4)]
-    concurrency: usize,
+    /// Max concurrent sessions [default: 8]
+    #[arg(short = 'j', long)]
+    concurrency: Option<usize>,
 
     /// Preference hint for task selection (FTS match)
     #[arg(long)]
     prefer: Option<String>,
 
-    /// Agent backend to use for sessions
-    #[arg(long, default_value = "claude")]
-    backend: String,
+    /// Agent backend to use for sessions [default: claude]
+    #[arg(long)]
+    backend: Option<String>,
 
     /// Override the backend's default command binary
     #[arg(long)]
@@ -118,6 +133,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let config = config::Config::load()?;
 
     let db_path = cli.db.unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -138,14 +154,33 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    let backend = backend::from_name(&cli.backend, cli.command.as_deref())?;
+    // Merge: CLI > config > defaults
+    let ws = config.workspace;
+    let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
+    let manual = cli.manual || ws.manual.unwrap_or(false);
+    let prefer = cli.prefer.or(ws.prefer);
+    let backend_name = cli
+        .backend
+        .or(ws.backend)
+        .unwrap_or_else(|| "claude".into());
+
+    let agent_config = config.agent.get(&backend_name);
+    let command_override = cli
+        .command
+        .as_deref()
+        .or_else(|| agent_config.and_then(|a| a.command.as_deref()));
+    let extra_args: Vec<String> = agent_config
+        .map(|a| a.args.clone())
+        .unwrap_or_default();
+
+    let backend = backend::from_name(&backend_name, command_override, &extra_args)?;
 
     let mut app = App::new(
         db_path,
         status_dir,
-        cli.concurrency,
-        cli.manual,
-        cli.prefer,
+        concurrency,
+        manual,
+        prefer,
         backend,
         rows,
         cols,
@@ -360,6 +395,13 @@ fn tree_loop(
                             app.restart_session(&name);
                         }
                     }
+                    KeyCode::Tab => {
+                        if let Some(task) = app.next_needs_input_session(None) {
+                            return Ok(Action::ZoomIn(task));
+                        } else {
+                            app.error = Some("no sessions need input".into());
+                        }
+                    }
                     KeyCode::Char('c') => {
                         return Ok(Action::TopLevel);
                     }
@@ -460,6 +502,18 @@ fn handle_zoomed_prefix_command(
                 }
                 Ok(Some(Action::ZoomIn(prev_task)))
             } else {
+                Ok(None)
+            }
+        }
+        b'\t' => {
+            if let Some(next_task) = app.next_needs_input_session(Some(task)) {
+                if let Some(session) = app.sessions.get(session_id) {
+                    let _ = session.stop_passthrough();
+                }
+                Ok(Some(Action::ZoomIn(next_task)))
+            } else {
+                draw_status_bar(app.rows, app.cols, task, session_id, last_status,
+                    Some("no sessions need input"));
                 Ok(None)
             }
         }
@@ -720,6 +774,14 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                             }
                         }
                     }
+                    b'\t' => {
+                        if let Some(task) = app.next_needs_input_session(None) {
+                            return Ok(Action::ZoomIn(task));
+                        } else {
+                            draw_toplevel_status_bar(app.rows, app.cols,
+                                Some("no sessions need input"));
+                        }
+                    }
                     PREFIX_KEY => {
                         if let Some(ref mut toplevel) = app.toplevel {
                             toplevel.write_input(&[PREFIX_KEY])?;
@@ -769,7 +831,7 @@ fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
 
 fn draw_toplevel_help_bar(rows: u16, cols: u16) {
     let content =
-        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -816,7 +878,7 @@ fn draw_status_bar(
 
 fn draw_help_bar(rows: u16, cols: u16) {
     let content =
-        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();

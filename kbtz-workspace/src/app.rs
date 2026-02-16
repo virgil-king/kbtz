@@ -425,6 +425,27 @@ impl App {
         self.sessions.get(next_sid).map(|s| s.task_name.clone())
     }
 
+    /// Find the next session with NeedsInput status, cycling from current_task.
+    /// Returns the task name if found.
+    pub fn next_needs_input_session(&self, current_task: Option<&str>) -> Option<String> {
+        let ids = self.session_ids_ordered();
+        let needs_input: Vec<&String> = ids
+            .iter()
+            .filter(|id| {
+                self.sessions
+                    .get(*id)
+                    .is_some_and(|s| s.status == SessionStatus::NeedsInput)
+            })
+            .collect();
+        if needs_input.is_empty() {
+            return None;
+        }
+        let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
+        let idx = cycle_after(&needs_input, current_sid.as_ref());
+        let sid = needs_input[idx];
+        self.sessions.get(sid).map(|s| s.task_name.clone())
+    }
+
     /// Kill and release a session for a task so it can be respawned.
     pub fn restart_session(&mut self, task_name: &str) {
         if let Some(session_id) = self.task_to_session.get(task_name).cloned() {
@@ -484,5 +505,64 @@ impl App {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
+    }
+}
+
+/// Given a sorted list of IDs and an optional current ID, return the index of
+/// the first entry that comes after `current`. Wraps to 0 if `current` is past
+/// all entries or is `None`.
+fn cycle_after<T: Ord>(sorted: &[T], current: Option<&T>) -> usize {
+    current
+        .and_then(|cur| sorted.iter().position(|id| id > cur))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_after_no_current_returns_first() {
+        let ids = vec!["a", "b", "c"];
+        assert_eq!(cycle_after(&ids, None), 0);
+    }
+
+    #[test]
+    fn cycle_after_advances_past_current() {
+        let ids = vec!["ws/1", "ws/2", "ws/3"];
+        assert_eq!(cycle_after(&ids, Some(&"ws/1")), 1);
+        assert_eq!(cycle_after(&ids, Some(&"ws/2")), 2);
+    }
+
+    #[test]
+    fn cycle_after_wraps_past_last() {
+        let ids = vec!["ws/1", "ws/2", "ws/3"];
+        assert_eq!(cycle_after(&ids, Some(&"ws/3")), 0);
+    }
+
+    #[test]
+    fn cycle_after_wraps_when_current_beyond_all() {
+        let ids = vec!["ws/1", "ws/2"];
+        assert_eq!(cycle_after(&ids, Some(&"ws/9")), 0);
+    }
+
+    #[test]
+    fn cycle_after_skips_gap_in_ids() {
+        // Current is between entries (e.g. ws/2 deleted, current was ws/2)
+        let ids = vec!["ws/1", "ws/3", "ws/5"];
+        assert_eq!(cycle_after(&ids, Some(&"ws/2")), 1); // ws/3
+        assert_eq!(cycle_after(&ids, Some(&"ws/4")), 2); // ws/5
+    }
+
+    #[test]
+    fn cycle_after_single_entry_wraps() {
+        let ids = vec!["ws/1"];
+        assert_eq!(cycle_after(&ids, Some(&"ws/1")), 0);
+    }
+
+    #[test]
+    fn cycle_after_single_entry_no_current() {
+        let ids = vec!["ws/1"];
+        assert_eq!(cycle_after(&ids, None), 0);
     }
 }
