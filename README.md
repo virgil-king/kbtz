@@ -151,8 +151,6 @@ kbtz-workspace [OPTIONS]
 | `--command <cmd>` | `claude` | Command to run per session |
 | `--manual` | | Disable auto-spawning; use `s` to spawn manually |
 
-The database must already exist (create tasks with `kbtz add` first).
-
 ### Screens
 
 The workspace has three screens:
@@ -223,12 +221,12 @@ Each spawned agent receives a system prompt that teaches it the workspace contra
 
 Agents report their status by writing to files in the workspace status directory (`$KBTZ_WORKSPACE_DIR`, default `~/.kbtz/workspace/`). Each session gets a file named after its session ID (with `/` replaced by `-`). The workspace watches this directory and updates the task tree with status indicators:
 
-| Status | Indicator | Meaning |
-|--------|-----------|---------|
-| Starting | ⏳ | Session just spawned |
-| Active | 🟢 | Agent is working |
-| Idle | 🟡 | Agent is waiting |
-| Needs input | 🔔 | Agent needs user attention |
+| Status      | Indicator | Meaning                   |
+|-------------|-----------|---------------------------|
+| Starting    | ⏳        | Session just spawned      |
+| Active      | 🟢        | Agent is working          |
+| Idle        | 🟡        | Agent is waiting          |
+| Needs input | 🔔        | Agent needs user attention |
 
 ## Architecture
 

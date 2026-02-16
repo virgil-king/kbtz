@@ -75,6 +75,7 @@ impl App {
         cols: u16,
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
+        kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
         let mut app = App {
             db_path,
             conn,

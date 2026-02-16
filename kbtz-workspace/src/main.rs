@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self as ct_event, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -119,9 +119,9 @@ fn run() -> Result<()> {
         format!("{home}/.kbtz/kbtz.db")
     });
 
-    // Ensure the DB exists
-    if !std::path::Path::new(&db_path).exists() {
-        bail!("database not found at {db_path}\nRun 'kbtz add <task> <description>' to create it.");
+    // Ensure the parent directory exists for DB auto-creation
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        std::fs::create_dir_all(parent).context("failed to create database directory")?;
     }
 
     // Status directory for session state files
