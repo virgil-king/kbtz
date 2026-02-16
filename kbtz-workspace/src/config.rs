@@ -40,14 +40,12 @@ impl Config {
 
     fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
-            }
+            Ok(contents) => toml::from_str(&contents)
+                .with_context(|| format!("failed to parse {}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
         }
     }
-
 }
 
 #[cfg(test)]

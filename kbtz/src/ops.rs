@@ -683,7 +683,9 @@ pub fn get_all_deps(conn: &Connection) -> Result<HashMap<String, TaskDeps>> {
          INNER JOIN tasks t ON t.name = td.blocker AND t.status != 'done' \
          ORDER BY td.blocked, td.blocker",
     )?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
     for row in rows {
         let (blocked, blocker) = row?;
         map.entry(blocked).or_default().0.push(blocker);
@@ -692,7 +694,9 @@ pub fn get_all_deps(conn: &Connection) -> Result<HashMap<String, TaskDeps>> {
     // blocks: for each blocker task, which tasks does it block
     let mut stmt =
         conn.prepare("SELECT blocker, blocked FROM task_deps ORDER BY blocker, blocked")?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
     for row in rows {
         let (blocker, blocked) = row?;
         map.entry(blocker).or_default().1.push(blocked);
@@ -1513,17 +1517,11 @@ mod tests {
         let deps = get_all_deps(&conn).unwrap();
 
         // b should have no blockers since a is done
-        let b_blocked_by = deps
-            .get("b")
-            .map(|(bb, _)| bb.clone())
-            .unwrap_or_default();
+        let b_blocked_by = deps.get("b").map(|(bb, _)| bb.clone()).unwrap_or_default();
         assert!(b_blocked_by.is_empty());
 
         // a should still list b in blocks
-        let a_blocks = deps
-            .get("a")
-            .map(|(_, bl)| bl.clone())
-            .unwrap_or_default();
+        let a_blocks = deps.get("a").map(|(_, bl)| bl.clone()).unwrap_or_default();
         assert_eq!(a_blocks, vec!["b"]);
     }
 
