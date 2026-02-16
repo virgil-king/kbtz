@@ -350,6 +350,13 @@ pub fn force_unassign_task(conn: &Connection, name: &str) -> Result<()> {
 
 pub fn reopen_task(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
+    if status != "done" {
+        bail!("task '{name}' is not done (status: {status})");
+    }
     conn.execute(RELEASE_TO_OPEN, [name])?;
     Ok(())
 }
@@ -696,6 +703,41 @@ mod tests {
         reopen_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn reopen_open_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
+    }
+
+    #[test]
+    fn reopen_active_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        claim_task(&conn, "t", "agent").unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
+    }
+
+    #[test]
+    fn reopen_paused_task_fails() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        pause_task(&conn, "t").unwrap();
+        let err = reopen_task(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("not done"),
+            "expected 'not done' error: {err}"
+        );
     }
 
     #[test]
