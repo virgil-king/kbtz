@@ -43,6 +43,7 @@ CONFIG FILE:
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
+    Tab             Jump to next session needing input
     s               Spawn session for task
     c               Switch to task manager session
     Space           Collapse/expand
@@ -56,6 +57,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B t            Return to tree
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
+    ^B Tab          Jump to next session needing input
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -393,6 +395,13 @@ fn tree_loop(
                             app.restart_session(&name);
                         }
                     }
+                    KeyCode::Tab => {
+                        if let Some(task) = app.next_needs_input_session(None) {
+                            return Ok(Action::ZoomIn(task));
+                        } else {
+                            app.error = Some("no sessions need input".into());
+                        }
+                    }
                     KeyCode::Char('c') => {
                         return Ok(Action::TopLevel);
                     }
@@ -493,6 +502,18 @@ fn handle_zoomed_prefix_command(
                 }
                 Ok(Some(Action::ZoomIn(prev_task)))
             } else {
+                Ok(None)
+            }
+        }
+        b'\t' => {
+            if let Some(next_task) = app.next_needs_input_session(Some(task)) {
+                if let Some(session) = app.sessions.get(session_id) {
+                    let _ = session.stop_passthrough();
+                }
+                Ok(Some(Action::ZoomIn(next_task)))
+            } else {
+                draw_status_bar(app.rows, app.cols, task, session_id, last_status,
+                    Some("no sessions need input"));
                 Ok(None)
             }
         }
@@ -753,6 +774,14 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                             }
                         }
                     }
+                    b'\t' => {
+                        if let Some(task) = app.next_needs_input_session(None) {
+                            return Ok(Action::ZoomIn(task));
+                        } else {
+                            draw_toplevel_status_bar(app.rows, app.cols,
+                                Some("no sessions need input"));
+                        }
+                    }
                     PREFIX_KEY => {
                         if let Some(ref mut toplevel) = app.toplevel {
                             toplevel.write_input(&[PREFIX_KEY])?;
@@ -802,7 +831,7 @@ fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
 
 fn draw_toplevel_help_bar(rows: u16, cols: u16) {
     let content =
-        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -849,7 +878,7 @@ fn draw_status_bar(
 
 fn draw_help_bar(rows: u16, cols: u16) {
     let content =
-        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
+        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
     let padding = (cols as usize).saturating_sub(content.len());
     let stdout = io::stdout();
     let mut out = stdout.lock();

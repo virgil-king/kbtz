@@ -116,6 +116,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":nav  "),
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(":zoom  "),
+            Span::styled("Tab", Style::default().fg(Color::Cyan)),
+            Span::raw(":input  "),
             Span::styled("s", Style::default().fg(Color::Cyan)),
             Span::raw(":spawn  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
@@ -141,7 +143,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 24.min(term.height.saturating_sub(2));
+    let height = 26.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -161,6 +163,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  Enter      ", Style::default().fg(Color::Cyan)),
             Span::raw("Zoom into session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Jump to needs-input session"),
         ]),
         Line::from(vec![
             Span::styled("  s          ", Style::default().fg(Color::Cyan)),
@@ -206,6 +212,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  ^B n/p     ", Style::default().fg(Color::Cyan)),
             Span::raw("Next/prev session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ^B Tab     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Jump to needs-input session"),
         ]),
         Line::from(vec![
             Span::styled("  ^B ^B      ", Style::default().fg(Color::Cyan)),
