@@ -53,6 +53,8 @@ Uses WAL mode and `busy_timeout = 5000ms` for safe concurrent access from multip
 | `kbtz add <name> <desc> [-p parent] [-n note] [-c assignee]` | Create a task |
 | `kbtz done <name>` | Mark complete |
 | `kbtz reopen <name>` | Reopen a completed task |
+| `kbtz pause <name>` | Pause a task (remove from active work and default listing) |
+| `kbtz unpause <name>` | Unpause a paused task (return to open) |
 | `kbtz rm <name> [--recursive]` | Remove a task |
 | `kbtz describe <name> <desc>` | Update description |
 | `kbtz reparent <name> [-p parent]` | Move under a different parent |
@@ -65,7 +67,9 @@ Task names must match `[a-zA-Z0-9_-]+`. Names are immutable — they cannot be c
 |---------|-------------|
 | `kbtz claim <name> <assignee>` | Claim a task |
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
+| `kbtz steal <name> <assignee>` | Atomically transfer task ownership to a new assignee |
 | `kbtz release <name> <assignee>` | Release a claimed task |
+| `kbtz force-unassign <name>` | Forcibly clear a task's assignee (regardless of who holds it) |
 
 `claim-next` picks the best unclaimed, unblocked, undone task in a single atomic transaction. It ranks by:
 
@@ -99,7 +103,7 @@ Cycle detection prevents circular dependencies.
 | `kbtz list [--tree] [--status S] [--all] [--root name] [--json]` | List tasks |
 | `kbtz watch [--root name] [--poll-interval ms]` | Interactive TUI with live updates |
 
-`list` hides completed tasks by default. Use `--all` to include them, or `--status open|active|done` to filter.
+`list` hides completed tasks by default. Use `--all` to include them, or `--status open|active|paused|done` to filter.
 
 #### Coordination
 
