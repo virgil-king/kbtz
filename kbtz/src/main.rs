@@ -1,6 +1,6 @@
 mod cli;
 
-use std::io::Read as _;
+use std::io::{IsTerminal, Read as _};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -415,6 +415,21 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
     }
 }
 
+/// Check whether note content is available without blocking.
+///
+/// Returns `Ok(Some(content))` when the content argument was provided,
+/// `Ok(None)` when stdin should be read (non-terminal), or an error when
+/// no content was provided and stdin is a terminal (which would hang).
+fn check_note_content(content: Option<String>, stdin_is_terminal: bool) -> Result<Option<String>> {
+    match content {
+        Some(c) => Ok(Some(c)),
+        None if stdin_is_terminal => {
+            bail!("no note content provided (pass content as argument or pipe via stdin)")
+        }
+        None => Ok(None),
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
@@ -437,7 +452,7 @@ fn run() -> Result<()> {
 
         Command::Note { name, content } => {
             let conn = open_db(&db_path)?;
-            let content = match content {
+            let content = match check_note_content(content, std::io::stdin().is_terminal())? {
                 Some(c) => c,
                 None => {
                     let mut buf = String::new();
@@ -805,5 +820,29 @@ DESC
             msg.contains("only one heredoc"),
             "expected multiple heredoc error: {msg}"
         );
+    }
+
+    #[test]
+    fn note_without_content_errors_when_stdin_is_terminal() {
+        let result = check_note_content(None, true);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no note content"),
+            "expected error about missing note content, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn note_with_content_arg_ignores_terminal_check() {
+        let result = check_note_content(Some("hello".to_string()), true);
+        assert_eq!(result.unwrap(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn note_without_content_allows_stdin_pipe() {
+        // Returns None to signal "read from stdin"
+        let result = check_note_content(None, false);
+        assert_eq!(result.unwrap(), None);
     }
 }
