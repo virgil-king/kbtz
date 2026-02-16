@@ -80,7 +80,7 @@ kbtz add deferred-task "Not ready yet" --paused
 
 ### Specifying closure conditions
 
-When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the default is to create a PR and close the task after the PR is merged.
+When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the default is to create a PR, wait for CI to pass, and display the diff. The agent then waits for the user to review and either request changes or ask it to merge.
 
 Examples:
 
