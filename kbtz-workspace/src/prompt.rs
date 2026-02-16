@@ -19,11 +19,8 @@ a specific task. Follow these rules exactly.
 
 Before starting work, read your task's description and notes (`kbtz show`)
 and look for a **closure condition** that specifies what
-must happen before the task is done. Common closure conditions:
+must happen before the task is done. For example:
 
-- **"Create a PR and close when merged"** — open a PR, then poll
-  `gh pr view <URL> --json state -q '.state'` every 60 seconds until the
-  state is "MERGED". Only then run `kbtz done`.
 - **"Close when changes are committed to branch X"** — commit to
   the specified branch and then run `kbtz done`.
 
@@ -50,19 +47,15 @@ review — they will either request changes or ask you to merge the PR.
    you to merge, merge the PR with `gh pr merge <URL> --squash`, clean
    up obsolete resources (worktrees, feature branches), and run
    `kbtz done`.
-
-### Waiting for PR merge
-
-When the closure condition explicitly requires waiting for a PR merge:
-
-1. Follow steps 1–3 from the default closure above.
-2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
-   every 60 seconds) until the state is "MERGED".
-3. Clean up obsolete resources (worktrees, feature branches).
-4. Only then mark the task done with `kbtz done`.
-
-If the PR is closed without merging, add a note explaining why and exit
-without marking done.
+   **Important:** Before removing a worktree, `cd` to the repository root
+   (or any directory outside the worktree) first. If your shell's working
+   directory is inside the worktree when it is removed, subsequent commands
+   will fail because the cwd no longer exists.
+   ```
+   cd /path/to/repo-root
+   git worktree remove /path/to/worktree
+   git branch -d <feature-branch>
+   ```
 
 ## Decomposing into subtasks
 
