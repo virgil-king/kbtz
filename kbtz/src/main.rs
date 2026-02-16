@@ -83,34 +83,32 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             assignee,
             prefer,
             json,
-        } => {
-            match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
-                Some(name) => {
-                    let task = ops::get_task(conn, &name)?;
-                    let notes = ops::list_notes(conn, &name)?;
-                    let blockers = ops::get_blockers(conn, &name)?;
-                    let dependents = ops::get_dependents(conn, &name)?;
-                    if json {
-                        let detail = output::TaskDetail {
-                            task: &task,
-                            notes: &notes,
-                            blocked_by: &blockers,
-                            blocks: &dependents,
-                        };
-                        println!("{}", serde_json::to_string_pretty(&detail)?);
-                    } else {
-                        print!(
-                            "{}",
-                            output::format_task_detail(&task, &notes, &blockers, &dependents)
-                        );
-                    }
-                    eprintln!("Claimed '{name}' for '{assignee}'");
+        } => match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
+            Some(name) => {
+                let task = ops::get_task(conn, &name)?;
+                let notes = ops::list_notes(conn, &name)?;
+                let blockers = ops::get_blockers(conn, &name)?;
+                let dependents = ops::get_dependents(conn, &name)?;
+                if json {
+                    let detail = output::TaskDetail {
+                        task: &task,
+                        notes: &notes,
+                        blocked_by: &blockers,
+                        blocks: &dependents,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&detail)?);
+                } else {
+                    print!(
+                        "{}",
+                        output::format_task_detail(&task, &notes, &blockers, &dependents)
+                    );
                 }
-                None => {
-                    bail!("no tasks available");
-                }
+                eprintln!("Claimed '{name}' for '{assignee}'");
             }
-        }
+            None => {
+                bail!("no tasks available");
+            }
+        },
 
         Command::Steal { name, assignee } => {
             let prev = ops::steal_task(conn, &name, &assignee)?;
@@ -205,8 +203,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                 let items: Vec<output::TaskListItem> = tasks
                     .iter()
                     .map(|t| {
-                        let (blocked_by, blocks) =
-                            deps.remove(&t.name).unwrap_or_default();
+                        let (blocked_by, blocks) = deps.remove(&t.name).unwrap_or_default();
                         output::TaskListItem {
                             task: t,
                             blocked_by,

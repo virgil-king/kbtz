@@ -169,9 +169,7 @@ fn run() -> Result<()> {
         .command
         .as_deref()
         .or_else(|| agent_config.and_then(|a| a.command.as_deref()));
-    let extra_args: Vec<String> = agent_config
-        .map(|a| a.args.clone())
-        .unwrap_or_default();
+    let extra_args: Vec<String> = agent_config.map(|a| a.args.clone()).unwrap_or_default();
 
     let backend = backend::from_name(&backend_name, command_override, &extra_args)?;
 
@@ -512,8 +510,14 @@ fn handle_zoomed_prefix_command(
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
-                draw_status_bar(app.rows, app.cols, task, session_id, last_status,
-                    Some("no sessions need input"));
+                draw_status_bar(
+                    app.rows,
+                    app.cols,
+                    task,
+                    session_id,
+                    last_status,
+                    Some("no sessions need input"),
+                );
                 Ok(None)
             }
         }
@@ -778,8 +782,11 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         if let Some(task) = app.next_needs_input_session(None) {
                             return Ok(Action::ZoomIn(task));
                         } else {
-                            draw_toplevel_status_bar(app.rows, app.cols,
-                                Some("no sessions need input"));
+                            draw_toplevel_status_bar(
+                                app.rows,
+                                app.cols,
+                                Some("no sessions need input"),
+                            );
                         }
                     }
                     PREFIX_KEY => {
