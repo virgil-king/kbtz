@@ -40,6 +40,7 @@ pub trait Backend: Send + Sync {
 /// exits via SIGTERM.
 pub struct Claude {
     command: String,
+    extra_args: Vec<String>,
 }
 
 impl Backend for Claude {
@@ -48,11 +49,13 @@ impl Backend for Claude {
     }
 
     fn worker_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "--append-system-prompt".into(),
             protocol_prompt.into(),
             task_prompt.into(),
-        ]
+        ];
+        args.extend(self.extra_args.iter().cloned());
+        args
     }
 
     fn request_exit(&self, session: &mut Session) {
@@ -66,14 +69,20 @@ impl Backend for Claude {
     }
 }
 
-/// Create a backend by name, with an optional command override.
+/// Create a backend by name, with an optional command override and extra args.
 ///
 /// The command override replaces the backend's default binary path
 /// (e.g., `--command /usr/local/bin/claude` with `--backend claude`).
-pub fn from_name(name: &str, command_override: Option<&str>) -> Result<Box<dyn Backend>> {
+/// Extra args are appended to every session's argument list.
+pub fn from_name(
+    name: &str,
+    command_override: Option<&str>,
+    extra_args: &[String],
+) -> Result<Box<dyn Backend>> {
     match name {
         "claude" => Ok(Box::new(Claude {
             command: command_override.unwrap_or("claude").to_string(),
+            extra_args: extra_args.to_vec(),
         })),
         _ => bail!("unknown backend '{name}'; available backends: claude"),
     }
@@ -85,19 +94,19 @@ mod tests {
 
     #[test]
     fn from_name_claude_default_command() {
-        let backend = from_name("claude", None).unwrap();
+        let backend = from_name("claude", None, &[]).unwrap();
         assert_eq!(backend.command(), "claude");
     }
 
     #[test]
     fn from_name_claude_command_override() {
-        let backend = from_name("claude", Some("/usr/local/bin/claude")).unwrap();
+        let backend = from_name("claude", Some("/usr/local/bin/claude"), &[]).unwrap();
         assert_eq!(backend.command(), "/usr/local/bin/claude");
     }
 
     #[test]
     fn from_name_unknown_backend_fails() {
-        let result = from_name("nonexistent", None);
+        let result = from_name("nonexistent", None, &[]);
         let err = result
             .err()
             .expect("should fail for unknown backend")
@@ -113,6 +122,7 @@ mod tests {
     fn claude_worker_args_structure() {
         let backend = Claude {
             command: "claude".into(),
+            extra_args: vec![],
         };
         let args = backend.worker_args("protocol text", "task text");
         assert_eq!(
@@ -122,9 +132,30 @@ mod tests {
     }
 
     #[test]
+    fn claude_worker_args_with_extra_args() {
+        let backend = Claude {
+            command: "claude".into(),
+            extra_args: vec!["--verbose".into(), "--model".into(), "opus".into()],
+        };
+        let args = backend.worker_args("protocol text", "task text");
+        assert_eq!(
+            args,
+            vec![
+                "--append-system-prompt",
+                "protocol text",
+                "task text",
+                "--verbose",
+                "--model",
+                "opus",
+            ]
+        );
+    }
+
+    #[test]
     fn claude_toplevel_args_delegates_to_worker() {
         let backend = Claude {
             command: "claude".into(),
+            extra_args: vec![],
         };
         let worker = backend.worker_args("proto", "task");
         let toplevel = backend.toplevel_args("proto", "task");

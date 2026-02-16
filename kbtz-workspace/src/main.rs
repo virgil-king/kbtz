@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod config;
 mod lifecycle;
 mod prompt;
 mod session;
@@ -27,6 +28,18 @@ use session::SessionStatus;
     name = "kbtz-workspace",
     about = "Task workspace for kbtz",
     after_help = "\
+CONFIG FILE:
+    Settings are loaded from ~/.kbtz/workspace.toml (if it exists).
+    CLI args take precedence over config values. Example:
+
+        [workspace]
+        concurrency = 3
+        backend = \"claude\"
+
+        [agent.claude]
+        command = \"/usr/local/bin/claude\"
+        args = [\"--verbose\"]
+
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
@@ -52,17 +65,17 @@ struct Cli {
     #[arg(long, env = "KBTZ_DB")]
     db: Option<String>,
 
-    /// Max concurrent sessions
-    #[arg(short = 'j', long, default_value_t = 4)]
-    concurrency: usize,
+    /// Max concurrent sessions [default: 8]
+    #[arg(short = 'j', long)]
+    concurrency: Option<usize>,
 
     /// Preference hint for task selection (FTS match)
     #[arg(long)]
     prefer: Option<String>,
 
-    /// Agent backend to use for sessions
-    #[arg(long, default_value = "claude")]
-    backend: String,
+    /// Agent backend to use for sessions [default: claude]
+    #[arg(long)]
+    backend: Option<String>,
 
     /// Override the backend's default command binary
     #[arg(long)]
@@ -118,6 +131,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let config = config::Config::load()?;
 
     let db_path = cli.db.unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -138,14 +152,33 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    let backend = backend::from_name(&cli.backend, cli.command.as_deref())?;
+    // Merge: CLI > config > defaults
+    let ws = config.workspace;
+    let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
+    let manual = cli.manual || ws.manual.unwrap_or(false);
+    let prefer = cli.prefer.or(ws.prefer);
+    let backend_name = cli
+        .backend
+        .or(ws.backend)
+        .unwrap_or_else(|| "claude".into());
+
+    let agent_config = config.agent.get(&backend_name);
+    let command_override = cli
+        .command
+        .as_deref()
+        .or_else(|| agent_config.and_then(|a| a.command.as_deref()));
+    let extra_args: Vec<String> = agent_config
+        .map(|a| a.args.clone())
+        .unwrap_or_default();
+
+    let backend = backend::from_name(&backend_name, command_override, &extra_args)?;
 
     let mut app = App::new(
         db_path,
         status_dir,
-        cli.concurrency,
-        cli.manual,
-        cli.prefer,
+        concurrency,
+        manual,
+        prefer,
         backend,
         rows,
         cols,
