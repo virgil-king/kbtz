@@ -305,8 +305,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
     // Parse all commands first, before starting the transaction
     let mut commands = Vec::new();
     for (lineno, line, tokens) in &resolved {
-        let command = parse_exec_tokens(tokens, line)
-            .with_context(|| format!("line {lineno}"))?;
+        let command = parse_exec_tokens(tokens, line).with_context(|| format!("line {lineno}"))?;
         // Reject commands that don't belong in a batch
         match &command {
             Command::Exec => bail!("line {lineno}: exec cannot be nested"),
@@ -631,10 +630,7 @@ block task-a task-b
         run_exec(&conn, input).unwrap();
         let notes = ops::list_notes(&conn, "task-a").unwrap();
         assert_eq!(notes.len(), 1);
-        assert_eq!(
-            notes[0].content,
-            "This is a\nmultiline note\nfor task-a"
-        );
+        assert_eq!(notes[0].content, "This is a\nmultiline note\nfor task-a");
         let blockers = ops::get_blockers(&conn, "task-b").unwrap();
         assert_eq!(blockers, vec!["task-a"]);
     }
@@ -666,10 +662,7 @@ END
         let result = run_exec(&conn, input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("line 1"),
-            "expected line 1 in error: {msg}"
-        );
+        assert!(msg.contains("line 1"), "expected line 1 in error: {msg}");
     }
 
     #[test]
