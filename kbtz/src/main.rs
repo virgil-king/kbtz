@@ -187,7 +187,20 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                 ops::list_tasks(conn, status, all, root.as_deref())?
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(&tasks)?);
+                let mut deps = ops::get_all_deps(conn)?;
+                let items: Vec<output::TaskListItem> = tasks
+                    .iter()
+                    .map(|t| {
+                        let (blocked_by, blocks) =
+                            deps.remove(&t.name).unwrap_or_default();
+                        output::TaskListItem {
+                            task: t,
+                            blocked_by,
+                            blocks,
+                        }
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
             } else if tree {
                 print!("{}", output::format_task_tree(&tasks));
             } else {
