@@ -1,4 +1,5 @@
 mod app;
+mod backend;
 mod lifecycle;
 mod prompt;
 mod session;
@@ -59,9 +60,13 @@ struct Cli {
     #[arg(long)]
     prefer: Option<String>,
 
-    /// Command to run per session
+    /// Agent backend to use for sessions
     #[arg(long, default_value = "claude")]
-    command: String,
+    backend: String,
+
+    /// Override the backend's default command binary
+    #[arg(long)]
+    command: Option<String>,
 
     /// Disable automatic session spawning; use 's' in tree mode to spawn manually
     #[arg(long)]
@@ -133,13 +138,15 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
+    let backend = backend::from_name(&cli.backend, cli.command.as_deref())?;
+
     let mut app = App::new(
         db_path,
         status_dir,
         cli.concurrency,
         cli.manual,
         cli.prefer,
-        cli.command,
+        backend,
         rows,
         cols,
     )?;
