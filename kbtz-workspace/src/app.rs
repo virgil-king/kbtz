@@ -9,6 +9,7 @@ use kbtz::model::Task;
 use kbtz::ops;
 use kbtz::ui::TreeRow;
 
+use crate::backend::Backend;
 use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
@@ -32,7 +33,7 @@ pub struct App {
     pub max_concurrency: usize,
     pub manual: bool,
     pub prefer: Option<String>,
-    pub command: String,
+    pub backend: Box<dyn Backend>,
 
     // Top-level task management session (not tied to any task)
     pub toplevel: Option<Session>,
@@ -70,7 +71,7 @@ impl App {
         max_concurrency: usize,
         manual: bool,
         prefer: Option<String>,
-        command: String,
+        backend: Box<dyn Backend>,
         rows: u16,
         cols: u16,
     ) -> Result<Self> {
@@ -86,7 +87,7 @@ impl App {
             max_concurrency,
             manual,
             prefer,
-            command,
+            backend,
             toplevel: None,
             rows,
             cols,
@@ -164,7 +165,7 @@ impl App {
             match action {
                 SessionAction::RequestExit { session_id } => {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
-                        session.request_exit();
+                        self.backend.request_exit(session);
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
@@ -273,19 +274,16 @@ impl App {
 
     /// Spawn the top-level task management session.
     fn spawn_toplevel(&mut self) -> Result<()> {
-        let prompt =
-            "You are the top-level task management agent. Help the user manage the kbtz task list."
-                .to_string();
-        let args: Vec<String> = vec![
-            "--append-system-prompt".into(),
-            crate::prompt::TOPLEVEL_PROMPT.into(),
-            prompt,
-        ];
+        let task_prompt =
+            "You are the top-level task management agent. Help the user manage the kbtz task list.";
+        let args = self
+            .backend
+            .toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "ws/toplevel";
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
         let session = Session::spawn(
-            &self.command,
+            self.backend.command(),
             &arg_refs,
             "toplevel",
             session_id,
@@ -310,12 +308,10 @@ impl App {
     }
 
     fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Session> {
-        let prompt = format!("Work on task '{}': {}", task.name, task.description);
-        let args: Vec<String> = vec![
-            "--append-system-prompt".into(),
-            crate::prompt::AGENT_PROMPT.into(),
-            prompt,
-        ];
+        let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
+        let args = self
+            .backend
+            .worker_args(crate::prompt::AGENT_PROMPT, &task_prompt);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
         let env_vars: Vec<(&str, &str)> = vec![
@@ -325,7 +321,7 @@ impl App {
             ("KBTZ_WORKSPACE_DIR", &status_dir_str),
         ];
         let session = Session::spawn(
-            &self.command,
+            self.backend.command(),
             &arg_refs,
             &task.name,
             session_id,
@@ -440,17 +436,17 @@ impl App {
 
     /// Gracefully shut down all sessions and clean up status files.
     ///
-    /// Sends `/exit` to all sessions in parallel, then waits up to
+    /// Requests exit from all sessions via the backend, then waits up to
     /// GRACEFUL_TIMEOUT for them to exit before force-killing.
     pub fn shutdown(&mut self) {
-        // Send /exit to all sessions (workers + toplevel).
+        // Request exit from all sessions (workers + toplevel).
         for session in self.sessions.values_mut() {
             let _ = session.stop_passthrough();
-            session.request_exit();
+            self.backend.request_exit(session);
         }
         if let Some(ref mut toplevel) = self.toplevel {
             let _ = toplevel.stop_passthrough();
-            toplevel.request_exit();
+            self.backend.request_exit(toplevel);
         }
 
         // Wait for all to exit, up to the timeout.

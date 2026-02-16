@@ -13,7 +13,7 @@ pub struct Session {
     pub status: SessionStatus,
     pub task_name: String,
     pub session_id: String,
-    /// Set when we've sent `/exit` and are waiting for the process to stop.
+    /// Set when exit has been requested and we are waiting for the process to stop.
     pub stopping_since: Option<Instant>,
 }
 
@@ -238,16 +238,15 @@ impl Session {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Send SIGTERM to ask the child process to shut down cleanly.
-    /// Sets `stopping_since` so the lifecycle tick can force-kill after a timeout.
-    pub fn request_exit(&mut self) {
-        if self.stopping_since.is_some() {
-            return; // already requested
+    /// Record that a graceful exit has been requested.
+    ///
+    /// Called by `Backend::request_exit()` after sending the backend-specific
+    /// exit signal. The lifecycle tick uses `stopping_since` to enforce
+    /// a force-kill timeout.
+    pub fn mark_stopping(&mut self) {
+        if self.stopping_since.is_none() {
+            self.stopping_since = Some(Instant::now());
         }
-        if let Some(pid) = self.child.process_id() {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        }
-        self.stopping_since = Some(Instant::now());
     }
 
     /// Force-kill the process immediately (SIGKILL).
