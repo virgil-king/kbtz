@@ -1536,8 +1536,26 @@ mod tests {
     #[test]
     fn search_matches_task_name() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "auth-login", None, "handles login", None, None, false).unwrap();
-        add_task(&conn, "billing", None, "payment processing", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "auth-login",
+            None,
+            "handles login",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            "billing",
+            None,
+            "payment processing",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         let results = search_tasks(&conn, "auth").unwrap();
         assert_eq!(results.len(), 1);
@@ -1548,7 +1566,16 @@ mod tests {
     #[test]
     fn search_matches_description() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "task-a", None, "implement authentication", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "task-a",
+            None,
+            "implement authentication",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         add_task(&conn, "task-b", None, "fix CSS styling", None, None, false).unwrap();
 
         let results = search_tasks(&conn, "authentication").unwrap();
@@ -1573,8 +1600,16 @@ mod tests {
     #[test]
     fn search_includes_done_tasks() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "done-task", None, "completed authentication work", None, None, false)
-            .unwrap();
+        add_task(
+            &conn,
+            "done-task",
+            None,
+            "completed authentication work",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         mark_done(&conn, "done-task").unwrap();
 
         let results = search_tasks(&conn, "authentication").unwrap();
