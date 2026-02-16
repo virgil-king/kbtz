@@ -1,5 +1,12 @@
 use clap::{Parser, Subcommand};
 
+const STATUS_ICONS_HELP: &str = "\
+Status icons:
+  .  open      Unclaimed, ready to work on
+  *  active    Claimed by an assignee
+  x  done      Completed
+  ~  paused    Paused, excluded from default listing";
+
 #[derive(Parser)]
 #[command(name = "kbtz", about = "Task tracker for AI agents", version)]
 pub struct Cli {
@@ -140,6 +147,7 @@ pub enum Command {
     },
 
     /// List tasks
+    #[command(after_long_help = STATUS_ICONS_HELP)]
     List {
         /// Display as tree
         #[arg(long)]
@@ -218,6 +226,7 @@ pub enum Command {
     Wait,
 
     /// Full-text search across tasks and notes
+    #[command(after_long_help = STATUS_ICONS_HELP)]
     Search {
         /// Search query
         query: String,
