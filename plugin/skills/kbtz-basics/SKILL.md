@@ -21,7 +21,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 | `kbtz describe <name> <desc>` | Update a task's description |
 | `kbtz reparent <name> [-p parent]` | Change a task's parent (omit -p to make root-level) |
 | `kbtz rm <name> [--recursive]` | Remove a task (--recursive to remove children) |
-| `kbtz list [--status S] [--json] [--tree] [--all] [--root name]` | List tasks |
+| `kbtz list [--status S] [--json] [--tree] [--all] [--root name] [--children name]` | List tasks |
 | `kbtz show <name> [--json]` | Show task details and blockers |
 | `kbtz note <name> [content]` | Add a note to a task (reads stdin if content omitted) |
 | `kbtz notes <name> [--json]` | List notes for a task |
@@ -45,18 +45,31 @@ kbtz release my-task $KBTZ_SESSION_ID
 
 ## Common Patterns
 
-### Creating tasks with subtasks
+### Creating tasks
+
+Keep descriptions to one sentence — they display in a single-line list view.
+Put detailed context in a `-n` note so the task and its context are created
+atomically:
 
 ```bash
-kbtz add parent-task "Top-level description"
-kbtz add child-one "First subtask" -p parent-task
-kbtz add child-two "Second subtask" -p parent-task
+kbtz add parent-task "Top-level description." -n "Detailed context, requirements, and acceptance criteria."
 ```
 
 Use `-c $KBTZ_SESSION_ID` to create and claim in one step:
 
 ```bash
-kbtz add my-subtask "Description" -p parent -c $KBTZ_SESSION_ID
+kbtz add my-subtask "Short description." -p parent -c $KBTZ_SESSION_ID -n "Detailed context for the subtask."
+```
+
+Use `kbtz exec` when you need multiple commands in one transaction (e.g.
+creating subtasks with blocking relationships):
+
+```bash
+kbtz exec <<'BATCH'
+add child-one "First subtask." -p parent-task -n "Details for first subtask."
+add child-two "Second subtask." -p parent-task -n "Details for second subtask."
+block child-one child-two
+BATCH
 ```
 
 Use `--paused` to create a task that shouldn't be worked on yet:
@@ -94,6 +107,13 @@ kbtz block child-one child-two
 ```bash
 kbtz list --tree          # open tasks in tree form
 kbtz list --tree --all    # include completed tasks
+```
+
+### Listing direct children
+
+```bash
+kbtz list --children my-task        # direct children only (depth 1)
+kbtz list --children my-task --all  # include done/paused children
 ```
 
 ### Transferring task ownership

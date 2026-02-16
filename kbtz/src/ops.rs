@@ -519,6 +519,29 @@ pub fn list_tasks(
     Ok(tasks)
 }
 
+pub fn list_children(
+    conn: &Connection,
+    parent: &str,
+    status: Option<StatusFilter>,
+    all: bool,
+) -> Result<Vec<Task>> {
+    require_task(conn, parent)?;
+    let query = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE parent = ?1 ORDER BY id");
+    let mut stmt = conn.prepare(&query)?;
+    let rows = stmt.query_map([parent], read_task_row)?;
+    let mut tasks: Vec<Task> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if !all {
+        if let Some(s) = status {
+            tasks.retain(|t| s.matches(t));
+        } else {
+            tasks.retain(|t| t.status != "done" && t.status != "paused");
+        }
+    }
+
+    Ok(tasks)
+}
+
 pub fn add_note(conn: &Connection, task_name: &str, content: &str) -> Result<()> {
     require_task(conn, task_name)?;
     conn.execute(
@@ -1129,6 +1152,73 @@ mod tests {
         let paused = list_tasks(&conn, Some(StatusFilter::Paused), false, None).unwrap();
         assert_eq!(paused.len(), 1);
         assert_eq!(paused[0].name, "paused-task");
+    }
+
+    #[test]
+    fn list_children_returns_direct_children_only() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child1", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child2", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "grandchild", Some("child1"), "", None, None, false).unwrap();
+        add_task(&conn, "unrelated", None, "", None, None, false).unwrap();
+
+        let children = list_children(&conn, "root", None, false).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].name, "child1");
+        assert_eq!(children[1].name, "child2");
+    }
+
+    #[test]
+    fn list_children_excludes_done_by_default() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child-open", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child-done", Some("root"), "", None, None, false).unwrap();
+        mark_done(&conn, "child-done").unwrap();
+
+        let children = list_children(&conn, "root", None, false).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "child-open");
+    }
+
+    #[test]
+    fn list_children_all_includes_done() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child-open", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child-done", Some("root"), "", None, None, false).unwrap();
+        mark_done(&conn, "child-done").unwrap();
+
+        let children = list_children(&conn, "root", None, true).unwrap();
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn list_children_with_status_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child-open", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child-active", Some("root"), "", None, None, false).unwrap();
+        claim_task(&conn, "child-active", "agent").unwrap();
+
+        let active = list_children(&conn, "root", Some(StatusFilter::Active), false).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "child-active");
+    }
+
+    #[test]
+    fn list_children_nonexistent_parent_fails() {
+        let conn = db::open_memory().unwrap();
+        assert!(list_children(&conn, "nonexistent", None, false).is_err());
+    }
+
+    #[test]
+    fn list_children_no_children_returns_empty() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "leaf", None, "", None, None, false).unwrap();
+        let children = list_children(&conn, "leaf", None, false).unwrap();
+        assert!(children.is_empty());
     }
 
     #[test]

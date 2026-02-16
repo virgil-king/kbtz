@@ -147,6 +147,9 @@ pub enum Command {
         /// Root task for subtree
         #[arg(long)]
         root: Option<String>,
+        /// Show only direct children of the given task (depth 1)
+        #[arg(long, conflicts_with = "root")]
+        children: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
