@@ -120,18 +120,24 @@ Use `kbtz note` on the parent task to leave context about the
 decomposition strategy so the agent that resumes the parent after all
 subtasks complete understands what was done and why.
 
-### Resuming after subtask completion
+### Monitoring subtask completion
 
-When all subtasks are done and you are respawned, check subtask status
-before continuing:
+Your session typically stays alive after creating subtasks (subtasks
+only block the parent when you explicitly set up blocking relationships).
+Use `kbtz wait` to block until the database changes, then check your
+children's status:
 
 ```
-kbtz list --children $KBTZ_TASK --all
+while true; do
+    kbtz wait
+    kbtz list --children $KBTZ_TASK --all
+done
 ```
 
 `kbtz list --children <task>` shows only direct children (depth 1).
-Use `--all` to include done and paused children so you can confirm all
-subtasks completed successfully.
+Use `--all` to include done and paused children so you can see which
+subtasks have completed. When all children are done, finish the parent
+task.
 
 ## Adding notes
 
