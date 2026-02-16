@@ -333,6 +333,13 @@ pub fn release_task(conn: &Connection, name: &str, assignee: &str) -> Result<()>
 
 pub fn mark_done(conn: &Connection, name: &str) -> Result<()> {
     require_task(conn, name)?;
+    let status: String =
+        conn.query_row("SELECT status FROM tasks WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })?;
+    if status == "done" {
+        bail!("task '{name}' is already done");
+    }
     conn.execute(SET_DONE, [name])?;
     Ok(())
 }
@@ -786,6 +793,33 @@ mod tests {
         reopen_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn mark_done_already_done_warns() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        mark_done(&conn, "t").unwrap();
+
+        let err = mark_done(&conn, "t").unwrap_err();
+        assert!(
+            err.to_string().contains("already done"),
+            "expected 'already done' error: {err}"
+        );
+    }
+
+    #[test]
+    fn mark_done_already_done_does_not_bump_timestamp() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t", None, "", None, None, false).unwrap();
+        mark_done(&conn, "t").unwrap();
+        let task_before = get_task(&conn, "t").unwrap();
+
+        let _ = mark_done(&conn, "t");
+        let task_after = get_task(&conn, "t").unwrap();
+
+        assert_eq!(task_before.status_changed_at, task_after.status_changed_at);
+        assert_eq!(task_before.updated_at, task_after.updated_at);
     }
 
     #[test]
