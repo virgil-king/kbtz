@@ -90,6 +90,39 @@ struct Cli {
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
 
+/// Drain any terminal-response bytes that are pending on stdin.
+///
+/// `start_passthrough` replays the raw output buffer — every byte the child
+/// ever wrote — to the real terminal.  That replay can resend escape
+/// sequences the child originally used to query the terminal (cursor
+/// position requests, device-attribute queries, etc.).  The real terminal
+/// responds to those queries on stdin, and without this drain the response
+/// bytes would be forwarded to the child PTY as spurious input (e.g.
+/// `[1;r` on macOS).
+fn drain_stdin() {
+    let fd = io::stdin().as_raw_fd();
+    let mut buf = [0u8; 4096];
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Brief initial wait for terminal responses to arrive, then drain
+    // everything with zero timeout.
+    let mut timeout = 5; // ms
+    loop {
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        if ready <= 0 {
+            break;
+        }
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        timeout = 0;
+    }
+}
+
 /// Watches the kbtz database and status directory for changes.
 /// Polling with `poll()` checks both channels and refreshes app state.
 struct Watchers {
@@ -450,6 +483,9 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
         session.start_passthrough()?;
     }
 
+    // Discard any terminal responses triggered by the output-buffer replay.
+    drain_stdin();
+
     let result = zoomed_loop(app, task, &session_id, running);
 
     // Stop passthrough (resets input modes like mouse tracking)
@@ -681,6 +717,9 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     if let Some(ref toplevel) = app.toplevel {
         toplevel.start_passthrough()?;
     }
+
+    // Discard any terminal responses triggered by the output-buffer replay.
+    drain_stdin();
 
     let result = toplevel_loop(app, running);
 
