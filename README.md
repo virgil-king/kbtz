@@ -57,7 +57,7 @@ Uses WAL mode and `busy_timeout = 5000ms` for safe concurrent access from multip
 | `kbtz describe <name> <desc>` | Update description |
 | `kbtz reparent <name> [-p parent]` | Move under a different parent |
 
-Task names must match `[a-zA-Z0-9_-]+`.
+Task names must match `[a-zA-Z0-9_-]+`. Names are immutable — they cannot be changed after creation.
 
 #### Claiming
 

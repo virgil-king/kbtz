@@ -15,7 +15,7 @@ pub struct Cli {
 pub enum Command {
     /// Add a task
     Add {
-        /// Task name (alphanumeric, hyphens, underscores)
+        /// Task name (alphanumeric, hyphens, underscores; immutable after creation)
         name: String,
         /// Parent task name
         #[arg(short, long)]

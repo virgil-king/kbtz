@@ -32,7 +32,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 
 ## Task Naming
 
-Task names must be **kebab-case**: lowercase letters, numbers, and hyphens only.
+Task names must be **kebab-case**: lowercase letters, numbers, and hyphens only. Names are immutable — they cannot be changed after creation, so choose carefully.
 
 ## Session ID
 
