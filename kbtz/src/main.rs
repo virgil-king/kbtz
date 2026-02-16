@@ -177,10 +177,15 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             status,
             all,
             root,
+            children,
             json,
         } => {
             let status = status.map(|s| StatusFilter::parse(&s)).transpose()?;
-            let tasks = ops::list_tasks(conn, status, all, root.as_deref())?;
+            let tasks = if let Some(ref parent) = children {
+                ops::list_children(conn, parent, status, all)?
+            } else {
+                ops::list_tasks(conn, status, all, root.as_deref())?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&tasks)?);
             } else if tree {

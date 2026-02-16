@@ -180,12 +180,12 @@ kbtz claim backend-api $KBTZ_SESSION_ID
 # ... work on it ...
 kbtz done backend-api
 
-# Wait for other workers to complete remaining subtasks
-kbtz wait
-
-# Check if all subtasks are done
-kbtz show my-task
-# If all children complete, finish the parent
+# Monitor subtask completion
+while true; do
+    kbtz wait
+    kbtz list --children my-task --all
+    # When all children show as done (x), break and finish the parent
+done
 kbtz done my-task
 ```
 
