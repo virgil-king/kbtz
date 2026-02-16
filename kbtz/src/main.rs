@@ -228,32 +228,93 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
     Ok(())
 }
 
-fn parse_exec_line(line: &str) -> Result<Command> {
-    let tokens = shlex::split(line).with_context(|| format!("invalid shell quoting: {line}"))?;
-    // Prepend program name so Clap is happy
+fn parse_exec_tokens(tokens: &[String], display_line: &str) -> Result<Command> {
     let mut args = vec!["kbtz".to_string()];
-    args.extend(tokens);
-    let cli = Cli::try_parse_from(&args).with_context(|| format!("failed to parse: {line}"))?;
+    args.extend(tokens.iter().cloned());
+    let cli =
+        Cli::try_parse_from(&args).with_context(|| format!("failed to parse: {display_line}"))?;
     Ok(cli.command)
 }
 
-fn run_exec(conn: &Connection, input: &str) -> Result<()> {
-    // Parse all lines first, before starting the transaction
-    let mut commands = Vec::new();
-    for (lineno, raw) in input.lines().enumerate() {
-        let line = raw.trim();
+/// Pre-process exec input to resolve heredoc syntax.
+///
+/// A token of the form `<<DELIMITER` causes subsequent lines to be accumulated
+/// until a line matching `DELIMITER` (after trimming) is found. The accumulated
+/// text replaces the `<<DELIMITER` token. Only one heredoc per command line is
+/// supported.
+fn resolve_heredocs(input: &str) -> Result<Vec<(usize, String, Vec<String>)>> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+        let lineno = i + 1;
+        i += 1;
+
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let command = parse_exec_line(line).with_context(|| format!("line {}", lineno + 1))?;
+
+        let mut tokens = shlex::split(line)
+            .with_context(|| format!("line {lineno}: invalid shell quoting: {line}"))?;
+
+        // Find heredoc markers
+        let heredoc_positions: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.starts_with("<<") && t.len() > 2)
+            .map(|(i, _)| i)
+            .collect();
+        if heredoc_positions.len() > 1 {
+            bail!("line {lineno}: only one heredoc per command is supported");
+        }
+        let heredoc_pos = heredoc_positions.into_iter().next();
+
+        if let Some(pos) = heredoc_pos {
+            let delimiter = tokens[pos][2..].to_string();
+            let mut body_lines = Vec::new();
+            let mut found = false;
+
+            while i < lines.len() {
+                if lines[i].trim() == delimiter {
+                    found = true;
+                    i += 1;
+                    break;
+                }
+                body_lines.push(lines[i]);
+                i += 1;
+            }
+
+            if !found {
+                bail!("line {lineno}: unterminated heredoc (expected closing '{delimiter}')");
+            }
+
+            tokens[pos] = body_lines.join("\n");
+        }
+
+        result.push((lineno, line.to_string(), tokens));
+    }
+
+    Ok(result)
+}
+
+fn run_exec(conn: &Connection, input: &str) -> Result<()> {
+    let resolved = resolve_heredocs(input)?;
+
+    // Parse all commands first, before starting the transaction
+    let mut commands = Vec::new();
+    for (lineno, line, tokens) in &resolved {
+        let command = parse_exec_tokens(tokens, line)
+            .with_context(|| format!("line {lineno}"))?;
         // Reject commands that don't belong in a batch
         match &command {
-            Command::Exec => bail!("line {}: exec cannot be nested", lineno + 1),
-            Command::Watch { .. } => bail!("line {}: watch cannot be used inside exec", lineno + 1),
-            Command::Wait => bail!("line {}: wait cannot be used inside exec", lineno + 1),
+            Command::Exec => bail!("line {lineno}: exec cannot be nested"),
+            Command::Watch { .. } => bail!("line {lineno}: watch cannot be used inside exec"),
+            Command::Wait => bail!("line {lineno}: wait cannot be used inside exec"),
             _ => {}
         }
-        commands.push((lineno + 1, line.to_string(), command));
+        commands.push((*lineno, line.clone(), command));
     }
 
     if commands.is_empty() {
@@ -494,5 +555,152 @@ claim-next agent-1
         );
         // First task should be rolled back
         assert!(ops::get_task(&conn, "real-task").is_err());
+    }
+
+    #[test]
+    fn exec_heredoc_note() {
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task <<END
+Line one
+Line two
+END
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Line one\nLine two");
+    }
+
+    #[test]
+    fn exec_heredoc_description() {
+        let conn = test_conn();
+        let input = "\
+add my-task <<EOF
+A multiline
+description here
+EOF
+";
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "my-task").unwrap();
+        assert_eq!(task.description, "A multiline\ndescription here");
+    }
+
+    #[test]
+    fn exec_heredoc_empty_body() {
+        let conn = test_conn();
+        let input = "\
+add my-task <<EOF
+EOF
+";
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "my-task").unwrap();
+        assert_eq!(task.description, "");
+    }
+
+    #[test]
+    fn exec_heredoc_unterminated() {
+        let conn = test_conn();
+        let input = "\
+add my-task <<EOF
+this never ends
+";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unterminated heredoc"),
+            "expected unterminated heredoc error: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_heredoc_with_other_commands() {
+        let conn = test_conn();
+        let input = "\
+add task-a \"First task\"
+add task-b \"Second task\"
+note task-a <<MARKER
+This is a
+multiline note
+for task-a
+MARKER
+block task-a task-b
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "task-a").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            notes[0].content,
+            "This is a\nmultiline note\nfor task-a"
+        );
+        let blockers = ops::get_blockers(&conn, "task-b").unwrap();
+        assert_eq!(blockers, vec!["task-a"]);
+    }
+
+    #[test]
+    fn exec_heredoc_preserves_indentation() {
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task <<END
+  indented line
+    more indented
+END
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes[0].content, "  indented line\n    more indented");
+    }
+
+    #[test]
+    fn exec_heredoc_line_number_points_to_command() {
+        let conn = test_conn();
+        // The heredoc command is on line 1, but the error should reference line 1
+        let input = "\
+note nonexistent <<END
+some content
+END
+";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("line 1"),
+            "expected line 1 in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_heredoc_with_flag_arg() {
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\" -n <<NOTE
+Initial note
+with multiple lines
+NOTE
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Initial note\nwith multiple lines");
+    }
+
+    #[test]
+    fn exec_heredoc_rejects_multiple_per_line() {
+        let conn = test_conn();
+        let input = "\
+add my-task <<DESC -n <<NOTE
+description
+DESC
+";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("only one heredoc"),
+            "expected multiple heredoc error: {msg}"
+        );
     }
 }
