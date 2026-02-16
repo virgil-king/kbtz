@@ -31,6 +31,9 @@ pub enum Command {
         /// Create in paused state (mutually exclusive with --claim)
         #[arg(long)]
         paused: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Claim a task (set assignee)

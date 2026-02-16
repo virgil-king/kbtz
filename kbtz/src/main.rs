@@ -56,6 +56,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             note,
             claim,
             paused,
+            json,
         } => {
             ops::add_task(
                 conn,
@@ -66,6 +67,19 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                 claim.as_deref(),
                 paused,
             )?;
+            if json {
+                let task = ops::get_task(conn, &name)?;
+                let notes = ops::list_notes(conn, &name)?;
+                let blockers = ops::get_blockers(conn, &name)?;
+                let dependents = ops::get_dependents(conn, &name)?;
+                let detail = output::TaskDetail {
+                    task: &task,
+                    notes: &notes,
+                    blocked_by: &blockers,
+                    blocks: &dependents,
+                };
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            }
             eprintln!("Added task '{name}'");
             if paused {
                 eprintln!("Task '{name}' created in paused state");
@@ -716,6 +730,42 @@ NOTE
         let notes = ops::list_notes(&conn, "my-task").unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].content, "Initial note\nwith multiple lines");
+    }
+
+    #[test]
+    fn add_json_outputs_task_detail() {
+        let conn = test_conn();
+        dispatch(
+            &conn,
+            Command::Add {
+                name: "json-task".into(),
+                parent: None,
+                desc: "A test task".into(),
+                note: Some("initial note".into()),
+                claim: None,
+                paused: false,
+                json: true,
+            },
+        )
+        .unwrap();
+        // Verify the task was created correctly (JSON output goes to stdout
+        // which we can't capture in-process, but we verify the underlying
+        // data is correct)
+        let task = ops::get_task(&conn, "json-task").unwrap();
+        assert_eq!(task.description, "A test task");
+        assert_eq!(task.status, "open");
+        let notes = ops::list_notes(&conn, "json-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "initial note");
+    }
+
+    #[test]
+    fn exec_add_with_json_flag() {
+        let conn = test_conn();
+        let input = "add my-json-task \"A task\" --json\n";
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "my-json-task").unwrap();
+        assert_eq!(task.description, "A task");
     }
 
     #[test]
