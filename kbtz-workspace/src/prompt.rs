@@ -147,10 +147,8 @@ are easy to find from the task:
 
 ## Checking task state
 
-- Show your task details: `kbtz show $KBTZ_TASK`
+- Show your task details and notes: `kbtz show $KBTZ_TASK`
 - List subtasks: `kbtz list --root $KBTZ_TASK --tree`
-- Read notes: `kbtz notes $KBTZ_TASK`
-- Show what blocks a task: `kbtz show <name>` (shows blocked_by field)
 
 ## Rules
 
@@ -162,8 +160,8 @@ are easy to find from the task:
 4. Use `kbtz note` to leave context for future agents working on this
    task or its parent.
 5. Only a-z, A-Z, 0-9, _, - are allowed in task names.
-6. If you resume a previously-started task, check notes and subtask
-   status first with `kbtz show` and `kbtz notes` before starting work.
+6. If you resume a previously-started task, check subtask
+   status first with `kbtz show` before starting work.
 7. Always note branch names and PR URLs on your task (see "Tracking
    branches and PRs" above).
 "#;
@@ -192,8 +190,7 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz list --tree` — show the full task tree
 - `kbtz add <name> "<description>"` — create a new task
 - `kbtz add <name> "<description>" -p <parent>` — create a child task
-- `kbtz show <name>` — show task details
-- `kbtz notes <name>` — show notes for a task
+- `kbtz show <name>` — show task details and notes
 - `kbtz note <name> "<text>"` — add a note to a task
 - `kbtz done <name>` — mark a task done
 - `kbtz pause <name>` — pause a task
