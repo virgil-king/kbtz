@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 
-use crate::model::{Note, Task};
+use crate::model::{Note, SearchResult, Task};
 use crate::validate::{detect_dep_cycle, detect_parent_cycle, validate_name};
 
 fn task_exists(conn: &Connection, name: &str) -> Result<bool> {
@@ -594,6 +594,51 @@ pub fn remove_block(conn: &Connection, blocker: &str, blocked: &str) -> Result<(
         bail!("'{blocker}' is not blocking '{blocked}'");
     }
     Ok(())
+}
+
+const SEARCH_TASKS: &str = "
+SELECT DISTINCT t.id, t.name, t.parent, t.description, t.status,
+       t.assignee, t.status_changed_at, t.created_at, t.updated_at,
+       CASE WHEN tfts.rowid IS NOT NULL THEN 1 ELSE 0 END as task_match,
+       CASE WHEN nfts.task IS NOT NULL THEN 1 ELSE 0 END as note_match,
+       COALESCE(MIN(COALESCE(tfts.rank, 0), COALESCE(nfts.best_rank, 0)), 0) as best_rank
+FROM tasks t
+LEFT JOIN (
+    SELECT rowid, rank FROM tasks_fts WHERE tasks_fts MATCH ?1
+) tfts ON tfts.rowid = t.id
+LEFT JOIN (
+    SELECT n.task, MIN(nfts2.rank) as best_rank
+    FROM notes_fts nfts2
+    JOIN notes n ON n.id = nfts2.rowid
+    WHERE notes_fts MATCH ?1
+    GROUP BY n.task
+) nfts ON nfts.task = t.name
+WHERE tfts.rowid IS NOT NULL OR nfts.task IS NOT NULL
+ORDER BY best_rank ASC, t.id ASC
+";
+
+pub fn search_tasks(conn: &Connection, query: &str) -> Result<Vec<SearchResult>> {
+    let fts_query = sanitize_fts_query(query);
+    let Some(fts_query) = fts_query else {
+        bail!("empty search query");
+    };
+
+    let mut stmt = conn.prepare(SEARCH_TASKS)?;
+    let rows = stmt.query_map([&fts_query], |row| {
+        let task = read_task_row(row)?;
+        let task_match: bool = row.get(9)?;
+        let note_match: bool = row.get(10)?;
+        let mut matched_in = Vec::new();
+        if task_match {
+            matched_in.push("task".to_string());
+        }
+        if note_match {
+            matched_in.push("notes".to_string());
+        }
+        Ok(SearchResult { task, matched_in })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn get_blockers(conn: &Connection, task_name: &str) -> Result<Vec<String>> {
@@ -1351,5 +1396,93 @@ mod tests {
             err.to_string().contains("mutually exclusive"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn search_matches_task_name() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "auth-login", None, "handles login", None, None, false).unwrap();
+        add_task(&conn, "billing", None, "payment processing", None, None, false).unwrap();
+
+        let results = search_tasks(&conn, "auth").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task.name, "auth-login");
+        assert!(results[0].matched_in.contains(&"task".to_string()));
+    }
+
+    #[test]
+    fn search_matches_description() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "task-a", None, "implement authentication", None, None, false).unwrap();
+        add_task(&conn, "task-b", None, "fix CSS styling", None, None, false).unwrap();
+
+        let results = search_tasks(&conn, "authentication").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task.name, "task-a");
+        assert!(results[0].matched_in.contains(&"task".to_string()));
+    }
+
+    #[test]
+    fn search_matches_notes() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "task-a", None, "generic task", None, None, false).unwrap();
+        add_task(&conn, "task-b", None, "another task", None, None, false).unwrap();
+        add_note(&conn, "task-b", "needs database migration").unwrap();
+
+        let results = search_tasks(&conn, "migration").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task.name, "task-b");
+        assert!(results[0].matched_in.contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn search_includes_done_tasks() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "done-task", None, "completed authentication work", None, None, false)
+            .unwrap();
+        mark_done(&conn, "done-task").unwrap();
+
+        let results = search_tasks(&conn, "authentication").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task.name, "done-task");
+        assert_eq!(results[0].task.status, "done");
+    }
+
+    #[test]
+    fn search_no_matches_returns_empty() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "task-a", None, "some work", None, None, false).unwrap();
+
+        let results = search_tasks(&conn, "nonexistent").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_empty_query_fails() {
+        let conn = db::open_memory().unwrap();
+        assert!(search_tasks(&conn, "").is_err());
+        assert!(search_tasks(&conn, "   ").is_err());
+    }
+
+    #[test]
+    fn search_deduplicates_task_and_note_matches() {
+        let conn = db::open_memory().unwrap();
+        add_task(
+            &conn,
+            "auth-task",
+            None,
+            "authentication system",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        add_note(&conn, "auth-task", "authentication details here").unwrap();
+
+        let results = search_tasks(&conn, "authentication").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task.name, "auth-task");
+        assert!(results[0].matched_in.contains(&"task".to_string()));
+        assert!(results[0].matched_in.contains(&"notes".to_string()));
     }
 }

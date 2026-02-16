@@ -225,6 +225,15 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             eprintln!("'{blocker}' no longer blocks '{blocked}'");
         }
 
+        Command::Search { query, json } => {
+            let results = ops::search_tasks(conn, &query)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                print!("{}", output::format_search_results(&results));
+            }
+        }
+
         Command::Watch { .. } => bail!("watch cannot be used inside exec"),
         Command::Wait => bail!("wait cannot be used inside exec"),
         Command::Exec => bail!("exec cannot be nested"),
