@@ -27,8 +27,9 @@ must happen before the task is done. Common closure conditions:
 - **"Close when changes are committed to branch X"** — commit to
   the specified branch and then run `kbtz done`.
 
-If no closure condition is specified, the default is to create a PR and
-close the task after the PR is merged.
+If no closure condition is specified, the default is to create a PR,
+ensure CI passes, display the diff for review, and close the task after
+the PR is merged.
 
 ### Waiting for PR merge
 
@@ -39,10 +40,17 @@ the default):
    ```
    kbtz note $KBTZ_TASK "PR: <url>"
    ```
-2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
+2. Iterate until CI passes. Poll `gh pr checks <URL>` periodically
+   (e.g. every 60 seconds). If any check fails, investigate the failure,
+   push a fix, and continue polling. Do not proceed until all checks pass.
+3. Display the diff so the user can review it from the TUI:
+   ```
+   gh pr diff <URL> --color always
+   ```
+4. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
    every 60 seconds) until the state is "MERGED".
-3. Clean up obsolete resources (worktrees, feature branches).
-4. Only then mark the task done with `kbtz done`.
+5. Clean up obsolete resources (worktrees, feature branches).
+6. Only then mark the task done with `kbtz done`.
 
 Do NOT mark the task done after merely opening a PR. Keep the task and
 wait for the merge. If the PR is closed without merging, add a note
