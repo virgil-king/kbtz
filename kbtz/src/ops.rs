@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -487,11 +487,23 @@ impl StatusFilter {
     }
 }
 
+fn get_blocked_task_names(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT td.blocked FROM task_deps td \
+         INNER JOIN tasks t ON t.name = td.blocker AND t.status != 'done'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(Into::into)
+}
+
 pub fn list_tasks(
     conn: &Connection,
     status: Option<StatusFilter>,
     all: bool,
     root: Option<&str>,
+    assignee: Option<&str>,
+    blocked: Option<bool>,
 ) -> Result<Vec<Task>> {
     if let Some(r) = root {
         require_task(conn, r)?;
@@ -525,6 +537,15 @@ pub fn list_tasks(
         }
     }
 
+    if let Some(assignee) = assignee {
+        tasks.retain(|t| t.assignee.as_deref() == Some(assignee));
+    }
+
+    if let Some(want_blocked) = blocked {
+        let blocked_names = get_blocked_task_names(conn)?;
+        tasks.retain(|t| blocked_names.contains(&t.name) == want_blocked);
+    }
+
     Ok(tasks)
 }
 
@@ -533,6 +554,8 @@ pub fn list_children(
     parent: &str,
     status: Option<StatusFilter>,
     all: bool,
+    assignee: Option<&str>,
+    blocked: Option<bool>,
 ) -> Result<Vec<Task>> {
     require_task(conn, parent)?;
     let query = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE parent = ?1 ORDER BY id");
@@ -546,6 +569,15 @@ pub fn list_children(
         } else {
             tasks.retain(|t| t.status != "done" && t.status != "paused");
         }
+    }
+
+    if let Some(assignee) = assignee {
+        tasks.retain(|t| t.assignee.as_deref() == Some(assignee));
+    }
+
+    if let Some(want_blocked) = blocked {
+        let blocked_names = get_blocked_task_names(conn)?;
+        tasks.retain(|t| blocked_names.contains(&t.name) == want_blocked);
     }
 
     Ok(tasks)
@@ -881,7 +913,7 @@ mod tests {
         add_task(&conn, "open", None, "", None, None, false).unwrap();
         add_task(&conn, "done", None, "", None, None, false).unwrap();
         mark_done(&conn, "done").unwrap();
-        let tasks = list_tasks(&conn, None, false, None).unwrap();
+        let tasks = list_tasks(&conn, None, false, None, None, None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "open");
     }
@@ -892,7 +924,7 @@ mod tests {
         add_task(&conn, "open", None, "", None, None, false).unwrap();
         add_task(&conn, "done", None, "", None, None, false).unwrap();
         mark_done(&conn, "done").unwrap();
-        let tasks = list_tasks(&conn, None, true, None).unwrap();
+        let tasks = list_tasks(&conn, None, true, None, None, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
 
@@ -903,11 +935,13 @@ mod tests {
         add_task(&conn, "active", None, "", None, None, false).unwrap();
         claim_task(&conn, "active", "agent").unwrap();
 
-        let open_tasks = list_tasks(&conn, Some(StatusFilter::Open), false, None).unwrap();
+        let open_tasks =
+            list_tasks(&conn, Some(StatusFilter::Open), false, None, None, None).unwrap();
         assert_eq!(open_tasks.len(), 1);
         assert_eq!(open_tasks[0].name, "open");
 
-        let active_tasks = list_tasks(&conn, Some(StatusFilter::Active), false, None).unwrap();
+        let active_tasks =
+            list_tasks(&conn, Some(StatusFilter::Active), false, None, None, None).unwrap();
         assert_eq!(active_tasks.len(), 1);
         assert_eq!(active_tasks[0].name, "active");
     }
@@ -918,7 +952,7 @@ mod tests {
         add_task(&conn, "root", None, "", None, None, false).unwrap();
         add_task(&conn, "child", Some("root"), "", None, None, false).unwrap();
         add_task(&conn, "other", None, "", None, None, false).unwrap();
-        let tasks = list_tasks(&conn, None, false, Some("root")).unwrap();
+        let tasks = list_tasks(&conn, None, false, Some("root"), None, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
 
@@ -1262,7 +1296,7 @@ mod tests {
         add_task(&conn, "open-task", None, "", None, None, false).unwrap();
         add_task(&conn, "paused-task", None, "", None, None, false).unwrap();
         pause_task(&conn, "paused-task").unwrap();
-        let tasks = list_tasks(&conn, None, false, None).unwrap();
+        let tasks = list_tasks(&conn, None, false, None, None, None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "open-task");
     }
@@ -1274,7 +1308,8 @@ mod tests {
         add_task(&conn, "paused-task", None, "", None, None, false).unwrap();
         pause_task(&conn, "paused-task").unwrap();
 
-        let paused = list_tasks(&conn, Some(StatusFilter::Paused), false, None).unwrap();
+        let paused =
+            list_tasks(&conn, Some(StatusFilter::Paused), false, None, None, None).unwrap();
         assert_eq!(paused.len(), 1);
         assert_eq!(paused[0].name, "paused-task");
     }
@@ -1288,7 +1323,7 @@ mod tests {
         add_task(&conn, "grandchild", Some("child1"), "", None, None, false).unwrap();
         add_task(&conn, "unrelated", None, "", None, None, false).unwrap();
 
-        let children = list_children(&conn, "root", None, false).unwrap();
+        let children = list_children(&conn, "root", None, false, None, None).unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].name, "child1");
         assert_eq!(children[1].name, "child2");
@@ -1302,7 +1337,7 @@ mod tests {
         add_task(&conn, "child-done", Some("root"), "", None, None, false).unwrap();
         mark_done(&conn, "child-done").unwrap();
 
-        let children = list_children(&conn, "root", None, false).unwrap();
+        let children = list_children(&conn, "root", None, false, None, None).unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].name, "child-open");
     }
@@ -1315,7 +1350,7 @@ mod tests {
         add_task(&conn, "child-done", Some("root"), "", None, None, false).unwrap();
         mark_done(&conn, "child-done").unwrap();
 
-        let children = list_children(&conn, "root", None, true).unwrap();
+        let children = list_children(&conn, "root", None, true, None, None).unwrap();
         assert_eq!(children.len(), 2);
     }
 
@@ -1327,7 +1362,8 @@ mod tests {
         add_task(&conn, "child-active", Some("root"), "", None, None, false).unwrap();
         claim_task(&conn, "child-active", "agent").unwrap();
 
-        let active = list_children(&conn, "root", Some(StatusFilter::Active), false).unwrap();
+        let active =
+            list_children(&conn, "root", Some(StatusFilter::Active), false, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "child-active");
     }
@@ -1335,14 +1371,14 @@ mod tests {
     #[test]
     fn list_children_nonexistent_parent_fails() {
         let conn = db::open_memory().unwrap();
-        assert!(list_children(&conn, "nonexistent", None, false).is_err());
+        assert!(list_children(&conn, "nonexistent", None, false, None, None).is_err());
     }
 
     #[test]
     fn list_children_no_children_returns_empty() {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "leaf", None, "", None, None, false).unwrap();
-        let children = list_children(&conn, "leaf", None, false).unwrap();
+        let children = list_children(&conn, "leaf", None, false, None, None).unwrap();
         assert!(children.is_empty());
     }
 
@@ -1536,8 +1572,26 @@ mod tests {
     #[test]
     fn search_matches_task_name() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "auth-login", None, "handles login", None, None, false).unwrap();
-        add_task(&conn, "billing", None, "payment processing", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "auth-login",
+            None,
+            "handles login",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            "billing",
+            None,
+            "payment processing",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         let results = search_tasks(&conn, "auth").unwrap();
         assert_eq!(results.len(), 1);
@@ -1548,7 +1602,16 @@ mod tests {
     #[test]
     fn search_matches_description() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "task-a", None, "implement authentication", None, None, false).unwrap();
+        add_task(
+            &conn,
+            "task-a",
+            None,
+            "implement authentication",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         add_task(&conn, "task-b", None, "fix CSS styling", None, None, false).unwrap();
 
         let results = search_tasks(&conn, "authentication").unwrap();
@@ -1573,8 +1636,16 @@ mod tests {
     #[test]
     fn search_includes_done_tasks() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "done-task", None, "completed authentication work", None, None, false)
-            .unwrap();
+        add_task(
+            &conn,
+            "done-task",
+            None,
+            "completed authentication work",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         mark_done(&conn, "done-task").unwrap();
 
         let results = search_tasks(&conn, "authentication").unwrap();
@@ -1619,5 +1690,110 @@ mod tests {
         assert_eq!(results[0].task.name, "auth-task");
         assert!(results[0].matched_in.contains(&"task".to_string()));
         assert!(results[0].matched_in.contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn list_assignee_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "t1", None, "", None, None, false).unwrap();
+        add_task(&conn, "t2", None, "", None, None, false).unwrap();
+        claim_task(&conn, "t1", "agent-1").unwrap();
+        claim_task(&conn, "t2", "agent-2").unwrap();
+
+        let tasks = list_tasks(&conn, None, false, None, Some("agent-1"), None).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "t1");
+    }
+
+    #[test]
+    fn list_blocked_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "blocker", None, "", None, None, false).unwrap();
+        add_task(&conn, "blocked", None, "", None, None, false).unwrap();
+        add_task(&conn, "free", None, "", None, None, false).unwrap();
+        add_block(&conn, "blocker", "blocked").unwrap();
+
+        let tasks = list_tasks(&conn, None, false, None, None, Some(true)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "blocked");
+    }
+
+    #[test]
+    fn list_unblocked_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "blocker", None, "", None, None, false).unwrap();
+        add_task(&conn, "blocked", None, "", None, None, false).unwrap();
+        add_task(&conn, "free", None, "", None, None, false).unwrap();
+        add_block(&conn, "blocker", "blocked").unwrap();
+
+        let tasks = list_tasks(&conn, None, false, None, None, Some(false)).unwrap();
+        assert_eq!(tasks.len(), 2);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"blocker"));
+        assert!(names.contains(&"free"));
+    }
+
+    #[test]
+    fn list_blocked_ignores_done_blockers() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "blocker", None, "", None, None, false).unwrap();
+        add_task(&conn, "target", None, "", None, None, false).unwrap();
+        add_block(&conn, "blocker", "target").unwrap();
+        mark_done(&conn, "blocker").unwrap();
+
+        // blocker is done, so target should not be considered blocked
+        let tasks = list_tasks(&conn, None, false, None, None, Some(true)).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn list_children_assignee_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child1", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child2", Some("root"), "", None, None, false).unwrap();
+        claim_task(&conn, "child1", "agent-1").unwrap();
+        claim_task(&conn, "child2", "agent-2").unwrap();
+
+        let children = list_children(&conn, "root", None, false, Some("agent-1"), None).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "child1");
+    }
+
+    #[test]
+    fn list_children_blocked_filter() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "root", None, "", None, None, false).unwrap();
+        add_task(&conn, "child1", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "child2", Some("root"), "", None, None, false).unwrap();
+        add_task(&conn, "ext-blocker", None, "", None, None, false).unwrap();
+        add_block(&conn, "ext-blocker", "child1").unwrap();
+
+        let children = list_children(&conn, "root", None, false, None, Some(true)).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "child1");
+    }
+
+    #[test]
+    fn list_assignee_and_blocked_combined() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "a", None, "", None, None, false).unwrap();
+        add_task(&conn, "b", None, "", None, None, false).unwrap();
+        add_task(&conn, "c", None, "", None, None, false).unwrap();
+        // a is assigned to agent-1, not blocked
+        claim_task(&conn, "a", "agent-1").unwrap();
+        // b is assigned to agent-1, blocked by c
+        claim_task(&conn, "b", "agent-1").unwrap();
+        add_block(&conn, "c", "b").unwrap();
+
+        // agent-1's blocked tasks
+        let tasks = list_tasks(&conn, None, false, None, Some("agent-1"), Some(true)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "b");
+
+        // agent-1's unblocked tasks
+        let tasks = list_tasks(&conn, None, false, None, Some("agent-1"), Some(false)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "a");
     }
 }
