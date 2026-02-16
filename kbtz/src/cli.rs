@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "kbtz", about = "Task tracker for AI agents")]
+#[command(name = "kbtz", about = "Task tracker for AI agents", version)]
 pub struct Cli {
     /// Path to the SQLite database [default: ~/.kbtz/kbtz.db]
     #[arg(long, env = "KBTZ_DB", global = true)]
