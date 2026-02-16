@@ -120,6 +120,19 @@ Use `kbtz note` on the parent task to leave context about the
 decomposition strategy so the agent that resumes the parent after all
 subtasks complete understands what was done and why.
 
+### Resuming after subtask completion
+
+When all subtasks are done and you are respawned, check subtask status
+before continuing:
+
+```
+kbtz list --children $KBTZ_TASK --all
+```
+
+`kbtz list --children <task>` shows only direct children (depth 1).
+Use `--all` to include done and paused children so you can confirm all
+subtasks completed successfully.
+
 ## Adding notes
 
 Document important decisions, progress, or context for future agents:
@@ -149,6 +162,7 @@ are easy to find from the task:
 
 - Show your task details and notes: `kbtz show $KBTZ_TASK`
 - List subtasks: `kbtz list --root $KBTZ_TASK --tree`
+- List direct children only: `kbtz list --children $KBTZ_TASK`
 
 ## Rules
 

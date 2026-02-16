@@ -21,7 +21,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 | `kbtz describe <name> <desc>` | Update a task's description |
 | `kbtz reparent <name> [-p parent]` | Change a task's parent (omit -p to make root-level) |
 | `kbtz rm <name> [--recursive]` | Remove a task (--recursive to remove children) |
-| `kbtz list [--status S] [--json] [--tree] [--all] [--root name]` | List tasks |
+| `kbtz list [--status S] [--json] [--tree] [--all] [--root name] [--children name]` | List tasks |
 | `kbtz show <name> [--json]` | Show task details and blockers |
 | `kbtz note <name> [content]` | Add a note to a task (reads stdin if content omitted) |
 | `kbtz notes <name> [--json]` | List notes for a task |
@@ -94,6 +94,13 @@ kbtz block child-one child-two
 ```bash
 kbtz list --tree          # open tasks in tree form
 kbtz list --tree --all    # include completed tasks
+```
+
+### Listing direct children
+
+```bash
+kbtz list --children my-task        # direct children only (depth 1)
+kbtz list --children my-task --all  # include done/paused children
 ```
 
 ### Transferring task ownership
