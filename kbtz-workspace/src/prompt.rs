@@ -76,12 +76,16 @@ When in doubt, prefer completing the task directly.
 
 Use `kbtz exec` to create all subtasks, blocking relationships, and release
 your task atomically. This prevents the workspace from seeing a partially-created
-decomposition.
+decomposition or a task without its full context.
+
+Keep task descriptions to one sentence — they display in a single-line list
+view. Put detailed context, requirements, and acceptance criteria in a `-n`
+note so the task and its context are created atomically.
 
 ```
 kbtz exec <<'EOF'
-add <subtask-1> "<description>" -p $KBTZ_TASK
-add <subtask-2> "<description>" -p $KBTZ_TASK
+add <subtask-1> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context, requirements, and any other information needed to complete the task."
+add <subtask-2> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context for subtask 2."
 block <subtask-1> $KBTZ_TASK
 block <subtask-2> $KBTZ_TASK
 release $KBTZ_TASK $KBTZ_SESSION_ID
@@ -93,9 +97,9 @@ interfaces first and then run tests and implementation in parallel:
 
 ```
 kbtz exec <<'EOF'
-add feat-interfaces "Define interfaces" -p $KBTZ_TASK
-add feat-tests "Add tests" -p $KBTZ_TASK
-add feat-impl "Implement interfaces" -p $KBTZ_TASK
+add feat-interfaces "Define interfaces." -p $KBTZ_TASK -n "Detailed context for interfaces."
+add feat-tests "Add tests." -p $KBTZ_TASK -n "Detailed context for tests."
+add feat-impl "Implement interfaces." -p $KBTZ_TASK -n "Detailed context for implementation."
 block feat-interfaces feat-tests
 block feat-interfaces feat-impl
 block feat-interfaces $KBTZ_TASK
@@ -113,8 +117,7 @@ for it.
 
 Name subtasks descriptively, scoped under the parent task name using "-"
 as a separator (e.g. if your task is "auth", name subtasks "auth-db",
-"auth-api"). Each subtask description should contain enough context for
-an agent with no prior knowledge to complete the work independently.
+"auth-api").
 
 Use `kbtz note` on the parent task to leave context about the
 decomposition strategy so the agent that resumes the parent after all
@@ -208,8 +211,7 @@ unblocking, pausing, and organizing work.
 Use the `kbtz` CLI to manipulate tasks:
 
 - `kbtz list --tree` — show the full task tree
-- `kbtz add <name> "<description>"` — create a new task
-- `kbtz add <name> "<description>" -p <parent>` — create a child task
+- `kbtz add <name> "<description>" [-p parent] [-n note]` — create a task
 - `kbtz show <name>` — show task details and notes
 - `kbtz note <name> "<text>"` — add a note to a task
 - `kbtz done <name>` — mark a task done
@@ -220,6 +222,24 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz reparent <task> <new-parent>` — move a task under a new parent
 - `kbtz reparent <task> --root` — move a task to the root level
 - `kbtz edit <name> "<new-description>"` — change a task's description
+
+## Task creation guidelines
+
+Keep task descriptions to one sentence — they display in a single-line list
+view. Put detailed context in a `-n` note so the task and its context are
+created atomically:
+
+- `kbtz add my-task "Short description." -n "Detailed context and requirements."`
+
+Use `kbtz exec` when you need multiple commands in one transaction:
+
+```
+kbtz exec <<'EOF'
+add child-one "First subtask." -p parent -n "Details for first subtask."
+add child-two "Second subtask." -p parent -n "Details for second subtask."
+block child-one child-two
+EOF
+```
 
 ## Rules
 

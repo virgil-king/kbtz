@@ -45,18 +45,31 @@ kbtz release my-task $KBTZ_SESSION_ID
 
 ## Common Patterns
 
-### Creating tasks with subtasks
+### Creating tasks
+
+Keep descriptions to one sentence — they display in a single-line list view.
+Put detailed context in a `-n` note so the task and its context are created
+atomically:
 
 ```bash
-kbtz add parent-task "Top-level description"
-kbtz add child-one "First subtask" -p parent-task
-kbtz add child-two "Second subtask" -p parent-task
+kbtz add parent-task "Top-level description." -n "Detailed context, requirements, and acceptance criteria."
 ```
 
 Use `-c $KBTZ_SESSION_ID` to create and claim in one step:
 
 ```bash
-kbtz add my-subtask "Description" -p parent -c $KBTZ_SESSION_ID
+kbtz add my-subtask "Short description." -p parent -c $KBTZ_SESSION_ID -n "Detailed context for the subtask."
+```
+
+Use `kbtz exec` when you need multiple commands in one transaction (e.g.
+creating subtasks with blocking relationships):
+
+```bash
+kbtz exec <<'BATCH'
+add child-one "First subtask." -p parent-task -n "Details for first subtask."
+add child-two "Second subtask." -p parent-task -n "Details for second subtask."
+block child-one child-two
+BATCH
 ```
 
 Use `--paused` to create a task that shouldn't be worked on yet:

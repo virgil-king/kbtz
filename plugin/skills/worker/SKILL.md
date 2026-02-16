@@ -162,18 +162,22 @@ When a task is large enough to benefit from parallel work, or involves different
 
 1. Break the task into subtasks under the current task
 2. Set up any dependencies between subtasks
-3. Complete your own portion of the work
-4. Use `kbtz wait` to block until other workers finish their subtasks
-5. Once all subtasks are done, mark the parent task complete
+3. Use `kbtz exec` to create subtasks, notes, and dependencies atomically
+4. Complete your own portion of the work
+5. Use `kbtz wait` to block until other workers finish their subtasks
+6. Once all subtasks are done, mark the parent task complete
+
+Use `kbtz exec` to bundle all subtask creation atomically — this prevents
+other workers from claiming a task before its full context is available.
+Use the `-n` flag on `add` to attach notes inline:
 
 ```bash
-# Break task into parallel subtasks
-kbtz add backend-api "Implement REST API endpoints" -p my-task
-kbtz add frontend-ui "Build React components for dashboard" -p my-task
-kbtz add db-schema "Design and migrate database schema" -p my-task
-
-# Set up dependencies (API needs schema first)
-kbtz block db-schema backend-api
+kbtz exec <<'BATCH'
+add db-schema "Design and migrate database schema." -p my-task -n "Create tables for users, sessions, and permissions. Use existing migration pattern in db/migrations/."
+add backend-api "Implement REST API endpoints." -p my-task -n "CRUD endpoints for /api/users and /api/sessions. See src/server.ts for existing route pattern."
+add frontend-ui "Build React components for dashboard." -p my-task -n "User list table and session management panel. Use existing component patterns in src/components/."
+block db-schema backend-api
+BATCH
 
 # Claim and do your part (e.g., the backend-api)
 kbtz claim backend-api $KBTZ_SESSION_ID
@@ -191,7 +195,11 @@ kbtz done my-task
 
 ### Writing Good Subtask Descriptions
 
-Subtasks will be picked up by other worker agents. Write descriptions that are self-contained:
+Keep task descriptions to one sentence — they display in a single-line list
+view. Put detailed context in notes instead.
+
+Subtasks will be picked up by other worker agents. Write notes that are
+self-contained:
 
 - Include enough context for another agent to understand the goal
 - Specify acceptance criteria when possible
@@ -199,7 +207,7 @@ Subtasks will be picked up by other worker agents. Write descriptions that are s
 - Note any constraints or requirements
 
 ```bash
-kbtz add auth-middleware "Add JWT auth middleware to Express app. Validate tokens from /auth/token endpoint. Protect all /api/* routes. See src/server.ts for existing middleware pattern." -p api-task
+kbtz add auth-middleware "Add JWT auth middleware to Express app." -p api-task -n "Validate tokens from /auth/token endpoint. Protect all /api/* routes. See src/server.ts for existing middleware pattern."
 ```
 
 ## Example Worker Session
