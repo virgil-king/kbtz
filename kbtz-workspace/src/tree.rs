@@ -18,7 +18,11 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     if app.tree_rows.is_empty() {
         let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title(" kbtz-mux "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" kbtz-workspace "),
+            );
         frame.render_widget(msg, area);
         return;
     }
@@ -89,10 +93,10 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
 
     let active = app.sessions.len();
     let title = if app.manual {
-        format!(" kbtz-mux ({active} sessions, manual) ")
+        format!(" kbtz-workspace ({active} sessions, manual) ")
     } else {
         let max = app.max_concurrency;
-        format!(" kbtz-mux ({active}/{max} sessions) ")
+        format!(" kbtz-workspace ({active}/{max} sessions) ")
     };
 
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));

@@ -23,8 +23,8 @@ use session::SessionStatus;
 
 #[derive(Parser)]
 #[command(
-    name = "kbtz-mux",
-    about = "Task multiplexer for kbtz",
+    name = "kbtz-workspace",
+    about = "Task workspace for kbtz",
     after_help = "\
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
@@ -70,24 +70,24 @@ struct Cli {
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
 
-/// Watches the kbtz database and mux status directory for changes.
+/// Watches the kbtz database and status directory for changes.
 /// Polling with `poll()` checks both channels and refreshes app state.
 struct Watchers {
     _db_watcher: notify::RecommendedWatcher,
     db_rx: std::sync::mpsc::Receiver<()>,
-    _mux_watcher: notify::RecommendedWatcher,
-    mux_rx: std::sync::mpsc::Receiver<()>,
+    _status_watcher: notify::RecommendedWatcher,
+    status_rx: std::sync::mpsc::Receiver<()>,
 }
 
 impl Watchers {
     fn new(app: &App) -> Result<Self> {
         let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-        let (_mux_watcher, mux_rx) = kbtz::watch::watch_dir(&app.mux_dir)?;
+        let (_status_watcher, status_rx) = kbtz::watch::watch_dir(&app.status_dir)?;
         Ok(Watchers {
             _db_watcher,
             db_rx,
-            _mux_watcher,
-            mux_rx,
+            _status_watcher,
+            status_rx,
         })
     }
 
@@ -96,8 +96,8 @@ impl Watchers {
             kbtz::watch::drain_events(&self.db_rx);
             app.refresh_tree()?;
         }
-        if kbtz::watch::wait_for_change(&self.mux_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&self.mux_rx);
+        if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
+            kbtz::watch::drain_events(&self.status_rx);
             app.read_status_files()?;
         }
         Ok(())
@@ -106,7 +106,7 @@ impl Watchers {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("kbtz-mux: {e:#}");
+        eprintln!("kbtz-workspace: {e:#}");
         std::process::exit(1);
     }
 }
@@ -124,18 +124,18 @@ fn run() -> Result<()> {
         bail!("database not found at {db_path}\nRun 'kbtz add <task> <description>' to create it.");
     }
 
-    // Mux status directory
-    let mux_dir = PathBuf::from(std::env::var("KBTZ_MUX_DIR").unwrap_or_else(|_| {
+    // Status directory for session state files
+    let status_dir = PathBuf::from(std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{home}/.kbtz/mux")
+        format!("{home}/.kbtz/workspace")
     }));
-    std::fs::create_dir_all(&mux_dir).context("failed to create mux directory")?;
+    std::fs::create_dir_all(&status_dir).context("failed to create status directory")?;
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
     let mut app = App::new(
         db_path,
-        mux_dir,
+        status_dir,
         cli.concurrency,
         cli.manual,
         cli.prefer,

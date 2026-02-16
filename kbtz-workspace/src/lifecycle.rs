@@ -130,7 +130,7 @@ mod tests {
     fn task_with_status(status: &str) -> Option<TaskSnapshot> {
         Some(TaskSnapshot {
             status: status.into(),
-            assignee: Some("mux/1".into()),
+            assignee: Some("ws/1".into()),
         })
     }
 
@@ -146,11 +146,7 @@ mod tests {
     #[test]
     fn exited_session_removed_and_slot_filled() {
         let w = world(
-            vec![snapshot(
-                "mux/1",
-                SessionPhase::Exited,
-                active_task("mux/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
             2,
         );
         let actions = tick(&w);
@@ -158,7 +154,7 @@ mod tests {
             actions,
             vec![
                 SessionAction::Remove {
-                    session_id: "mux/1".into()
+                    session_id: "ws/1".into()
                 },
                 SessionAction::SpawnUpTo { count: 2 },
             ]
@@ -170,7 +166,7 @@ mod tests {
     fn done_task_triggers_request_exit() {
         let w = world(
             vec![snapshot(
-                "mux/1",
+                "ws/1",
                 SessionPhase::Running,
                 task_with_status("done"),
             )],
@@ -178,7 +174,7 @@ mod tests {
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
     }
 
@@ -186,11 +182,7 @@ mod tests {
     #[test]
     fn healthy_session_no_action() {
         let w = world(
-            vec![snapshot(
-                "mux/1",
-                SessionPhase::Running,
-                active_task("mux/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/1"))],
             2,
         );
         let actions = tick(&w);
@@ -202,11 +194,11 @@ mod tests {
     fn stopping_within_timeout_no_force_kill() {
         let w = world(
             vec![snapshot(
-                "mux/1",
+                "ws/1",
                 SessionPhase::Stopping {
                     since: Instant::now(),
                 },
-                active_task("mux/1"),
+                active_task("ws/1"),
             )],
             2,
         );
@@ -221,18 +213,18 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
             vec![snapshot(
-                "mux/1",
+                "ws/1",
                 SessionPhase::Stopping { since: past },
-                active_task("mux/1"),
+                active_task("ws/1"),
             )],
             2,
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::ForceKill {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
         assert!(actions.contains(&SessionAction::Remove {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
     }
 
@@ -241,19 +233,19 @@ mod tests {
     fn stopping_sessions_dont_count_toward_concurrency() {
         let w = world(
             vec![
-                snapshot("mux/1", SessionPhase::Running, active_task("mux/1")),
+                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
                 snapshot(
-                    "mux/2",
+                    "ws/2",
                     SessionPhase::Stopping {
                         since: Instant::now(),
                     },
-                    active_task("mux/2"),
+                    active_task("ws/2"),
                 ),
             ],
             2,
         );
         let actions = tick(&w);
-        // mux/1 is running (counts as 1), mux/2 is stopping (doesn't count).
+        // ws/1 is running (counts as 1), ws/2 is stopping (doesn't count).
         // So 1 free slot.
         assert!(actions.contains(&SessionAction::SpawnUpTo { count: 1 }));
     }
@@ -264,15 +256,15 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
             vec![snapshot(
-                "mux/1",
+                "ws/1",
                 SessionPhase::Stopping { since: past },
-                active_task("mux/1"),
+                active_task("ws/1"),
             )],
             1,
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::ForceKill {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
         assert!(actions.contains(&SessionAction::SpawnUpTo { count: 1 }));
     }
@@ -282,8 +274,8 @@ mod tests {
     fn at_capacity_no_spawn() {
         let w = world(
             vec![
-                snapshot("mux/1", SessionPhase::Running, active_task("mux/1")),
-                snapshot("mux/2", SessionPhase::Running, active_task("mux/2")),
+                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
+                snapshot("ws/2", SessionPhase::Running, active_task("ws/2")),
             ],
             2,
         );
@@ -294,10 +286,10 @@ mod tests {
     // 9. Deleted task -> RequestExit
     #[test]
     fn deleted_task_triggers_request_exit() {
-        let w = world(vec![snapshot("mux/1", SessionPhase::Running, None)], 2);
+        let w = world(vec![snapshot("ws/1", SessionPhase::Running, None)], 2);
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
     }
 
@@ -305,16 +297,12 @@ mod tests {
     #[test]
     fn reassigned_task_triggers_request_exit() {
         let w = world(
-            vec![snapshot(
-                "mux/1",
-                SessionPhase::Running,
-                active_task("mux/2"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/2"))],
             2,
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
     }
 
@@ -330,18 +318,14 @@ mod tests {
     #[test]
     fn manual_mode_still_reaps_exited() {
         let w = world(
-            vec![snapshot(
-                "mux/1",
-                SessionPhase::Exited,
-                active_task("mux/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
             0,
         );
         let actions = tick(&w);
         assert_eq!(
             actions,
             vec![SessionAction::Remove {
-                session_id: "mux/1".into()
+                session_id: "ws/1".into()
             },]
         );
     }
@@ -351,7 +335,7 @@ mod tests {
     fn manual_mode_still_reaps_done() {
         let w = world(
             vec![snapshot(
-                "mux/1",
+                "ws/1",
                 SessionPhase::Running,
                 task_with_status("done"),
             )],
@@ -359,7 +343,7 @@ mod tests {
         );
         let actions = tick(&w);
         assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "mux/1".into()
+            session_id: "ws/1".into()
         }));
         assert!(!actions
             .iter()
