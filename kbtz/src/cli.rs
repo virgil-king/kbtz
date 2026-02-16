@@ -8,7 +8,53 @@ Status icons:
   ~  paused    Paused, excluded from default listing";
 
 #[derive(Parser)]
-#[command(name = "kbtz", about = "Task tracker for AI agents", version)]
+#[command(
+    name = "kbtz",
+    about = "Task tracker for AI agents",
+    version,
+    help_template = "\
+{about-with-newline}
+{usage-heading} {usage}{after-help}
+Options:
+{options}",
+    after_help = "\
+Task Lifecycle:
+  add             Add a task
+  done            Mark a task as done
+  reopen          Reopen a completed task
+  pause           Pause a task (remove from active work and default listing)
+  unpause         Unpause a paused task (return to open)
+  reparent        Change a task's parent
+  describe        Update a task's description
+  rm              Remove a task
+
+Claiming:
+  claim           Claim a task (set assignee)
+  claim-next      Claim the best available task
+  steal           Atomically transfer task ownership
+  release         Release a task (clear assignee if it matches)
+  force-unassign  Forcibly clear a task's assignee (regardless of who holds it)
+
+Dependencies:
+  block           Mark a task as blocking another
+  unblock         Remove a blocking relationship
+
+Notes:
+  note            Add a note to a task
+  notes           List notes for a task
+
+Viewing:
+  show            Show task details
+  list            List tasks
+  watch           Launch interactive TUI
+  search          Full-text search across tasks and notes
+
+Coordination:
+  wait            Wait for database changes (blocks until a change occurs)
+  exec            Execute commands from stdin atomically (all-or-nothing transaction)
+  help            Print this message or the help of a given subcommand
+"
+)]
 pub struct Cli {
     /// Path to the SQLite database [default: ~/.kbtz/kbtz.db]
     #[arg(long, env = "KBTZ_DB", global = true)]
