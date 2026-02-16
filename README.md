@@ -216,7 +216,7 @@ All commands use a `Ctrl-B` prefix (like tmux):
 Each spawned agent receives a system prompt that teaches it the workspace contract:
 
 - **Environment variables**: `$KBTZ_DB` (database path), `$KBTZ_TASK` (assigned task name), `$KBTZ_SESSION_ID` (e.g. `ws/3`), `$KBTZ_WORKSPACE_DIR` (status directory)
-- **Completion**: Agents create PRs and wait for merge by default, then call `kbtz done`
+- **Completion**: Agents create PRs, wait for CI to pass, display the diff, and wait for user review; the user requests changes or asks the agent to merge
 - **Decomposition**: Agents can split work into subtasks using `kbtz exec` for atomic creation of subtasks with blocking relationships
 - **Notes**: Agents document decisions and progress with `kbtz note` for cross-session continuity
 - **Branch/PR tracking**: Agents note branch names and PR URLs on their tasks

@@ -28,13 +28,10 @@ must happen before the task is done. Common closure conditions:
   the specified branch and then run `kbtz done`.
 
 If no closure condition is specified, the default is to create a PR,
-ensure CI passes, display the diff for review, and close the task after
-the PR is merged.
+ensure CI passes, and display the diff. Then wait for the user to
+review — they will either request changes or ask you to merge the PR.
 
-### Waiting for PR merge
-
-When the closure condition requires waiting for a PR merge (including
-the default):
+### Default closure (no explicit closure condition)
 
 1. Add a note with the PR URL:
    ```
@@ -47,14 +44,25 @@ the default):
    ```
    gh pr diff <URL> --color always
    ```
-4. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
-   every 60 seconds) until the state is "MERGED".
-5. Clean up obsolete resources (worktrees, feature branches).
-6. Only then mark the task done with `kbtz done`.
+4. Stop and wait for user input. The user will review the diff and
+   either request changes or ask you to merge the PR. If they request
+   changes, make the edits, push, and repeat from step 2. If they ask
+   you to merge, merge the PR with `gh pr merge <URL> --squash`, clean
+   up obsolete resources (worktrees, feature branches), and run
+   `kbtz done`.
 
-Do NOT mark the task done after merely opening a PR. Keep the task and
-wait for the merge. If the PR is closed without merging, add a note
-explaining why and exit without marking done.
+### Waiting for PR merge
+
+When the closure condition explicitly requires waiting for a PR merge:
+
+1. Follow steps 1–3 from the default closure above.
+2. Poll `gh pr view <URL> --json state -q '.state'` periodically (e.g.
+   every 60 seconds) until the state is "MERGED".
+3. Clean up obsolete resources (worktrees, feature branches).
+4. Only then mark the task done with `kbtz done`.
+
+If the PR is closed without merging, add a note explaining why and exit
+without marking done.
 
 ## Decomposing into subtasks
 
