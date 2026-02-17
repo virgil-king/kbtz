@@ -14,7 +14,7 @@ use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{Session, SessionStatus};
+use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus};
 
 pub struct App {
     // kbtz state
@@ -23,8 +23,8 @@ pub struct App {
     pub tree_rows: Vec<TreeRow>,
 
     // Session management
-    pub sessions: HashMap<String, Session>, // session_id -> session
-    pub task_to_session: HashMap<String, String>, // task_name -> session_id
+    pub sessions: HashMap<String, Box<dyn SessionHandle>>, // session_id -> session
+    pub task_to_session: HashMap<String, String>,          // task_name -> session_id
     counter: u64,
     pub status_dir: PathBuf,
     /// In auto mode, caps how many sessions lifecycle::tick will auto-spawn.
@@ -34,9 +34,10 @@ pub struct App {
     pub manual: bool,
     pub prefer: Option<String>,
     pub backend: Box<dyn Backend>,
+    pub spawner: Box<dyn SessionSpawner>,
 
     // Top-level task management session (not tied to any task)
-    pub toplevel: Option<Session>,
+    pub toplevel: Option<Box<dyn SessionHandle>>,
 
     // Terminal
     pub rows: u16,
@@ -89,6 +90,7 @@ impl App {
             manual,
             prefer,
             backend,
+            spawner: Box::new(PtySpawner),
             toplevel: None,
             rows,
             cols,
@@ -126,13 +128,13 @@ impl App {
             .map(|(session_id, session)| {
                 let phase = if !session.is_alive() {
                     SessionPhase::Exited
-                } else if let Some(since) = session.stopping_since {
+                } else if let Some(since) = session.stopping_since() {
                     SessionPhase::Stopping { since }
                 } else {
                     SessionPhase::Running
                 };
 
-                let task = match ops::get_task(&self.conn, &session.task_name) {
+                let task = match ops::get_task(&self.conn, session.task_name()) {
                     Ok(t) => Some(TaskSnapshot {
                         status: t.status,
                         assignee: t.assignee,
@@ -166,7 +168,7 @@ impl App {
             match action {
                 SessionAction::RequestExit { session_id } => {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
-                        self.backend.request_exit(session);
+                        self.backend.request_exit(session.as_mut());
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
@@ -283,7 +285,7 @@ impl App {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "ws/toplevel";
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
-        let session = Session::spawn(
+        let session = self.spawner.spawn(
             self.backend.command(),
             &arg_refs,
             "toplevel",
@@ -308,7 +310,11 @@ impl App {
         Ok(())
     }
 
-    fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Session> {
+    fn spawn_session(
+        &self,
+        task: &Task,
+        session_id: &str,
+    ) -> Result<Box<dyn SessionHandle>> {
         let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
         let args = self
             .backend
@@ -321,7 +327,7 @@ impl App {
             ("KBTZ_TASK", &task.name),
             ("KBTZ_WORKSPACE_DIR", &status_dir_str),
         ];
-        let session = Session::spawn(
+        self.spawner.spawn(
             self.backend.command(),
             &arg_refs,
             &task.name,
@@ -329,8 +335,7 @@ impl App {
             self.rows,
             self.cols,
             &env_vars,
-        )?;
-        Ok(session)
+        )
     }
 
     /// Read status files from the status directory and update session statuses.
@@ -338,7 +343,7 @@ impl App {
         for (session_id, session) in &mut self.sessions {
             let path = self.status_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
-                session.status = SessionStatus::from_str(&content);
+                session.set_status(SessionStatus::from_str(&content));
             }
         }
         Ok(())
@@ -348,8 +353,15 @@ impl App {
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
             let _ = session.stop_passthrough();
-            let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
-            self.task_to_session.remove(&session.task_name);
+            let task_name = session.task_name().to_string();
+            let sid = session.session_id().to_string();
+            let _ = ops::release_task(&self.conn, &task_name, &sid);
+            // Only remove the task→session mapping if it still points to this
+            // session. A new session may have already claimed the same task
+            // (e.g. after a pause→unpause cycle), and we must not clobber it.
+            if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
+                self.task_to_session.remove(&task_name);
+            }
             let _ = std::fs::remove_file(self.status_dir.join(session_id_to_filename(session_id)));
         }
     }
@@ -422,7 +434,9 @@ impl App {
             _ => return None,
         };
         let next_sid = &ids[next_idx];
-        self.sessions.get(next_sid).map(|s| s.task_name.clone())
+        self.sessions
+            .get(next_sid)
+            .map(|s| s.task_name().to_string())
     }
 
     /// Find the next session with NeedsInput status, cycling from current_task.
@@ -434,7 +448,7 @@ impl App {
             .filter(|id| {
                 self.sessions
                     .get(*id)
-                    .is_some_and(|s| s.status == SessionStatus::NeedsInput)
+                    .is_some_and(|s| *s.status() == SessionStatus::NeedsInput)
             })
             .collect();
         if needs_input.is_empty() {
@@ -443,7 +457,9 @@ impl App {
         let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
         let idx = cycle_after(&needs_input, current_sid.as_ref());
         let sid = needs_input[idx];
-        self.sessions.get(sid).map(|s| s.task_name.clone())
+        self.sessions
+            .get(sid)
+            .map(|s| s.task_name().to_string())
     }
 
     /// Kill and release a session for a task so it can be respawned.
@@ -464,11 +480,11 @@ impl App {
         // Request exit from all sessions (workers + toplevel).
         for session in self.sessions.values_mut() {
             let _ = session.stop_passthrough();
-            self.backend.request_exit(session);
+            self.backend.request_exit(session.as_mut());
         }
         if let Some(ref mut toplevel) = self.toplevel {
             let _ = toplevel.stop_passthrough();
-            self.backend.request_exit(toplevel);
+            self.backend.request_exit(toplevel.as_mut());
         }
 
         // Wait for all to exit, up to the timeout.
@@ -487,7 +503,9 @@ impl App {
             if session.is_alive() {
                 session.force_kill();
             }
-            let _ = ops::release_task(&self.conn, &session.task_name, &session.session_id);
+            let task_name = session.task_name().to_string();
+            let sid = session.session_id().to_string();
+            let _ = ops::release_task(&self.conn, &task_name, &sid);
         }
         self.task_to_session.clear();
 
@@ -520,6 +538,233 @@ fn cycle_after<T: Ord>(sorted: &[T], current: Option<&T>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    struct StubSession {
+        task_name: String,
+        session_id: String,
+        status: SessionStatus,
+        alive: bool,
+        stopping_since: Option<Instant>,
+    }
+
+    impl StubSession {
+        fn new(task_name: &str, session_id: &str, alive: bool) -> Self {
+            Self {
+                task_name: task_name.to_string(),
+                session_id: session_id.to_string(),
+                status: SessionStatus::Starting,
+                alive,
+                stopping_since: None,
+            }
+        }
+    }
+
+    impl SessionHandle for StubSession {
+        fn task_name(&self) -> &str {
+            &self.task_name
+        }
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+        fn status(&self) -> &SessionStatus {
+            &self.status
+        }
+        fn set_status(&mut self, status: SessionStatus) {
+            self.status = status;
+        }
+        fn stopping_since(&self) -> Option<Instant> {
+            self.stopping_since
+        }
+        fn is_alive(&mut self) -> bool {
+            self.alive
+        }
+        fn mark_stopping(&mut self) {
+            if self.stopping_since.is_none() {
+                self.stopping_since = Some(Instant::now());
+            }
+        }
+        fn force_kill(&mut self) {
+            self.alive = false;
+        }
+        fn start_passthrough(&self) -> Result<()> {
+            Ok(())
+        }
+        fn stop_passthrough(&self) -> Result<()> {
+            Ok(())
+        }
+        fn write_input(&mut self, _buf: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn resize(&self, _rows: u16, _cols: u16) -> Result<()> {
+            Ok(())
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    struct StubBackend;
+
+    impl Backend for StubBackend {
+        fn command(&self) -> &str {
+            "true"
+        }
+        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+            vec![]
+        }
+        fn request_exit(&self, session: &mut dyn SessionHandle) {
+            session.mark_stopping();
+        }
+    }
+
+    struct StubSpawner;
+
+    impl SessionSpawner for StubSpawner {
+        fn spawn(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            task_name: &str,
+            session_id: &str,
+            _rows: u16,
+            _cols: u16,
+            _env_vars: &[(&str, &str)],
+        ) -> Result<Box<dyn SessionHandle>> {
+            Ok(Box::new(StubSession::new(task_name, session_id, true)))
+        }
+    }
+
+    fn test_app() -> (App, TempDir) {
+        let status_dir = TempDir::new().unwrap();
+        let conn = kbtz::db::open_memory().unwrap();
+        let app = App {
+            db_path: ":memory:".to_string(),
+            conn,
+            tree_rows: Vec::new(),
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backend: Box::new(StubBackend),
+            spawner: Box::new(StubSpawner),
+            toplevel: None,
+            rows: 24,
+            cols: 80,
+            cursor: 0,
+            collapsed: HashSet::new(),
+            error: None,
+        };
+        (app, status_dir)
+    }
+
+    #[test]
+    fn remove_session_cleans_up_mapping() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(!app.sessions.contains_key("ws/1"));
+        assert!(!app.task_to_session.contains_key("task-a"));
+    }
+
+    #[test]
+    fn remove_session_preserves_newer_mapping() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        // Simulate: ws/2 has already claimed the same task and updated the mapping.
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/2".to_string());
+        // But ws/1 is still in the sessions map (hasn't been cleaned up yet).
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+
+        app.remove_session("ws/1");
+
+        // ws/1 should be removed from sessions...
+        assert!(!app.sessions.contains_key("ws/1"));
+        // ...but the task_to_session mapping should still point to ws/2.
+        assert_eq!(
+            app.task_to_session.get("task-a").map(String::as_str),
+            Some("ws/2")
+        );
+    }
+
+    #[test]
+    fn execute_actions_processes_remove() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        let actions = vec![lifecycle::SessionAction::Remove {
+            session_id: "ws/1".to_string(),
+        }];
+
+        let result = app.execute_actions(actions).unwrap();
+        assert!(result.is_some()); // should report "ws/1 exited"
+
+        assert!(!app.sessions.contains_key("ws/1"));
+        assert!(!app.task_to_session.contains_key("task-a"));
+    }
+
+    #[test]
+    fn execute_actions_remove_then_spawn() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        ops::add_task(&app.conn, "task-b", None, "desc", None, None, false).unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+        app.counter = 1; // so next session is ws/2, not ws/1
+
+        let actions = vec![
+            lifecycle::SessionAction::Remove {
+                session_id: "ws/1".to_string(),
+            },
+            lifecycle::SessionAction::SpawnUpTo { count: 1 },
+        ];
+
+        app.execute_actions(actions).unwrap();
+
+        // ws/1 removed
+        assert!(!app.sessions.contains_key("ws/1"));
+        // A new session ws/2 was spawned for a claimable task
+        assert!(app.sessions.contains_key("ws/2"));
+        let new_task = app.sessions.get("ws/2").unwrap().task_name().to_string();
+        assert_eq!(
+            app.task_to_session.get(&new_task).map(String::as_str),
+            Some("ws/2")
+        );
+    }
 
     #[test]
     fn cycle_after_no_current_returns_first() {

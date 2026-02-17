@@ -5,6 +5,54 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
+pub trait SessionHandle: Send {
+    fn task_name(&self) -> &str;
+    fn session_id(&self) -> &str;
+    fn status(&self) -> &SessionStatus;
+    fn set_status(&mut self, status: SessionStatus);
+    fn stopping_since(&self) -> Option<Instant>;
+    fn is_alive(&mut self) -> bool;
+    fn mark_stopping(&mut self);
+    fn force_kill(&mut self);
+    fn start_passthrough(&self) -> Result<()>;
+    fn stop_passthrough(&self) -> Result<()>;
+    fn write_input(&mut self, buf: &[u8]) -> Result<()>;
+    fn resize(&self, rows: u16, cols: u16) -> Result<()>;
+    fn process_id(&self) -> Option<u32>;
+}
+
+pub trait SessionSpawner: Send {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[&str],
+        task_name: &str,
+        session_id: &str,
+        rows: u16,
+        cols: u16,
+        env_vars: &[(&str, &str)],
+    ) -> Result<Box<dyn SessionHandle>>;
+}
+
+pub struct PtySpawner;
+
+impl SessionSpawner for PtySpawner {
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[&str],
+        task_name: &str,
+        session_id: &str,
+        rows: u16,
+        cols: u16,
+        env_vars: &[(&str, &str)],
+    ) -> Result<Box<dyn SessionHandle>> {
+        Session::spawn(command, args, task_name, session_id, rows, cols, env_vars)
+            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+    }
+}
+
 pub struct Session {
     pub master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -153,6 +201,84 @@ impl SessionStatus {
     }
 }
 
+impl SessionHandle for Session {
+    fn task_name(&self) -> &str {
+        &self.task_name
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn status(&self) -> &SessionStatus {
+        &self.status
+    }
+
+    fn set_status(&mut self, status: SessionStatus) {
+        self.status = status;
+    }
+
+    fn stopping_since(&self) -> Option<Instant> {
+        self.stopping_since
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn mark_stopping(&mut self) {
+        if self.stopping_since.is_none() {
+            self.stopping_since = Some(Instant::now());
+        }
+    }
+
+    fn force_kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
+    fn start_passthrough(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .start();
+        Ok(())
+    }
+
+    fn stop_passthrough(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .stop();
+        Ok(())
+    }
+
+    fn write_input(&mut self, buf: &[u8]) -> Result<()> {
+        self.writer.write_all(buf).context("write to PTY")?;
+        self.writer.flush().context("flush PTY")?;
+        Ok(())
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let pty_rows = rows.saturating_sub(1);
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .set_size(pty_rows, cols);
+        self.master
+            .resize(PtySize {
+                rows: pty_rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| anyhow::anyhow!("resize PTY: {e}"))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+}
+
 impl Session {
     pub fn spawn(
         command: &str,
@@ -213,64 +339,6 @@ impl Session {
         })
     }
 
-    /// Enable passthrough, rendering the VTE screen to stdout first.
-    pub fn start_passthrough(&self) -> Result<()> {
-        self.passthrough
-            .lock()
-            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .start();
-        Ok(())
-    }
-
-    pub fn stop_passthrough(&self) -> Result<()> {
-        self.passthrough
-            .lock()
-            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .stop();
-        Ok(())
-    }
-
-    pub fn write_input(&mut self, buf: &[u8]) -> Result<()> {
-        self.writer.write_all(buf).context("write to PTY")?;
-        self.writer.flush().context("flush PTY")?;
-        Ok(())
-    }
-
-    pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
-
-    /// Record that a graceful exit has been requested.
-    ///
-    /// Called by `Backend::request_exit()` after sending the backend-specific
-    /// exit signal. The lifecycle tick uses `stopping_since` to enforce
-    /// a force-kill timeout.
-    pub fn mark_stopping(&mut self) {
-        if self.stopping_since.is_none() {
-            self.stopping_since = Some(Instant::now());
-        }
-    }
-
-    /// Force-kill the process immediately (SIGKILL).
-    pub fn force_kill(&mut self) {
-        let _ = self.child.kill();
-    }
-
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
-        let pty_rows = rows.saturating_sub(1);
-        self.passthrough
-            .lock()
-            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .set_size(pty_rows, cols);
-        self.master
-            .resize(PtySize {
-                rows: pty_rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| anyhow::anyhow!("resize PTY: {e}"))
-    }
 }
 
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {

@@ -49,7 +49,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let (icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name) {
                 if let Some(session) = app.sessions.get(sid) {
                     (
-                        format!("{} ", session.status.indicator()),
+                        format!("{} ", session.status().indicator()),
                         format!(" {}", sid),
                     )
                 } else {

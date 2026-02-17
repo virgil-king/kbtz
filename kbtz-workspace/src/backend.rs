@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::session::Session;
+use crate::session::SessionHandle;
 
 /// Defines how kbtz-workspace interacts with a specific coding agent tool.
 ///
@@ -33,7 +33,7 @@ pub trait Backend: Send + Sync {
     ///
     /// Implementations must call `session.mark_stopping()` after sending
     /// the exit signal so the lifecycle tick can track the timeout.
-    fn request_exit(&self, session: &mut Session);
+    fn request_exit(&self, session: &mut dyn SessionHandle);
 }
 
 /// Claude Code backend. Injects prompts via `--append-system-prompt` and
@@ -61,11 +61,11 @@ impl Backend for Claude {
         args
     }
 
-    fn request_exit(&self, session: &mut Session) {
-        if session.stopping_since.is_some() {
+    fn request_exit(&self, session: &mut dyn SessionHandle) {
+        if session.stopping_since().is_some() {
             return;
         }
-        if let Some(pid) = session.child.process_id() {
+        if let Some(pid) = session.process_id() {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
         session.mark_stopping();
