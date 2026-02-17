@@ -3,6 +3,7 @@ mod backend;
 mod config;
 mod lifecycle;
 mod prompt;
+mod scrollback;
 mod session;
 mod tree;
 
