@@ -54,8 +54,10 @@ impl Passthrough {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
 
-        // Replay raw output to recreate terminal scrollback.
-        let _ = out.write_all(&self.output_buffer);
+        // Replay raw output to recreate terminal scrollback, stripping
+        // CSI sequences that would trigger terminal responses (DA, DSR)
+        // and appear as garbage input in the child session.
+        replay_scrollback(&mut out, &self.output_buffer);
 
         // Fix up the visible screen: state_formatted() clears the
         // screen (without touching scrollback), redraws cell contents,
@@ -271,6 +273,50 @@ impl Session {
     }
 }
 
+/// Write `buf` to `out`, omitting CSI sequences that would trigger a
+/// terminal response when replayed (Device Attributes ending in `c`,
+/// Device Status Report ending in `n`).  All other output — text, SGR
+/// colors, cursor movement, mode changes — is preserved so terminal
+/// scrollback renders correctly.
+fn replay_scrollback(out: &mut impl Write, buf: &[u8]) {
+    let mut i = 0;
+    // Everything in buf[flush_from..i] is "safe" output that hasn't
+    // been written yet.  We batch writes for efficiency.
+    let mut flush_from = 0;
+
+    while i < buf.len() {
+        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'[' {
+            // Potential CSI sequence: ESC [
+            let seq_start = i;
+            i += 2;
+            // Parameter bytes (0x30–0x3F: digits, semicolons, <=>? etc.)
+            while i < buf.len() && (0x30..=0x3F).contains(&buf[i]) {
+                i += 1;
+            }
+            // Intermediate bytes (0x20–0x2F: space, !, ", #, $ etc.)
+            while i < buf.len() && (0x20..=0x2F).contains(&buf[i]) {
+                i += 1;
+            }
+            // Final byte (0x40–0x7E)
+            if i < buf.len() && (0x40..=0x7E).contains(&buf[i]) {
+                let final_byte = buf[i];
+                i += 1;
+                if final_byte == b'c' || final_byte == b'n' {
+                    // Terminal query — flush everything before it, skip it.
+                    let _ = out.write_all(&buf[flush_from..seq_start]);
+                    flush_from = i;
+                }
+            }
+            // If the CSI is incomplete (buffer ends mid-sequence) or has
+            // a non-query final byte, we fall through and include it in
+            // the next flush.
+        } else {
+            i += 1;
+        }
+    }
+    let _ = out.write_all(&buf[flush_from..]);
+}
+
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
     let mut buf = [0u8; 4096];
     let stdout = std::io::stdout();
@@ -349,6 +395,50 @@ mod tests {
             assert!(!v.indicator().is_empty(), "{:?} has empty indicator", v);
             assert!(!v.label().is_empty(), "{:?} has empty label", v);
         }
+    }
+
+    #[test]
+    fn replay_scrollback_strips_da_and_dsr() {
+        let mut output = Vec::new();
+        // DA1 query (ESC [ c), DSR query (ESC [ 6 n), with normal text and SGR around them.
+        let input = b"hello\x1b[c world\x1b[6n!\x1b[1;31mred\x1b[0m";
+        replay_scrollback(&mut output, input);
+        assert_eq!(output, b"hello world!\x1b[1;31mred\x1b[0m");
+    }
+
+    #[test]
+    fn replay_scrollback_strips_da2() {
+        let mut output = Vec::new();
+        // DA2 query: ESC [ > c  ('>' is 0x3E, a parameter byte)
+        let input = b"before\x1b[>cafter";
+        replay_scrollback(&mut output, input);
+        assert_eq!(output, b"beforeafter");
+    }
+
+    #[test]
+    fn replay_scrollback_preserves_non_query_csi() {
+        let mut output = Vec::new();
+        // CUP, ED, SGR — none end in 'c' or 'n', so all are preserved.
+        let input = b"\x1b[1;1H\x1b[2Jhello\x1b[1;31mred\x1b[0m";
+        replay_scrollback(&mut output, input);
+        assert_eq!(output.as_slice(), input.as_slice());
+    }
+
+    #[test]
+    fn replay_scrollback_handles_plain_text() {
+        let mut output = Vec::new();
+        let input = b"just plain text\n";
+        replay_scrollback(&mut output, input);
+        assert_eq!(output.as_slice(), input.as_slice());
+    }
+
+    #[test]
+    fn replay_scrollback_handles_incomplete_csi_at_end() {
+        let mut output = Vec::new();
+        // Buffer ends with an incomplete CSI — should be preserved as-is.
+        let input = b"text\x1b[";
+        replay_scrollback(&mut output, input);
+        assert_eq!(output.as_slice(), input.as_slice());
     }
 
     #[test]
