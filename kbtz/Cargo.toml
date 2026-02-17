@@ -2,6 +2,9 @@
 name = "kbtz"
 version = "0.1.0"
 edition = "2021"
+description = "Task tracker for AI agents"
+license = "Apache-2.0"
+repository = "https://github.com/virgil-king/kbtz"
 
 [lib]
 name = "kbtz"

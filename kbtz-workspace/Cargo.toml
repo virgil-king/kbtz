@@ -2,6 +2,9 @@
 name = "kbtz-workspace"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal workspace manager for kbtz agent sessions"
+license = "Apache-2.0"
+repository = "https://github.com/virgil-king/kbtz"
 
 [dependencies]
 kbtz = { path = "../kbtz" }
