@@ -2,7 +2,6 @@ mod app;
 mod backend;
 mod config;
 mod lifecycle;
-pub(crate) mod protocol;
 mod prompt;
 mod session;
 mod tree;
