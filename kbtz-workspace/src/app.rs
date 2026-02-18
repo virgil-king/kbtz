@@ -549,44 +549,35 @@ impl App {
         }
     }
 
-    /// Gracefully shut down all sessions and clean up status files.
+    /// Detach from worker sessions and kill the toplevel session.
     ///
-    /// Requests exit from all sessions via the backend, then waits up to
-    /// GRACEFUL_TIMEOUT for them to exit before force-killing.
+    /// Worker sessions persist via their shepherd processes and will be
+    /// reconnected on next startup. Task claims are left intact because
+    /// the shepherds are still running. Only the toplevel session (ephemeral,
+    /// no task claim) is killed. Status files are cleaned up, but .sock,
+    /// .pid, and .lock files are preserved — they belong to the shepherds.
     pub fn shutdown(&mut self) {
-        // Request exit from all sessions (workers + toplevel).
-        for session in self.sessions.values_mut() {
+        // Drop all worker sessions (disconnects from sockets).
+        // This does NOT kill the shepherds — they persist.
+        // Don't release task claims — shepherds are still running.
+        for (_, session) in self.sessions.drain() {
             let _ = session.stop_passthrough();
-            self.backend.request_exit(session.as_mut());
         }
+        self.task_to_session.clear();
+
+        // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
             let _ = toplevel.stop_passthrough();
             self.backend.request_exit(toplevel.as_mut());
         }
-
-        // Wait for all to exit, up to the timeout.
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
-            let workers_dead = self.sessions.values_mut().all(|s| !s.is_alive());
             let toplevel_dead = self.toplevel.as_mut().is_none_or(|s| !s.is_alive());
-            if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
+            if toplevel_dead || std::time::Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-
-        // Force-kill any stragglers and release tasks.
-        for (_, mut session) in self.sessions.drain() {
-            if session.is_alive() {
-                session.force_kill();
-            }
-            let task_name = session.task_name().to_string();
-            let sid = session.session_id().to_string();
-            let _ = ops::release_task(&self.conn, &task_name, &sid);
-        }
-        self.task_to_session.clear();
-
-        // Force-kill top-level if still alive.
         if let Some(ref mut toplevel) = self.toplevel {
             if toplevel.is_alive() {
                 toplevel.force_kill();
@@ -594,10 +585,14 @@ impl App {
         }
         self.toplevel = None;
 
-        // Clean up status files.
+        // Clean up status files only (not .sock, .pid, or .lock — those belong to shepherds).
         if let Ok(entries) = std::fs::read_dir(&self.status_dir) {
             for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str());
+                if ext != Some("sock") && ext != Some("pid") && ext != Some("lock") {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
     }
