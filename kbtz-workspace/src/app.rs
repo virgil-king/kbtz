@@ -15,7 +15,8 @@ use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus};
+use crate::session::{SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
+use crate::shepherd_session::ShepherdSession;
 
 pub struct TermSize {
     pub rows: u16,
@@ -89,12 +90,12 @@ impl App {
             sessions: HashMap::new(),
             task_to_session: HashMap::new(),
             counter: 0,
-            status_dir,
+            status_dir: status_dir.clone(),
             max_concurrency,
             manual,
             prefer,
             backend,
-            spawner: Box::new(PtySpawner),
+            spawner: Box::new(ShepherdSpawner { status_dir }),
             toplevel: None,
             term,
             tree: TreeView {
@@ -106,6 +107,7 @@ impl App {
             },
         };
         app.refresh_tree()?;
+        app.reconnect_sessions()?;
         app.spawn_toplevel()?;
         Ok(app)
     }
@@ -354,21 +356,89 @@ impl App {
         Ok(())
     }
 
-    /// Remove a session, cleaning up its status file and releasing the task.
+    /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
             let _ = session.stop_passthrough();
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
             let _ = ops::release_task(&self.conn, &task_name, &sid);
-            // Only remove the task→session mapping if it still points to this
+            // Only remove the task->session mapping if it still points to this
             // session. A new session may have already claimed the same task
-            // (e.g. after a pause→unpause cycle), and we must not clobber it.
+            // (e.g. after a pause->unpause cycle), and we must not clobber it.
             if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
                 self.task_to_session.remove(&task_name);
             }
-            let _ = std::fs::remove_file(self.status_dir.join(session_id_to_filename(session_id)));
+            let filename = session_id_to_filename(session_id);
+            let _ = std::fs::remove_file(self.status_dir.join(&filename));
+            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.sock")));
+            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
         }
+    }
+
+    /// Reconnect to shepherd sessions from a previous workspace instance.
+    pub fn reconnect_sessions(&mut self) -> Result<()> {
+        let entries = std::fs::read_dir(&self.status_dir)?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let session_id = stem.replacen('-', "/", 1);
+            let pid_path = path.with_extension("pid");
+
+            // Look up the task claim in the DB
+            match self.find_task_for_session(&session_id) {
+                Some(task_name) => {
+                    match ShepherdSession::connect(
+                        &path,
+                        &pid_path,
+                        &task_name,
+                        &session_id,
+                        self.rows,
+                        self.cols,
+                    ) {
+                        Ok(session) => {
+                            if let Some(n) = session_id
+                                .strip_prefix("ws/")
+                                .and_then(|s| s.parse::<u64>().ok())
+                            {
+                                self.counter = self.counter.max(n);
+                            }
+                            self.task_to_session
+                                .insert(task_name, session_id.clone());
+                            self.sessions.insert(session_id, Box::new(session));
+                        }
+                        Err(_) => {
+                            // Stale socket -- clean up
+                            let _ = std::fs::remove_file(&path);
+                            let _ = std::fs::remove_file(&pid_path);
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                        }
+                    }
+                }
+                None => {
+                    // No task claim -- orphaned shepherd. Kill and clean up.
+                    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                            unsafe { libc::kill(pid, libc::SIGKILL) };
+                        }
+                    }
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(&pid_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn find_task_for_session(&self, session_id: &str) -> Option<String> {
+        ops::list_tasks(&self.conn, None, true, None, None, None)
+            .ok()?
+            .into_iter()
+            .find(|t| t.assignee.as_deref() == Some(session_id))
+            .map(|t| t.name)
     }
 
     /// Propagate terminal resize to all PTYs.
