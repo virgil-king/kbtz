@@ -87,7 +87,7 @@ const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
 /// predates an alternate-screen switch) by replaying it into a
 /// temporary VTE.
 pub struct Passthrough {
-    active: bool,
+    pub(crate) active: bool,
     vte: vt100::Parser,
     /// Bounded buffer of raw child output for scrollback reconstruction.
     output_buffer: Vec<u8>,
@@ -109,7 +109,7 @@ impl Passthrough {
     /// state plus input modes and set `active` for live forwarding.
     /// Both happen under the same Mutex guard so no child output is
     /// lost.
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
@@ -132,7 +132,7 @@ impl Passthrough {
         self.active = true;
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if !self.active {
             return;
         }
@@ -159,7 +159,7 @@ impl Passthrough {
         let _ = out.flush();
     }
 
-    fn process(&mut self, data: &[u8]) {
+    pub(crate) fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
         self.output_buffer.extend_from_slice(data);
         if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
@@ -173,7 +173,7 @@ impl Passthrough {
         }
     }
 
-    fn set_size(&mut self, rows: u16, cols: u16) {
+    pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
         self.vte.screen_mut().set_size(rows, cols);
     }
 
