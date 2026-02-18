@@ -253,8 +253,20 @@ impl SessionHandle for Session {
     }
 
     fn write_input(&mut self, buf: &[u8]) -> Result<()> {
-        self.writer.write_all(buf).context("write to PTY")?;
-        self.writer.flush().context("flush PTY")?;
+        if let Err(e) = self.writer.write_all(buf) {
+            // EIO means the child exited and the slave PTY side closed.
+            // Discard the write — the session will be reaped on the next tick.
+            if e.raw_os_error() == Some(libc::EIO) {
+                return Ok(());
+            }
+            return Err(e).context("write to PTY");
+        }
+        if let Err(e) = self.writer.flush() {
+            if e.raw_os_error() == Some(libc::EIO) {
+                return Ok(());
+            }
+            return Err(e).context("flush PTY");
+        }
         Ok(())
     }
 
