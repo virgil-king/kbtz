@@ -4,6 +4,7 @@ mod config;
 mod lifecycle;
 mod prompt;
 mod session;
+mod shepherd_session;
 mod tree;
 
 use std::io::{self, Read, Write};
