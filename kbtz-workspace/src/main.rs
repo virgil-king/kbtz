@@ -587,7 +587,7 @@ fn zoomed_loop(
         // Redraw status bar when status or debug info changes
         let mut redraw = false;
         if let Some(session) = app.sessions.get(session_id) {
-            let status = session.status.clone();
+            let status = session.status().clone();
             if status != last_status {
                 last_status = status;
                 redraw = true;
@@ -772,7 +772,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         let ids = app.session_ids_ordered();
                         if let Some(first_sid) = ids.first() {
                             if let Some(session) = app.sessions.get(first_sid) {
-                                let task = session.task_name.clone();
+                                let task = session.task_name().to_string();
                                 return Ok(Action::ZoomIn(task));
                             }
                         }
@@ -782,7 +782,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         let ids = app.session_ids_ordered();
                         if let Some(last_sid) = ids.last() {
                             if let Some(session) = app.sessions.get(last_sid) {
-                                let task = session.task_name.clone();
+                                let task = session.task_name().to_string();
                                 return Ok(Action::ZoomIn(task));
                             }
                         }
