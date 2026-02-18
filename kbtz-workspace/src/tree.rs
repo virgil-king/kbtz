@@ -229,3 +229,36 @@ pub fn render_help(frame: &mut Frame) {
 
     frame.render_widget(Paragraph::new(help_text), inner);
 }
+
+pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str) {
+    let term = frame.area();
+    let width = 50.min(term.width.saturating_sub(4));
+    let height = 5.min(term.height.saturating_sub(2));
+    let area = ui::centered_rect(width, height, term);
+    frame.render_widget(Clear, area);
+
+    let title = format!(" {action} ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = vec![
+        Line::from(vec![
+            Span::raw("Task "),
+            Span::styled(task_name, Style::default().bold()),
+            Span::raw(" has an active session."),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("Proceed? "),
+            Span::styled("y", Style::default().fg(Color::Green).bold()),
+            Span::raw("/"),
+            Span::styled("n", Style::default().fg(Color::Red).bold()),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(text), inner);
+}

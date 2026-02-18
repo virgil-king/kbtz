@@ -272,6 +272,8 @@ fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 enum TreeMode {
     Normal,
     Help,
+    ConfirmDone(String),
+    ConfirmPause(String),
 }
 
 fn tree_loop(
@@ -293,8 +295,15 @@ fn tree_loop(
 
         terminal.draw(|frame| {
             tree::render(frame, app);
-            if matches!(mode, TreeMode::Help) {
-                tree::render_help(frame);
+            match &mode {
+                TreeMode::Help => tree::render_help(frame),
+                TreeMode::ConfirmDone(name) => {
+                    tree::render_confirm(frame, "Done", name);
+                }
+                TreeMode::ConfirmPause(name) => {
+                    tree::render_confirm(frame, "Pause", name);
+                }
+                TreeMode::Normal => {}
             }
         })?;
 
@@ -317,6 +326,36 @@ fn tree_loop(
                         _ => {}
                     }
                     continue;
+                }
+
+                match &mode {
+                    TreeMode::ConfirmDone(name) => {
+                        let name = name.clone();
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Enter => {
+                                if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                    app.error = Some(e.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                        mode = TreeMode::Normal;
+                        continue;
+                    }
+                    TreeMode::ConfirmPause(name) => {
+                        let name = name.clone();
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Enter => {
+                                if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
+                                    app.error = Some(e.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                        mode = TreeMode::Normal;
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 app.error = None;
@@ -351,6 +390,10 @@ fn tree_loop(
                             let result = match status {
                                 "paused" => kbtz::ops::unpause_task(&app.conn, &name),
                                 "open" => kbtz::ops::pause_task(&app.conn, &name),
+                                "active" => {
+                                    mode = TreeMode::ConfirmPause(name);
+                                    continue;
+                                }
                                 _ => {
                                     app.error = Some(format!("cannot pause {status} task"));
                                     Ok(())
@@ -370,7 +413,8 @@ fn tree_loop(
                                     app.error = Some("task is already done".into());
                                 }
                                 "active" => {
-                                    app.error = Some("cannot close active task".into());
+                                    mode = TreeMode::ConfirmDone(name);
+                                    continue;
                                 }
                                 _ => {
                                     if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
