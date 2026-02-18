@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
-use kbtz_workspace::protocol::{self, Message};
 use crate::session::{Passthrough, SessionHandle, SessionStatus};
+use kbtz_workspace::protocol::{self, Message};
 
 pub struct ShepherdSession {
     socket_path: PathBuf,
@@ -36,8 +36,9 @@ impl ShepherdSession {
             .parse()
             .with_context(|| format!("invalid PID in {}: {:?}", pid_path.display(), pid_str))?;
 
-        let stream = UnixStream::connect(socket_path)
-            .with_context(|| format!("failed to connect to shepherd at {}", socket_path.display()))?;
+        let stream = UnixStream::connect(socket_path).with_context(|| {
+            format!("failed to connect to shepherd at {}", socket_path.display())
+        })?;
         let read_stream = stream
             .try_clone()
             .context("failed to clone Unix stream for reader")?;
@@ -69,9 +70,17 @@ impl ShepherdSession {
         // Send initial Resize to tell the shepherd our current terminal size
         let writer = Mutex::new(BufWriter::new(write_stream));
         {
-            let mut w = writer.lock().expect("writer lock poisoned during construction");
-            protocol::write_message(&mut *w, &Message::Resize { rows: pty_rows, cols })
-                .context("failed to send initial resize to shepherd")?;
+            let mut w = writer
+                .lock()
+                .expect("writer lock poisoned during construction");
+            protocol::write_message(
+                &mut *w,
+                &Message::Resize {
+                    rows: pty_rows,
+                    cols,
+                },
+            )
+            .context("failed to send initial resize to shepherd")?;
         }
 
         Ok(ShepherdSession {
@@ -87,10 +96,7 @@ impl ShepherdSession {
     }
 }
 
-fn shepherd_reader_thread(
-    mut reader: BufReader<UnixStream>,
-    passthrough: Arc<Mutex<Passthrough>>,
-) {
+fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mutex<Passthrough>>) {
     loop {
         match protocol::read_message(&mut reader) {
             Ok(Some(Message::PtyOutput(data))) => {
@@ -105,7 +111,7 @@ fn shepherd_reader_thread(
                     let _ = out.flush();
                 }
             }
-            Ok(Some(_)) => {} // Ignore unexpected messages
+            Ok(Some(_)) => {}           // Ignore unexpected messages
             Ok(None) | Err(_) => break, // EOF or error
         }
     }
@@ -194,9 +200,13 @@ impl SessionHandle for ShepherdSession {
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("writer mutex poisoned"))?;
-        if let Err(e) =
-            protocol::write_message(&mut *writer, &Message::Resize { rows: pty_rows, cols })
-        {
+        if let Err(e) = protocol::write_message(
+            &mut *writer,
+            &Message::Resize {
+                rows: pty_rows,
+                cols,
+            },
+        ) {
             if is_broken_pipe(&e) {
                 return Ok(());
             }
@@ -217,22 +227,19 @@ mod tests {
 
     /// Helper: create a ShepherdSession with one end of a UnixStream pair,
     /// after sending the required InitialState handshake on the other end.
-    fn make_test_session(
-        socket_path: &Path,
-    ) -> (ShepherdSession, BufReader<UnixStream>) {
+    fn make_test_session(socket_path: &Path) -> (ShepherdSession, BufReader<UnixStream>) {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
 
         // The server side sends InitialState, then the client connects.
         // But connect() expects to connect to a path. We need to build
         // the ShepherdSession manually for testing since we can't use a
         // real filesystem socket with UnixStream::pair().
-        let mut server_writer = BufWriter::new(
-            server_stream
-                .try_clone()
-                .unwrap(),
-        );
-        protocol::write_message(&mut server_writer, &Message::InitialState(b"hello".to_vec()))
-            .unwrap();
+        let mut server_writer = BufWriter::new(server_stream.try_clone().unwrap());
+        protocol::write_message(
+            &mut server_writer,
+            &Message::InitialState(b"hello".to_vec()),
+        )
+        .unwrap();
 
         let read_stream = client_stream.try_clone().unwrap();
         let write_stream = client_stream;
@@ -292,7 +299,10 @@ mod tests {
         assert!(session.is_alive(), "socket file exists, should be alive");
 
         std::fs::remove_file(&socket_path).unwrap();
-        assert!(!session.is_alive(), "socket file removed, should not be alive");
+        assert!(
+            !session.is_alive(),
+            "socket file removed, should not be alive"
+        );
     }
 
     #[test]
