@@ -310,11 +310,7 @@ impl App {
         Ok(())
     }
 
-    fn spawn_session(
-        &self,
-        task: &Task,
-        session_id: &str,
-    ) -> Result<Box<dyn SessionHandle>> {
+    fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Box<dyn SessionHandle>> {
         let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
         let args = self
             .backend
@@ -457,9 +453,7 @@ impl App {
         let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
         let idx = cycle_after(&needs_input, current_sid.as_ref());
         let sid = needs_input[idx];
-        self.sessions
-            .get(sid)
-            .map(|s| s.task_name().to_string())
+        self.sessions.get(sid).map(|s| s.task_name().to_string())
     }
 
     /// Kill and release a session for a task so it can be respawned.

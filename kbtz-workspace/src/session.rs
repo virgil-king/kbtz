@@ -338,7 +338,6 @@ impl Session {
             stopping_since: None,
         })
     }
-
 }
 
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
