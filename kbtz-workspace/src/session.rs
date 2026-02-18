@@ -135,6 +135,7 @@ impl Passthrough {
                 "\x1b[?1002l",
                 "\x1b[?1003l",
                 "\x1b[?1006l", // disable SGR mouse encoding
+                "\x1b[?1004l", // disable focus event reporting
                 "\x1b[?2004l", // disable bracketed paste
                 "\x1b[?1l",    // normal cursor keys
                 "\x1b>",       // normal keypad
