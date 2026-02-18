@@ -388,6 +388,22 @@ impl App {
             let session_id = stem.replacen('-', "/", 1);
             let pid_path = path.with_extension("pid");
 
+            // Verify the shepherd process is still alive before attempting to connect.
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                    if !alive {
+                        // Shepherd died — clean up stale files
+                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::remove_file(&pid_path);
+                        if let Some(task_name) = self.find_task_for_session(&session_id) {
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                        }
+                        continue;
+                    }
+                }
+            }
+
             // Look up the task claim in the DB
             match self.find_task_for_session(&session_id) {
                 Some(task_name) => {

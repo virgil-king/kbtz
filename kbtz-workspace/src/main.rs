@@ -156,6 +156,20 @@ fn run() -> Result<()> {
     }));
     std::fs::create_dir_all(&status_dir).context("failed to create status directory")?;
 
+    // Acquire exclusive lock on the status directory to prevent concurrent instances.
+    let lock_path = status_dir.join("workspace.lock");
+    let _lock_file = std::fs::File::create(&lock_path)
+        .context("failed to create lock file")?;
+    let lock_fd = _lock_file.as_raw_fd();
+    let lock_result = unsafe { libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_result != 0 {
+        anyhow::bail!(
+            "another kbtz-workspace instance is already running on this database. \
+             If this is incorrect, remove {}", lock_path.display()
+        );
+    }
+    // _lock_file must stay alive for the duration of run() — the lock is released when the fd is closed.
+
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
     // Disable focus event reporting that may be left over from a previous
