@@ -224,8 +224,8 @@ fn run() -> Result<()> {
     let _ = write!(
         stdout,
         concat!(
-            "\x1b[r",       // reset scroll region
-            "\x1b[?1004l",  // disable focus event reporting
+            "\x1b[r",      // reset scroll region
+            "\x1b[?1004l", // disable focus event reporting
         )
     );
     let _ = execute!(
