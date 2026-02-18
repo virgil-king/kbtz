@@ -138,10 +138,7 @@ mod tests {
 
     #[test]
     fn roundtrip_resize() {
-        let msg = Message::Resize {
-            rows: 24,
-            cols: 80,
-        };
+        let msg = Message::Resize { rows: 24, cols: 80 };
         let encoded = encode(&msg);
         let decoded = decode(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);

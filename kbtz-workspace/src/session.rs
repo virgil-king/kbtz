@@ -81,8 +81,7 @@ impl SessionSpawner for ShepherdSpawner {
         let pid_path = self.status_dir.join(format!("{filename}.pid"));
 
         // Find kbtz-shepherd binary next to the current executable
-        let self_exe =
-            std::env::current_exe().context("failed to get current executable path")?;
+        let self_exe = std::env::current_exe().context("failed to get current executable path")?;
         let shepherd_bin = self_exe.with_file_name("kbtz-shepherd");
         if !shepherd_bin.exists() {
             bail!(

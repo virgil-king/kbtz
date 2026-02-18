@@ -64,10 +64,7 @@ fn run(
     // 1. Detach from parent session.
     unsafe {
         if libc::setsid() == -1 {
-            anyhow::bail!(
-                "setsid failed: {:?}",
-                io::Error::last_os_error()
-            );
+            anyhow::bail!("setsid failed: {:?}", io::Error::last_os_error());
         }
     }
 
@@ -174,12 +171,7 @@ fn run(
                     let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
                     libc::fcntl(pty_master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
                 }
-                drain_pty(
-                    &mut pty_reader,
-                    &mut vte,
-                    &mut output_buffer,
-                    &mut client,
-                );
+                drain_pty(&mut pty_reader, &mut vte, &mut output_buffer, &mut client);
                 cleanup(socket_path, pid_file);
                 return Ok(());
             }
@@ -276,8 +268,8 @@ fn run(
                     } else {
                         // Set a read timeout so a misbehaving client sending a
                         // partial frame can't stall the main loop indefinitely.
-                        let _ = new_client
-                            .set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                        let _ =
+                            new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         client = Some(new_client);
                     }
                 }

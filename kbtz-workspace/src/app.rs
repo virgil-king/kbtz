@@ -15,9 +15,7 @@ use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{
-    PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner,
-};
+use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
 use crate::shepherd_session::ShepherdSession;
 
 pub struct TermSize {
@@ -428,8 +426,7 @@ impl App {
                             {
                                 self.counter = self.counter.max(n);
                             }
-                            self.task_to_session
-                                .insert(task_name, session_id.clone());
+                            self.task_to_session.insert(task_name, session_id.clone());
                             self.sessions.insert(session_id, Box::new(session));
                         }
                         Err(_) => {
