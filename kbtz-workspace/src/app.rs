@@ -15,7 +15,9 @@ use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
+use crate::session::{
+    PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner,
+};
 use crate::shepherd_session::ShepherdSession;
 
 pub struct TermSize {
@@ -287,6 +289,10 @@ impl App {
     }
 
     /// Spawn the top-level task management session.
+    ///
+    /// The toplevel is ephemeral — it's killed on quit and respawned on start.
+    /// We use PtySpawner (not ShepherdSpawner) because there's no value in
+    /// persisting a session that has no task claim and is cheap to recreate.
     fn spawn_toplevel(&mut self) -> Result<()> {
         let task_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
@@ -296,7 +302,7 @@ impl App {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "ws/toplevel";
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
-        let session = self.spawner.spawn(
+        let session = PtySpawner.spawn(
             self.backend.command(),
             &arg_refs,
             "toplevel",

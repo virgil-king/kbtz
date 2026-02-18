@@ -168,7 +168,12 @@ fn run(
         // Check if child has exited.
         match child.try_wait() {
             Ok(Some(_status)) => {
-                // Child exited. Drain remaining PTY output.
+                // Child exited. Set PTY reader non-blocking so drain_pty
+                // can't hang waiting for data that will never arrive.
+                unsafe {
+                    let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
+                    libc::fcntl(pty_master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
                 drain_pty(
                     &mut pty_reader,
                     &mut vte,
@@ -269,8 +274,10 @@ fn run(
                     {
                         // Failed to send initial state; drop connection.
                     } else {
-                        // Keep client blocking -- we use poll() to know when
-                        // data is available before calling read_message.
+                        // Set a read timeout so a misbehaving client sending a
+                        // partial frame can't stall the main loop indefinitely.
+                        let _ = new_client
+                            .set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         client = Some(new_client);
                     }
                 }
