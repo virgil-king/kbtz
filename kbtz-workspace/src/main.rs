@@ -155,6 +155,14 @@ fn run() -> Result<()> {
 
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
+    // Disable focus event reporting that may be left over from a previous
+    // session.  Some terminals (notably on macOS) keep DECSET 1004 enabled
+    // across process boundaries, so a prior child that requested focus
+    // events causes the terminal to send CSI I / CSI O into our stdin
+    // before we enter raw mode — which gets echoed as "^[[I" / "^[[O".
+    let _ = write!(io::stdout(), "\x1b[?1004l");
+    let _ = io::stdout().flush();
+
     // Merge: CLI > config > defaults
     let ws = config.workspace;
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
@@ -213,7 +221,13 @@ fn run() -> Result<()> {
     // Clear the terminal so the user returns to a clean shell prompt
     // instead of stale rendering artifacts from zoomed/toplevel mode.
     let mut stdout = io::stdout();
-    let _ = write!(stdout, "\x1b[r"); // reset scroll region
+    let _ = write!(
+        stdout,
+        concat!(
+            "\x1b[r",      // reset scroll region
+            "\x1b[?1004l", // disable focus event reporting
+        )
+    );
     let _ = execute!(
         stdout,
         crossterm::cursor::Show,
