@@ -1,4 +1,5 @@
 pub mod db;
+pub mod debug_log;
 pub mod model;
 pub mod ops;
 pub mod output;
