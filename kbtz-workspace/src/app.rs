@@ -103,6 +103,33 @@ impl App {
         Ok(app)
     }
 
+    // ── UI-initiated task mutations ──────────────────────────────────
+    //
+    // These wrap the underlying `ops::` calls and immediately refresh
+    // the tree view so that same-connection writes are reflected in
+    // `tree_rows` without relying on the filesystem watcher (which is
+    // not reliable for same-process writes on all platforms).
+
+    pub fn pause_task(&mut self, name: &str) -> Result<()> {
+        ops::pause_task(&self.conn, name)?;
+        self.refresh_tree()
+    }
+
+    pub fn unpause_task(&mut self, name: &str) -> Result<()> {
+        ops::unpause_task(&self.conn, name)?;
+        self.refresh_tree()
+    }
+
+    pub fn mark_done(&mut self, name: &str) -> Result<()> {
+        ops::mark_done(&self.conn, name)?;
+        self.refresh_tree()
+    }
+
+    pub fn force_unassign_task(&mut self, name: &str) -> Result<()> {
+        ops::force_unassign_task(&self.conn, name)?;
+        self.refresh_tree()
+    }
+
     /// Rebuild the tree view from the database.
     pub fn refresh_tree(&mut self) -> Result<()> {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;

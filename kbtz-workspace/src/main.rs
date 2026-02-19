@@ -347,7 +347,7 @@ fn tree_loop(
                         let name = name.clone();
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
-                                if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                if let Err(e) = app.mark_done(&name) {
                                     app.error = Some(e.to_string());
                                 }
                             }
@@ -360,7 +360,7 @@ fn tree_loop(
                         let name = name.clone();
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
-                                if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
+                                if let Err(e) = app.pause_task(&name) {
                                     app.error = Some(e.to_string());
                                 }
                             }
@@ -401,21 +401,25 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             let status = app.tree_rows[app.cursor].status.as_str();
-                            let result = match status {
-                                "paused" => kbtz::ops::unpause_task(&app.conn, &name),
-                                "open" => kbtz::ops::pause_task(&app.conn, &name),
+                            match status {
+                                "paused" => {
+                                    if let Err(e) = app.unpause_task(&name) {
+                                        app.error = Some(e.to_string());
+                                    }
+                                }
+                                "open" => {
+                                    if let Err(e) = app.pause_task(&name) {
+                                        app.error = Some(e.to_string());
+                                    }
+                                }
                                 "active" => {
                                     mode = TreeMode::ConfirmPause(name);
                                     continue;
                                 }
                                 _ => {
                                     app.error = Some(format!("cannot pause {status} task"));
-                                    Ok(())
                                 }
                             };
-                            if let Err(e) = result {
-                                app.error = Some(e.to_string());
-                            }
                         }
                     }
                     KeyCode::Char('d') => {
@@ -431,7 +435,7 @@ fn tree_loop(
                                     continue;
                                 }
                                 _ => {
-                                    if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                    if let Err(e) = app.mark_done(&name) {
                                         app.error = Some(e.to_string());
                                     }
                                 }
@@ -441,7 +445,7 @@ fn tree_loop(
                     KeyCode::Char('U') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
-                            if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
+                            if let Err(e) = app.force_unassign_task(&name) {
                                 app.error = Some(e.to_string());
                             }
                         }
