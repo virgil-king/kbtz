@@ -804,4 +804,83 @@ mod tests {
         let ids = vec!["ws/1"];
         assert_eq!(cycle_after(&ids, None), 0);
     }
+
+    /// Integration test: simulates the pause-via-confirmation-dialog scenario.
+    ///
+    /// 1. Create a file-backed DB with an active task + session
+    /// 2. Set up a watcher (as tree_loop does)
+    /// 3. Call pause_task (as the confirmation handler does)
+    /// 4. Wait briefly, then poll with zero timeout (as watchers.poll does)
+    /// 5. Verify the watcher fires and refresh_tree updates tree_rows
+    #[test]
+    fn pause_task_watcher_updates_tree_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_str = db_path.to_str().unwrap();
+
+        let conn = kbtz::db::open(db_str).unwrap();
+        kbtz::db::init(&conn).unwrap();
+
+        let status_dir = TempDir::new().unwrap();
+        let mut app = App {
+            db_path: db_str.to_string(),
+            conn,
+            tree_rows: Vec::new(),
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backend: Box::new(StubBackend),
+            spawner: Box::new(StubSpawner),
+            toplevel: None,
+            rows: 24,
+            cols: 80,
+            cursor: 0,
+            collapsed: HashSet::new(),
+            error: None,
+        };
+
+        // Create an active task with a session.
+        ops::add_task(&app.conn, "t", None, "", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "t", "ws/1").unwrap();
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("t", "ws/1", true)),
+        );
+        app.task_to_session
+            .insert("t".to_string(), "ws/1".to_string());
+        app.refresh_tree().unwrap();
+
+        assert_eq!(app.tree_rows[0].status, "active");
+
+        // Set up watcher AFTER DB is stable (like tree_loop does).
+        let (_watcher, db_rx) = kbtz::watch::watch_db(db_str).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        kbtz::watch::drain_events(&db_rx);
+
+        // Simulate the confirmation handler: pause_task + continue.
+        ops::pause_task(&app.conn, "t").unwrap();
+        // (the `continue` skips watchers.poll for this iteration)
+
+        // Simulate subsequent loop iterations polling with zero timeout.
+        let mut detected = false;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(100));
+            if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
+                kbtz::watch::drain_events(&db_rx);
+                app.refresh_tree().unwrap();
+                detected = true;
+                break;
+            }
+        }
+
+        assert!(detected, "watcher never fired after pause_task");
+        assert_eq!(
+            app.tree_rows[0].status, "paused",
+            "tree_rows not updated to paused after watcher-triggered refresh"
+        );
+    }
 }
