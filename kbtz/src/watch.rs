@@ -44,6 +44,10 @@ pub fn watch_db(db_path: &str) -> Result<(RecommendedWatcher, Receiver<()>)> {
                     })
                     .unwrap_or(false)
             });
+            crate::debug_log::log(&format!(
+                "db watcher: kind={:?} dominated={dominated} paths={:?}",
+                event.kind, event.paths
+            ));
             if dominated {
                 let _ = tx.send(());
             }

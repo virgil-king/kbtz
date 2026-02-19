@@ -44,20 +44,23 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 "  "
             };
 
-            // Unified status: session indicator when a session exists,
-            // task status otherwise.
-            let (icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name) {
-                if let Some(session) = app.sessions.get(sid) {
-                    (
-                        format!("{} ", session.status().indicator()),
-                        format!(" {}", sid),
-                    )
+            // Session indicator (robot + session status) when a session
+            // exists, task status icon otherwise.  The robot prefix is a
+            // fixed-width column so names stay vertically aligned.
+            let (bot, icon, session_suffix) =
+                if let Some(sid) = app.task_to_session.get(&row.name) {
+                    if let Some(session) = app.sessions.get(sid) {
+                        (
+                            "\u{1f916}",
+                            format!("{} ", session.status().indicator()),
+                            format!(" {}", sid),
+                        )
+                    } else {
+                        ("  ", ui::icon_for_task(row).to_string(), String::new())
+                    }
                 } else {
-                    (ui::icon_for_task(row).to_string(), String::new())
-                }
-            } else {
-                (ui::icon_for_task(row).to_string(), String::new())
-            };
+                    ("  ", ui::icon_for_task(row).to_string(), String::new())
+                };
             let style = ui::status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
@@ -75,6 +78,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::raw(collapse_indicator),
+                Span::raw(bot),
                 Span::styled(icon, style),
                 Span::styled(row.name.clone(), Style::default().bold()),
                 Span::styled(session_suffix, Style::default().fg(Color::Cyan)),

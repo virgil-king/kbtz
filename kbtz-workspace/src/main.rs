@@ -113,8 +113,10 @@ impl Watchers {
     }
 
     fn poll(&self, app: &mut App) -> Result<()> {
-        if kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO) {
+        let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
+        if db_event {
             kbtz::watch::drain_events(&self.db_rx);
+            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
             app.refresh_tree()?;
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
@@ -333,9 +335,11 @@ fn tree_loop(
                         let name = name.clone();
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
+                                kbtz::debug_log::log(&format!("confirm done: {name}"));
                                 if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
                                     app.error = Some(e.to_string());
                                 }
+                                kbtz::debug_log::log("confirm done: continue (skip poll+tick)");
                             }
                             _ => {}
                         }
@@ -346,9 +350,11 @@ fn tree_loop(
                         let name = name.clone();
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
+                                kbtz::debug_log::log(&format!("confirm pause: {name}"));
                                 if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
                                     app.error = Some(e.to_string());
                                 }
+                                kbtz::debug_log::log("confirm pause: continue (skip poll+tick)");
                             }
                             _ => {}
                         }
@@ -465,7 +471,9 @@ fn tree_loop(
         }
 
         watchers.poll(app)?;
-        app.tick()?;
+        if let Some(desc) = app.tick()? {
+            kbtz::debug_log::log(&format!("tick: {desc}"));
+        }
     }
 }
 
