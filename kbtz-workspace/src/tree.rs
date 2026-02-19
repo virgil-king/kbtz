@@ -35,7 +35,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             let prefix = ui::tree_prefix(row);
 
             let collapse_indicator = if row.has_children {
-                if app.collapsed.contains(&row.name) {
+                if app.ui.collapsed.contains(&row.name) {
                     "> "
                 } else {
                     "v "
@@ -47,20 +47,20 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             // Session indicator (robot + session status) when a session
             // exists, task status icon otherwise.  The robot prefix is a
             // fixed-width column so names stay vertically aligned.
-            let (bot, icon, session_suffix) =
-                if let Some(sid) = app.task_to_session.get(&row.name) {
-                    if let Some(session) = app.sessions.get(sid) {
-                        (
-                            "\u{1f916}",
-                            format!("{} ", session.status().indicator()),
-                            format!(" {}", sid),
-                        )
-                    } else {
-                        ("  ", ui::icon_for_task(row).to_string(), String::new())
-                    }
+            let (bot, icon, session_suffix) = if let Some(sid) = app.sessions.by_task.get(&row.name)
+            {
+                if let Some(session) = app.sessions.by_id.get(sid) {
+                    (
+                        "\u{1f916}",
+                        format!("{} ", session.status().indicator()),
+                        format!(" {}", sid),
+                    )
                 } else {
                     ("  ", ui::icon_for_task(row).to_string(), String::new())
-                };
+                }
+            } else {
+                ("  ", ui::icon_for_task(row).to_string(), String::new())
+            };
             let style = ui::status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
@@ -95,7 +95,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let active = app.sessions.len();
+    let active = app.sessions.by_id.len();
     let title = if app.manual {
         format!(" kbtz-workspace ({active} sessions, manual) ")
     } else {

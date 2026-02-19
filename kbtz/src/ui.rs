@@ -124,7 +124,7 @@ pub fn status_style(status: &str) -> Style {
 pub fn icon_for_status(status: &str) -> &'static str {
     match status {
         "done" => "\u{2705} ",           // ✅
-        "active" => "\u{1f41b} ",          // 🐛 (should not appear — active tasks have sessions)
+        "active" => "\u{1f7e2} ",        // 🟢
         "paused" => "\u{23f8}\u{fe0f} ", // ⏸️
         "blocked" => "\u{1f6a7} ",       // 🚧
         _ => "\u{26aa} ",                // ⚪
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn icon_for_each_status() {
         assert!(icon_for_status("done").contains('\u{2705}'));
-        assert!(icon_for_status("active").contains('\u{1f41b}'));
+        assert!(icon_for_status("active").contains('\u{1f7e2}'));
         assert!(icon_for_status("paused").contains('\u{23f8}'));
         assert!(icon_for_status("blocked").contains('\u{1f6a7}'));
         assert!(icon_for_status("open").contains('\u{26aa}'));

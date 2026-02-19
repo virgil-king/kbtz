@@ -11,7 +11,7 @@ pub trait SessionHandle: Send {
     fn status(&self) -> &SessionStatus;
     fn set_status(&mut self, status: SessionStatus);
     fn stopping_since(&self) -> Option<Instant>;
-    fn is_alive(&mut self) -> bool;
+    fn is_alive(&self) -> bool;
     fn mark_stopping(&mut self);
     fn force_kill(&mut self);
     fn start_passthrough(&self) -> Result<()>;
@@ -56,7 +56,7 @@ impl SessionSpawner for PtySpawner {
 pub struct Session {
     pub master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    pub child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     pub passthrough: Arc<Mutex<Passthrough>>,
     pub status: SessionStatus,
     pub task_name: String,
@@ -222,8 +222,8 @@ impl SessionHandle for Session {
         self.stopping_since
     }
 
-    fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    fn is_alive(&self) -> bool {
+        matches!(self.child.lock().unwrap().try_wait(), Ok(None))
     }
 
     fn mark_stopping(&mut self) {
@@ -233,7 +233,7 @@ impl SessionHandle for Session {
     }
 
     fn force_kill(&mut self) {
-        let _ = self.child.kill();
+        let _ = self.child.get_mut().unwrap().kill();
     }
 
     fn start_passthrough(&self) -> Result<()> {
@@ -287,7 +287,7 @@ impl SessionHandle for Session {
     }
 
     fn process_id(&self) -> Option<u32> {
-        self.child.process_id()
+        self.child.lock().unwrap().process_id() // lock needed: only have &self
     }
 }
 
@@ -342,7 +342,7 @@ impl Session {
         Ok(Session {
             master: pair.master,
             writer,
-            child,
+            child: Mutex::new(child),
             passthrough,
             status: SessionStatus::Starting,
             task_name: task_name.to_string(),

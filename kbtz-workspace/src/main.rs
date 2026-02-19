@@ -102,7 +102,7 @@ struct Watchers {
 
 impl Watchers {
     fn new(app: &App) -> Result<Self> {
-        let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
+        let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db.path)?;
         let (_status_watcher, status_rx) = kbtz::watch::watch_dir(&app.status_dir)?;
         Ok(Watchers {
             _db_watcher,
@@ -116,8 +116,8 @@ impl Watchers {
         let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
         if db_event {
             kbtz::watch::drain_events(&self.db_rx);
-            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
-            app.refresh_tree()?;
+            kbtz::debug_log::log("watchers.poll: db event -> db.refresh");
+            app.db.refresh()?;
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
             kbtz::watch::drain_events(&self.status_rx);
@@ -284,8 +284,7 @@ fn tree_loop(
     running: &Arc<AtomicBool>,
 ) -> Result<Action> {
     // Catch any DB changes that happened during zoomed mode.
-    app.refresh_tree()?;
-    app.tick()?;
+    app.db.refresh()?;
 
     let watchers = Watchers::new(app)?;
     let mut mode = TreeMode::Normal;
@@ -294,6 +293,13 @@ fn tree_loop(
         if !running.load(Ordering::SeqCst) {
             return Ok(Action::Quit);
         }
+
+        // Pick up external changes, run lifecycle, then recompute tree if stale.
+        watchers.poll(app)?;
+        if let Some(desc) = app.tick()? {
+            kbtz::debug_log::log(&format!("tick: {desc}"));
+        }
+        app.ensure_tree_fresh()?;
 
         terminal.draw(|frame| {
             tree::render(frame, app);
@@ -333,30 +339,22 @@ fn tree_loop(
                 match &mode {
                     TreeMode::ConfirmDone(name) => {
                         let name = name.clone();
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Enter => {
-                                kbtz::debug_log::log(&format!("confirm done: {name}"));
-                                if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                    app.error = Some(e.to_string());
-                                }
-                                kbtz::debug_log::log("confirm done: continue (skip poll+tick)");
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                            kbtz::debug_log::log(&format!("confirm done: {name}"));
+                            if let Err(e) = kbtz::ops::mark_done(&app.db, &name) {
+                                app.error = Some(e.to_string());
                             }
-                            _ => {}
                         }
                         mode = TreeMode::Normal;
                         continue;
                     }
                     TreeMode::ConfirmPause(name) => {
                         let name = name.clone();
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Enter => {
-                                kbtz::debug_log::log(&format!("confirm pause: {name}"));
-                                if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
-                                    app.error = Some(e.to_string());
-                                }
-                                kbtz::debug_log::log("confirm pause: continue (skip poll+tick)");
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                            kbtz::debug_log::log(&format!("confirm pause: {name}"));
+                            if let Err(e) = kbtz::ops::pause_task(&app.db, &name) {
+                                app.error = Some(e.to_string());
                             }
-                            _ => {}
                         }
                         mode = TreeMode::Normal;
                         continue;
@@ -378,11 +376,10 @@ fn tree_loop(
                     }
                     KeyCode::Char(' ') => {
                         app.toggle_collapse();
-                        app.refresh_tree()?;
                     }
                     KeyCode::Enter => {
                         if let Some(name) = app.selected_name() {
-                            if app.task_to_session.contains_key(name) {
+                            if app.sessions.by_task.contains_key(name) {
                                 return Ok(Action::ZoomIn(name.to_string()));
                             } else {
                                 app.error = Some("no active session for this task".into());
@@ -394,8 +391,8 @@ fn tree_loop(
                             let name = name.to_string();
                             let status = app.tree_rows[app.cursor].status.as_str();
                             let result = match status {
-                                "paused" => kbtz::ops::unpause_task(&app.conn, &name),
-                                "open" => kbtz::ops::pause_task(&app.conn, &name),
+                                "paused" => kbtz::ops::unpause_task(&app.db, &name),
+                                "open" => kbtz::ops::pause_task(&app.db, &name),
                                 "active" => {
                                     mode = TreeMode::ConfirmPause(name);
                                     continue;
@@ -423,7 +420,7 @@ fn tree_loop(
                                     continue;
                                 }
                                 _ => {
-                                    if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                    if let Err(e) = kbtz::ops::mark_done(&app.db, &name) {
                                         app.error = Some(e.to_string());
                                     }
                                 }
@@ -433,7 +430,7 @@ fn tree_loop(
                     KeyCode::Char('U') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
-                            if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
+                            if let Err(e) = kbtz::ops::force_unassign_task(&app.db, &name) {
                                 app.error = Some(e.to_string());
                             }
                         }
@@ -469,18 +466,13 @@ fn tree_loop(
                 }
             }
         }
-
-        watchers.poll(app)?;
-        if let Some(desc) = app.tick()? {
-            kbtz::debug_log::log(&format!("tick: {desc}"));
-        }
     }
 }
 
 // ── Zoomed mode ────────────────────────────────────────────────────────
 
 fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<Action> {
-    let session_id = match app.task_to_session.get(task) {
+    let session_id = match app.sessions.by_task.get(task) {
         Some(sid) => sid.clone(),
         None => return Ok(Action::ReturnToTree),
     };
@@ -507,14 +499,14 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
 
     // Start passthrough: flushes buffered output to stdout (everything
     // the child wrote while we were in tree mode), then goes live.
-    if let Some(session) = app.sessions.get(&session_id) {
+    if let Some(session) = app.sessions.by_id.get(&session_id) {
         session.start_passthrough()?;
     }
 
     let result = zoomed_loop(app, task, &session_id, running);
 
     // Stop passthrough (resets input modes like mouse tracking)
-    if let Some(session) = app.sessions.get(&session_id) {
+    if let Some(session) = app.sessions.by_id.get(&session_id) {
         let _ = session.stop_passthrough();
     }
 
@@ -539,14 +531,14 @@ fn handle_zoomed_prefix_command(
     match cmd {
         b't' | b'd' => Ok(Some(Action::ReturnToTree)),
         b'c' => {
-            if let Some(session) = app.sessions.get(session_id) {
+            if let Some(session) = app.sessions.by_id.get(session_id) {
                 let _ = session.stop_passthrough();
             }
             Ok(Some(Action::TopLevel))
         }
         b'n' => {
             if let Some(next_task) = app.cycle_session(&Action::NextSession, task) {
-                if let Some(session) = app.sessions.get(session_id) {
+                if let Some(session) = app.sessions.by_id.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
@@ -556,7 +548,7 @@ fn handle_zoomed_prefix_command(
         }
         b'p' => {
             if let Some(prev_task) = app.cycle_session(&Action::PrevSession, task) {
-                if let Some(session) = app.sessions.get(session_id) {
+                if let Some(session) = app.sessions.by_id.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(prev_task)))
@@ -566,7 +558,7 @@ fn handle_zoomed_prefix_command(
         }
         b'\t' => {
             if let Some(next_task) = app.next_needs_input_session(Some(task)) {
-                if let Some(session) = app.sessions.get(session_id) {
+                if let Some(session) = app.sessions.by_id.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
@@ -583,7 +575,7 @@ fn handle_zoomed_prefix_command(
             }
         }
         PREFIX_KEY => {
-            if let Some(session) = app.sessions.get_mut(session_id) {
+            if let Some(session) = app.sessions.by_id.get_mut(session_id) {
                 session.write_input(&[PREFIX_KEY])?;
             }
             Ok(None)
@@ -621,7 +613,7 @@ fn zoomed_loop(
             return Ok(Action::Quit);
         }
 
-        if !app.sessions.contains_key(session_id) {
+        if !app.sessions.by_id.contains_key(session_id) {
             return Ok(Action::ReturnToTree);
         }
 
@@ -632,13 +624,13 @@ fn zoomed_loop(
             debug_msg = Some(msg);
         }
 
-        if !app.sessions.contains_key(session_id) {
+        if !app.sessions.by_id.contains_key(session_id) {
             return Ok(Action::ReturnToTree);
         }
 
         // Redraw status bar when status or debug info changes
         let mut redraw = false;
-        if let Some(session) = app.sessions.get(session_id) {
+        if let Some(session) = app.sessions.by_id.get(session_id) {
             let status = session.status().clone();
             if status != last_status {
                 last_status = status;
@@ -711,7 +703,7 @@ fn zoomed_loop(
                 while i < n && buf[i] != PREFIX_KEY {
                     i += 1;
                 }
-                if let Some(session) = app.sessions.get_mut(session_id) {
+                if let Some(session) = app.sessions.by_id.get_mut(session_id) {
                     session.write_input(&buf[start..i])?;
                 }
             }
@@ -823,7 +815,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         // Cycle to first worker session.
                         let ids = app.session_ids_ordered();
                         if let Some(first_sid) = ids.first() {
-                            if let Some(session) = app.sessions.get(first_sid) {
+                            if let Some(session) = app.sessions.by_id.get(first_sid) {
                                 let task = session.task_name().to_string();
                                 return Ok(Action::ZoomIn(task));
                             }
@@ -833,7 +825,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         // Cycle to last worker session.
                         let ids = app.session_ids_ordered();
                         if let Some(last_sid) = ids.last() {
-                            if let Some(session) = app.sessions.get(last_sid) {
+                            if let Some(session) = app.sessions.by_id.get(last_sid) {
                                 let task = session.task_name().to_string();
                                 return Ok(Action::ZoomIn(task));
                             }

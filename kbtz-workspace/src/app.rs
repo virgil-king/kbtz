@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,15 +17,85 @@ use crate::lifecycle::{
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus};
 
+/// A reactive value paired with a version counter. Bump when the underlying
+/// source changes; effects compare versions to decide whether to recompute.
+#[derive(Debug)]
+pub struct Signal<T = ()> {
+    value: T,
+    version: u64,
+}
+
+impl<T> Signal<T> {
+    pub fn new(value: T) -> Self {
+        Signal { value, version: 0 }
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+impl<T> Deref for Signal<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Signal<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.version += 1;
+        &mut self.value
+    }
+}
+
+pub struct Sessions {
+    pub by_id: HashMap<String, Box<dyn SessionHandle>>, // session_id -> session
+    pub by_task: HashMap<String, String>,               // task_name -> session_id
+}
+
+pub struct UiState {
+    pub collapsed: HashSet<String>,
+}
+
+/// Encapsulates the database connection and its cached task list.
+/// Deref coerces to `&Connection` so ops::* functions work directly.
+/// The cached tasks live in a Signal so version changes are automatic.
+pub struct Db {
+    conn: Connection,
+    pub path: String,
+    pub tasks: Signal<Vec<Task>>,
+}
+
+impl Deref for Db {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Db {
+    /// Re-read tasks from the database into the cached signal.
+    /// Called by the watcher when the DB file changes on disk.
+    pub fn refresh(&mut self) -> Result<()> {
+        let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
+        tasks.retain(|t| t.status != "done");
+        *self.tasks = tasks; // DerefMut auto-bumps version
+        Ok(())
+    }
+}
+
 pub struct App {
-    // kbtz state
-    pub db_path: String,
-    pub conn: Connection,
+    pub db: Db,
     pub tree_rows: Vec<TreeRow>,
 
+    // Reactive signals — `tree_rows` is recomputed (the "effect") whenever
+    // any version differs from the last-seen tuple.
+    pub sessions: Signal<Sessions>,
+    pub ui: Signal<UiState>,
+    tree_seen: (u64, u64, u64),
+
     // Session management
-    pub sessions: HashMap<String, Box<dyn SessionHandle>>, // session_id -> session
-    pub task_to_session: HashMap<String, String>,          // task_name -> session_id
     counter: u64,
     pub status_dir: PathBuf,
     /// In auto mode, caps how many sessions lifecycle::tick will auto-spawn.
@@ -45,7 +116,6 @@ pub struct App {
 
     // UI state (tree mode)
     pub cursor: usize,
-    pub collapsed: HashSet<String>,
     pub error: Option<String>,
 }
 
@@ -78,12 +148,23 @@ impl App {
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
-        let mut app = App {
-            db_path,
+        let mut db = Db {
             conn,
+            path: db_path,
+            tasks: Signal::new(Vec::new()),
+        };
+        db.refresh()?; // initial read — DerefMut auto-bumps version
+        let mut app = App {
+            db,
             tree_rows: Vec::new(),
-            sessions: HashMap::new(),
-            task_to_session: HashMap::new(),
+            sessions: Signal::new(Sessions {
+                by_id: HashMap::new(),
+                by_task: HashMap::new(),
+            }),
+            ui: Signal::new(UiState {
+                collapsed: HashSet::new(),
+            }),
+            tree_seen: (0, 0, 0),
             counter: 0,
             status_dir,
             max_concurrency,
@@ -95,19 +176,24 @@ impl App {
             rows,
             cols,
             cursor: 0,
-            collapsed: HashSet::new(),
             error: None,
         };
-        app.refresh_tree()?;
+        app.ensure_tree_fresh()?;
         app.spawn_toplevel()?;
         Ok(app)
     }
 
-    /// Rebuild the tree view from the database.
-    pub fn refresh_tree(&mut self) -> Result<()> {
-        let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
-        tasks.retain(|t| t.status != "done");
-        self.tree_rows = kbtz::ui::flatten_tree(&tasks, &self.collapsed, &self.conn)?;
+    /// Recompute tree_rows if any signal has changed since last computation.
+    pub fn ensure_tree_fresh(&mut self) -> Result<()> {
+        let current = (
+            self.db.tasks.version(),
+            self.sessions.version(),
+            self.ui.version(),
+        );
+        if current == self.tree_seen {
+            return Ok(());
+        }
+        self.tree_rows = kbtz::ui::flatten_tree(&self.db.tasks, &self.ui.collapsed, &self.db)?;
         if !self.tree_rows.is_empty() {
             if self.cursor >= self.tree_rows.len() {
                 self.cursor = self.tree_rows.len() - 1;
@@ -115,16 +201,18 @@ impl App {
         } else {
             self.cursor = 0;
         }
+        self.tree_seen = current;
         Ok(())
     }
 
     // ── Lifecycle state machine ────────────────────────────────────────
 
     /// Build a snapshot of the current world for the pure tick function.
-    fn snapshot(&mut self) -> WorldSnapshot {
+    fn snapshot(&self) -> WorldSnapshot {
         let sessions = self
             .sessions
-            .iter_mut()
+            .by_id
+            .iter()
             .map(|(session_id, session)| {
                 let phase = if !session.is_alive() {
                     SessionPhase::Exited
@@ -134,7 +222,7 @@ impl App {
                     SessionPhase::Running
                 };
 
-                let task = match ops::get_task(&self.conn, session.task_name()) {
+                let task = match ops::get_task(&self.db, session.task_name()) {
                     Ok(t) => Some(TaskSnapshot {
                         status: t.status,
                         assignee: t.assignee,
@@ -167,18 +255,18 @@ impl App {
         for action in actions {
             match action {
                 SessionAction::RequestExit { session_id } => {
-                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                    if let Some(session) = self.sessions.by_id.get_mut(&session_id) {
                         self.backend.request_exit(session.as_mut());
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
-                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                    if let Some(session) = self.sessions.by_id.get_mut(&session_id) {
                         session.force_kill();
                         descriptions.push(format!("{session_id} killed"));
                     }
                 }
                 SessionAction::Remove { session_id } => {
-                    if self.sessions.contains_key(&session_id) {
+                    if self.sessions.by_id.contains_key(&session_id) {
                         // If it wasn't force-killed, it exited on its own.
                         if !descriptions.iter().any(|d| d.starts_with(&session_id)) {
                             descriptions.push(format!("{session_id} exited"));
@@ -213,18 +301,19 @@ impl App {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())? {
+            match ops::claim_next_task(&self.db, &session_id, self.prefer.as_deref())? {
                 Some(task_name) => {
-                    let task = ops::get_task(&self.conn, &task_name)?;
+                    let task = ops::get_task(&self.db, &task_name)?;
                     match self.spawn_session(&task, &session_id) {
                         Ok(session) => {
-                            self.task_to_session
+                            self.sessions
+                                .by_task
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions.insert(session_id, session);
+                            self.sessions.by_id.insert(session_id, session);
                         }
                         Err(e) => {
                             // Failed to spawn — release the claim
-                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                            let _ = ops::release_task(&self.db, &task_name, &session_id);
                             self.counter -= 1;
                             self.error = Some(format!("failed to spawn session: {e}"));
                             break;
@@ -242,19 +331,19 @@ impl App {
 
     /// Claim and spawn a session for a specific task by name.
     pub fn spawn_for_task(&mut self, task_name: &str) -> Result<()> {
-        if self.task_to_session.contains_key(task_name) {
+        if self.sessions.by_task.contains_key(task_name) {
             bail!("task already has an active session");
         }
 
         self.counter += 1;
         let session_id = format!("ws/{}", self.counter);
 
-        ops::claim_task(&self.conn, task_name, &session_id)?;
+        ops::claim_task(&self.db, task_name, &session_id)?;
 
-        let task = match ops::get_task(&self.conn, task_name) {
+        let task = match ops::get_task(&self.db, task_name) {
             Ok(t) => t,
             Err(e) => {
-                let _ = ops::release_task(&self.conn, task_name, &session_id);
+                let _ = ops::release_task(&self.db, task_name, &session_id);
                 self.counter -= 1;
                 return Err(e);
             }
@@ -262,13 +351,14 @@ impl App {
 
         match self.spawn_session(&task, &session_id) {
             Ok(session) => {
-                self.task_to_session
+                self.sessions
+                    .by_task
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions.insert(session_id, session);
+                self.sessions.by_id.insert(session_id, session);
                 Ok(())
             }
             Err(e) => {
-                let _ = ops::release_task(&self.conn, task_name, &session_id);
+                let _ = ops::release_task(&self.db, task_name, &session_id);
                 self.counter -= 1;
                 Err(e)
             }
@@ -284,7 +374,7 @@ impl App {
             .toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "ws/toplevel";
-        let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
+        let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db.path)];
         let session = self.spawner.spawn(
             self.backend.command(),
             &arg_refs,
@@ -318,7 +408,7 @@ impl App {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
         let env_vars: Vec<(&str, &str)> = vec![
-            ("KBTZ_DB", &self.db_path),
+            ("KBTZ_DB", &self.db.path),
             ("KBTZ_SESSION_ID", session_id),
             ("KBTZ_TASK", &task.name),
             ("KBTZ_WORKSPACE_DIR", &status_dir_str),
@@ -335,11 +425,22 @@ impl App {
     }
 
     /// Read status files from the status directory and update session statuses.
+    /// Uses Deref (read-only, no version bump) to detect changes, then DerefMut
+    /// (bumps version) only when a status actually changed.
     pub fn read_status_files(&mut self) -> Result<()> {
-        for (session_id, session) in &mut self.sessions {
+        let mut updates: Vec<(String, SessionStatus)> = Vec::new();
+        for (session_id, session) in self.sessions.by_id.iter() {
             let path = self.status_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
-                session.set_status(SessionStatus::from_str(&content));
+                let new_status = SessionStatus::from_str(&content);
+                if *session.status() != new_status {
+                    updates.push((session_id.clone(), new_status));
+                }
+            }
+        }
+        for (session_id, status) in updates {
+            if let Some(session) = self.sessions.by_id.get_mut(&session_id) {
+                session.set_status(status);
             }
         }
         Ok(())
@@ -347,16 +448,16 @@ impl App {
 
     /// Remove a session, cleaning up its status file and releasing the task.
     fn remove_session(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.remove(session_id) {
+        if let Some(session) = self.sessions.by_id.remove(session_id) {
             let _ = session.stop_passthrough();
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
-            let _ = ops::release_task(&self.conn, &task_name, &sid);
+            let _ = ops::release_task(&self.db, &task_name, &sid);
             // Only remove the task→session mapping if it still points to this
             // session. A new session may have already claimed the same task
             // (e.g. after a pause→unpause cycle), and we must not clobber it.
-            if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
-                self.task_to_session.remove(&task_name);
+            if self.sessions.by_task.get(&task_name).map(String::as_str) == Some(session_id) {
+                self.sessions.by_task.remove(&task_name);
             }
             let _ = std::fs::remove_file(self.status_dir.join(session_id_to_filename(session_id)));
         }
@@ -366,7 +467,7 @@ impl App {
     pub fn handle_resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
-        for session in self.sessions.values() {
+        for session in self.sessions.by_id.values() {
             let _ = session.resize(rows, cols);
         }
         if let Some(ref toplevel) = self.toplevel {
@@ -392,8 +493,8 @@ impl App {
         if let Some(row) = self.tree_rows.get(self.cursor) {
             if row.has_children {
                 let name = row.name.clone();
-                if !self.collapsed.remove(&name) {
-                    self.collapsed.insert(name);
+                if !self.ui.collapsed.remove(&name) {
+                    self.ui.collapsed.insert(name);
                 }
             }
         }
@@ -405,7 +506,7 @@ impl App {
 
     /// Get an ordered list of session IDs for cycling.
     pub fn session_ids_ordered(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.sessions.keys().cloned().collect();
+        let mut ids: Vec<String> = self.sessions.by_id.keys().cloned().collect();
         ids.sort();
         ids
     }
@@ -416,7 +517,7 @@ impl App {
         if ids.is_empty() {
             return None;
         }
-        let current_sid = self.task_to_session.get(current_task)?;
+        let current_sid = self.sessions.by_task.get(current_task)?;
         let current_idx = ids.iter().position(|id| id == current_sid)?;
         let next_idx = match action {
             Action::NextSession => (current_idx + 1) % ids.len(),
@@ -431,6 +532,7 @@ impl App {
         };
         let next_sid = &ids[next_idx];
         self.sessions
+            .by_id
             .get(next_sid)
             .map(|s| s.task_name().to_string())
     }
@@ -443,6 +545,7 @@ impl App {
             .iter()
             .filter(|id| {
                 self.sessions
+                    .by_id
                     .get(*id)
                     .is_some_and(|s| *s.status() == SessionStatus::NeedsInput)
             })
@@ -450,16 +553,19 @@ impl App {
         if needs_input.is_empty() {
             return None;
         }
-        let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
+        let current_sid = current_task.and_then(|task| self.sessions.by_task.get(task));
         let idx = cycle_after(&needs_input, current_sid.as_ref());
         let sid = needs_input[idx];
-        self.sessions.get(sid).map(|s| s.task_name().to_string())
+        self.sessions
+            .by_id
+            .get(sid)
+            .map(|s| s.task_name().to_string())
     }
 
     /// Kill and release a session for a task so it can be respawned.
     pub fn restart_session(&mut self, task_name: &str) {
-        if let Some(session_id) = self.task_to_session.get(task_name).cloned() {
-            if let Some(session) = self.sessions.get_mut(&session_id) {
+        if let Some(session_id) = self.sessions.by_task.get(task_name).cloned() {
+            if let Some(session) = self.sessions.by_id.get_mut(&session_id) {
                 session.force_kill();
             }
             self.remove_session(&session_id);
@@ -472,7 +578,7 @@ impl App {
     /// GRACEFUL_TIMEOUT for them to exit before force-killing.
     pub fn shutdown(&mut self) {
         // Request exit from all sessions (workers + toplevel).
-        for session in self.sessions.values_mut() {
+        for session in self.sessions.by_id.values_mut() {
             let _ = session.stop_passthrough();
             self.backend.request_exit(session.as_mut());
         }
@@ -484,7 +590,7 @@ impl App {
         // Wait for all to exit, up to the timeout.
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
-            let workers_dead = self.sessions.values_mut().all(|s| !s.is_alive());
+            let workers_dead = self.sessions.by_id.values_mut().all(|s| !s.is_alive());
             let toplevel_dead = self.toplevel.as_mut().is_none_or(|s| !s.is_alive());
             if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
                 break;
@@ -493,15 +599,15 @@ impl App {
         }
 
         // Force-kill any stragglers and release tasks.
-        for (_, mut session) in self.sessions.drain() {
+        for (_, mut session) in self.sessions.by_id.drain() {
             if session.is_alive() {
                 session.force_kill();
             }
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
-            let _ = ops::release_task(&self.conn, &task_name, &sid);
+            let _ = ops::release_task(&self.db, &task_name, &sid);
         }
-        self.task_to_session.clear();
+        self.sessions.by_task.clear();
 
         // Force-kill top-level if still alive.
         if let Some(ref mut toplevel) = self.toplevel {
@@ -571,7 +677,7 @@ mod tests {
         fn stopping_since(&self) -> Option<Instant> {
             self.stopping_since
         }
-        fn is_alive(&mut self) -> bool {
+        fn is_alive(&self) -> bool {
             self.alive
         }
         fn mark_stopping(&mut self) {
@@ -633,12 +739,20 @@ mod tests {
     fn test_app() -> (App, TempDir) {
         let status_dir = TempDir::new().unwrap();
         let conn = kbtz::db::open_memory().unwrap();
-        let app = App {
-            db_path: ":memory:".to_string(),
+        let mut db = Db {
             conn,
+            path: ":memory:".to_string(),
+            tasks: Signal::new(Vec::new()),
+        };
+        db.refresh().unwrap();
+        let app = App {
+            db,
             tree_rows: Vec::new(),
-            sessions: HashMap::new(),
-            task_to_session: HashMap::new(),
+            sessions: Signal::new(Sessions {
+                by_id: HashMap::new(),
+                by_task: HashMap::new(),
+            }),
+            tree_seen: (0, 0, 0),
             counter: 0,
             status_dir: status_dir.path().to_path_buf(),
             max_concurrency: 2,
@@ -650,7 +764,9 @@ mod tests {
             rows: 24,
             cols: 80,
             cursor: 0,
-            collapsed: HashSet::new(),
+            ui: Signal::new(UiState {
+                collapsed: HashSet::new(),
+            }),
             error: None,
         };
         (app, status_dir)
@@ -659,33 +775,35 @@ mod tests {
     #[test]
     fn remove_session_cleans_up_mapping() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
-        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        ops::add_task(&app.db, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.db, "task-a", "ws/1").unwrap();
 
-        app.sessions.insert(
+        app.sessions.by_id.insert(
             "ws/1".to_string(),
             Box::new(StubSession::new("task-a", "ws/1", false)),
         );
-        app.task_to_session
+        app.sessions
+            .by_task
             .insert("task-a".to_string(), "ws/1".to_string());
 
         app.remove_session("ws/1");
 
-        assert!(!app.sessions.contains_key("ws/1"));
-        assert!(!app.task_to_session.contains_key("task-a"));
+        assert!(!app.sessions.by_id.contains_key("ws/1"));
+        assert!(!app.sessions.by_task.contains_key("task-a"));
     }
 
     #[test]
     fn remove_session_preserves_newer_mapping() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
-        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        ops::add_task(&app.db, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.db, "task-a", "ws/1").unwrap();
 
         // Simulate: ws/2 has already claimed the same task and updated the mapping.
-        app.task_to_session
+        app.sessions
+            .by_task
             .insert("task-a".to_string(), "ws/2".to_string());
         // But ws/1 is still in the sessions map (hasn't been cleaned up yet).
-        app.sessions.insert(
+        app.sessions.by_id.insert(
             "ws/1".to_string(),
             Box::new(StubSession::new("task-a", "ws/1", false)),
         );
@@ -693,10 +811,10 @@ mod tests {
         app.remove_session("ws/1");
 
         // ws/1 should be removed from sessions...
-        assert!(!app.sessions.contains_key("ws/1"));
+        assert!(!app.sessions.by_id.contains_key("ws/1"));
         // ...but the task_to_session mapping should still point to ws/2.
         assert_eq!(
-            app.task_to_session.get("task-a").map(String::as_str),
+            app.sessions.by_task.get("task-a").map(String::as_str),
             Some("ws/2")
         );
     }
@@ -704,14 +822,15 @@ mod tests {
     #[test]
     fn execute_actions_processes_remove() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
-        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        ops::add_task(&app.db, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.db, "task-a", "ws/1").unwrap();
 
-        app.sessions.insert(
+        app.sessions.by_id.insert(
             "ws/1".to_string(),
             Box::new(StubSession::new("task-a", "ws/1", false)),
         );
-        app.task_to_session
+        app.sessions
+            .by_task
             .insert("task-a".to_string(), "ws/1".to_string());
 
         let actions = vec![lifecycle::SessionAction::Remove {
@@ -721,22 +840,23 @@ mod tests {
         let result = app.execute_actions(actions).unwrap();
         assert!(result.is_some()); // should report "ws/1 exited"
 
-        assert!(!app.sessions.contains_key("ws/1"));
-        assert!(!app.task_to_session.contains_key("task-a"));
+        assert!(!app.sessions.by_id.contains_key("ws/1"));
+        assert!(!app.sessions.by_task.contains_key("task-a"));
     }
 
     #[test]
     fn execute_actions_remove_then_spawn() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
-        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
-        ops::add_task(&app.conn, "task-b", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.db, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.db, "task-a", "ws/1").unwrap();
+        ops::add_task(&app.db, "task-b", None, "desc", None, None, false).unwrap();
 
-        app.sessions.insert(
+        app.sessions.by_id.insert(
             "ws/1".to_string(),
             Box::new(StubSession::new("task-a", "ws/1", false)),
         );
-        app.task_to_session
+        app.sessions
+            .by_task
             .insert("task-a".to_string(), "ws/1".to_string());
         app.counter = 1; // so next session is ws/2, not ws/1
 
@@ -750,12 +870,18 @@ mod tests {
         app.execute_actions(actions).unwrap();
 
         // ws/1 removed
-        assert!(!app.sessions.contains_key("ws/1"));
+        assert!(!app.sessions.by_id.contains_key("ws/1"));
         // A new session ws/2 was spawned for a claimable task
-        assert!(app.sessions.contains_key("ws/2"));
-        let new_task = app.sessions.get("ws/2").unwrap().task_name().to_string();
+        assert!(app.sessions.by_id.contains_key("ws/2"));
+        let new_task = app
+            .sessions
+            .by_id
+            .get("ws/2")
+            .unwrap()
+            .task_name()
+            .to_string();
         assert_eq!(
-            app.task_to_session.get(&new_task).map(String::as_str),
+            app.sessions.by_task.get(&new_task).map(String::as_str),
             Some("ws/2")
         );
     }
@@ -805,82 +931,78 @@ mod tests {
         assert_eq!(cycle_after(&ids, None), 0);
     }
 
-    /// Integration test: simulates the pause-via-confirmation-dialog scenario.
-    ///
-    /// 1. Create a file-backed DB with an active task + session
-    /// 2. Set up a watcher (as tree_loop does)
-    /// 3. Call pause_task (as the confirmation handler does)
-    /// 4. Wait briefly, then poll with zero timeout (as watchers.poll does)
-    /// 5. Verify the watcher fires and refresh_tree updates tree_rows
+    /// Pause an active task, bump_db, ensure_tree_fresh → tree shows "paused".
+    /// Then tick to reap the session → session_version bumps → tree still "paused".
     #[test]
-    fn pause_task_watcher_updates_tree_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let db_str = db_path.to_str().unwrap();
-
-        let conn = kbtz::db::open(db_str).unwrap();
-        kbtz::db::init(&conn).unwrap();
-
-        let status_dir = TempDir::new().unwrap();
-        let mut app = App {
-            db_path: db_str.to_string(),
-            conn,
-            tree_rows: Vec::new(),
-            sessions: HashMap::new(),
-            task_to_session: HashMap::new(),
-            counter: 0,
-            status_dir: status_dir.path().to_path_buf(),
-            max_concurrency: 2,
-            manual: false,
-            prefer: None,
-            backend: Box::new(StubBackend),
-            spawner: Box::new(StubSpawner),
-            toplevel: None,
-            rows: 24,
-            cols: 80,
-            cursor: 0,
-            collapsed: HashSet::new(),
-            error: None,
-        };
-
-        // Create an active task with a session.
-        ops::add_task(&app.conn, "t", None, "", None, None, false).unwrap();
-        ops::claim_task(&app.conn, "t", "ws/1").unwrap();
-        app.sessions.insert(
+    fn pause_active_task_signal_flow() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.db, "t", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.db, "t", "ws/1").unwrap();
+        app.db.refresh().unwrap();
+        app.sessions.by_id.insert(
             "ws/1".to_string(),
             Box::new(StubSession::new("t", "ws/1", true)),
         );
-        app.task_to_session
+        app.sessions
+            .by_task
             .insert("t".to_string(), "ws/1".to_string());
-        app.refresh_tree().unwrap();
-
+        app.ensure_tree_fresh().unwrap();
         assert_eq!(app.tree_rows[0].status, "active");
 
-        // Set up watcher AFTER DB is stable (like tree_loop does).
-        let (_watcher, db_rx) = kbtz::watch::watch_db(db_str).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        kbtz::watch::drain_events(&db_rx);
+        // Pause the task + bump DB signal (simulates watcher firing).
+        ops::pause_task(&app.db, "t").unwrap();
+        app.db.refresh().unwrap();
 
-        // Simulate the confirmation handler: pause_task + continue.
-        ops::pause_task(&app.conn, "t").unwrap();
-        // (the `continue` skips watchers.poll for this iteration)
+        // ensure_tree_fresh picks up the change.
+        app.ensure_tree_fresh().unwrap();
+        assert_eq!(app.tree_rows[0].status, "paused");
 
-        // Simulate subsequent loop iterations polling with zero timeout.
-        let mut detected = false;
-        for _ in 0..20 {
-            std::thread::sleep(Duration::from_millis(100));
-            if kbtz::watch::wait_for_change(&db_rx, Duration::ZERO) {
-                kbtz::watch::drain_events(&db_rx);
-                app.refresh_tree().unwrap();
-                detected = true;
-                break;
-            }
-        }
+        // Tick → RequestExit → mark_stopping
+        app.tick().unwrap();
+        assert!(app
+            .sessions
+            .by_id
+            .get("ws/1")
+            .unwrap()
+            .stopping_since()
+            .is_some());
 
-        assert!(detected, "watcher never fired after pause_task");
+        // Session exits
+        app.sessions.by_id.get_mut("ws/1").unwrap().force_kill();
+
+        // Tick → Remove → remove_session (bumps session_version)
+        app.tick().unwrap();
+        assert!(!app.sessions.by_id.contains_key("ws/1"));
+        assert!(!app.sessions.by_task.contains_key("t"));
+
+        // ensure_tree_fresh still shows paused (session_version changed,
+        // so tree recomputes even though DB didn't change again).
+        app.ensure_tree_fresh().unwrap();
+        assert_eq!(app.tree_rows[0].status, "paused");
+    }
+
+    /// Without bump_db, ensure_tree_fresh is a no-op (versions match).
+    #[test]
+    fn ensure_tree_fresh_skips_when_clean() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.db, "t", None, "desc", None, None, false).unwrap();
+        app.db.refresh().unwrap();
+        app.ensure_tree_fresh().unwrap();
+        assert_eq!(app.tree_rows[0].status, "open");
+
+        // Mutate DB without bumping signal.
+        ops::claim_task(&app.db, "t", "ws/1").unwrap();
+
+        // ensure_tree_fresh is a no-op — versions haven't changed.
+        app.ensure_tree_fresh().unwrap();
         assert_eq!(
-            app.tree_rows[0].status, "paused",
-            "tree_rows not updated to paused after watcher-triggered refresh"
+            app.tree_rows[0].status, "open",
+            "tree_rows stays stale when signal not bumped"
         );
+
+        // Now bump and verify it picks up the change.
+        app.db.refresh().unwrap();
+        app.ensure_tree_fresh().unwrap();
+        assert_eq!(app.tree_rows[0].status, "active");
     }
 }
