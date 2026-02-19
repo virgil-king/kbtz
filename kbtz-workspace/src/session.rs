@@ -102,6 +102,15 @@ impl Passthrough {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
 
+        // Enter synchronized output mode (DEC Private Mode 2026).
+        // The terminal buffers all output and defers rendering until the
+        // mode is exited.  This prevents the visual "replay" of
+        // historical scrollback — the terminal still processes every
+        // byte and populates its scrollback buffer, but only paints
+        // once at the end.  Terminals that don't support this sequence
+        // simply ignore it (no regression).
+        let _ = out.write_all(b"\x1b[?2026h");
+
         // Replay raw output to recreate terminal scrollback, stripping
         // escape sequences that would trigger terminal responses and
         // appear as garbage input in the child session.
@@ -113,6 +122,9 @@ impl Passthrough {
         // corrects any display issues from buffer trimming or
         // resize-induced layout drift.
         let _ = out.write_all(&self.vte.screen().state_formatted());
+
+        // Exit synchronized output mode — the terminal renders now.
+        let _ = out.write_all(b"\x1b[?2026l");
 
         let _ = out.flush();
 
