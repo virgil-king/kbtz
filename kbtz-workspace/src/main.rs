@@ -658,7 +658,6 @@ fn handle_zoomed_prefix_command(
         b'[' => {
             if !scroll.active {
                 enter_scroll_mode(app, session_id, scroll)?;
-                draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
             }
             Ok(None)
         }
@@ -714,18 +713,22 @@ impl ScrollState {
     }
 }
 
+/// Try to enter scroll mode.  If the session has no scrollback, this is
+/// a no-op and `scroll.active` remains false.  When scroll mode IS
+/// entered, the scroll status bar is drawn immediately so the bar and
+/// `scroll.active` are always in sync.
 fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     if let Some(session) = app.sessions.get(session_id) {
         scroll.total = session.enter_scroll_mode()?;
         if scroll.total == 0 {
-            // Nothing to scroll — stay in normal mode.
-            session.exit_scroll_mode()?;
+            // Session had no scrollback — it left state untouched.
             return Ok(());
         }
         scroll.offset = 0;
         scroll.active = true;
         // Render the current viewport (offset 0 = live screen).
         session.render_scrollback(0, app.term.cols)?;
+        draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
     }
     Ok(())
 }
@@ -767,58 +770,55 @@ fn handle_scroll_input(
 ) -> Result<bool> {
     let page = (rows.saturating_sub(2)) as usize; // leave room for status bar
 
-    // Check for ESC sequences (arrow keys, mouse, etc.)
-    if buf[*i] == 0x1b && *i + 1 < n {
-        if buf[*i + 1] == b'[' && *i + 2 < n {
-            // CSI sequence
-            if buf[*i + 2] == b'A' {
-                // Up arrow
-                *i += 3;
-                let new = scroll.offset.saturating_add(1).min(scroll.total);
-                scroll_to(app, session_id, scroll, new)?;
-                return Ok(true);
-            }
-            if buf[*i + 2] == b'B' {
-                // Down arrow
-                *i += 3;
-                scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
-                return Ok(true);
-            }
-            if buf[*i + 2] == b'5' && *i + 3 < n && buf[*i + 3] == b'~' {
-                // Page Up
-                *i += 4;
-                let new = scroll.offset.saturating_add(page).min(scroll.total);
-                scroll_to(app, session_id, scroll, new)?;
-                return Ok(true);
-            }
-            if buf[*i + 2] == b'6' && *i + 3 < n && buf[*i + 3] == b'~' {
-                // Page Down
-                *i += 4;
-                scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
-                return Ok(true);
-            }
-            // SGR mouse: \x1b[<...M or \x1b[<...m
-            if buf[*i + 2] == b'<' {
-                if let Some(consumed) = parse_sgr_mouse_scroll(buf, *i, n) {
-                    *i += consumed.len;
-                    match consumed.button {
-                        64 => {
-                            // Scroll up
-                            let new = scroll.offset.saturating_add(3).min(scroll.total);
-                            scroll_to(app, session_id, scroll, new)?;
-                            return Ok(true);
-                        }
-                        65 => {
-                            // Scroll down
-                            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(3))?;
-                            return Ok(true);
-                        }
-                        _ => return Ok(true), // consume other mouse events
+    // Check for CSI sequences (arrow keys, PgUp/PgDn, mouse, etc.)
+    if buf[*i] == 0x1b && *i + 2 < n && buf[*i + 1] == b'[' {
+        if buf[*i + 2] == b'A' {
+            // Up arrow
+            *i += 3;
+            let new = scroll.offset.saturating_add(1).min(scroll.total);
+            scroll_to(app, session_id, scroll, new)?;
+            return Ok(true);
+        }
+        if buf[*i + 2] == b'B' {
+            // Down arrow
+            *i += 3;
+            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
+            return Ok(true);
+        }
+        if buf[*i + 2] == b'5' && *i + 3 < n && buf[*i + 3] == b'~' {
+            // Page Up
+            *i += 4;
+            let new = scroll.offset.saturating_add(page).min(scroll.total);
+            scroll_to(app, session_id, scroll, new)?;
+            return Ok(true);
+        }
+        if buf[*i + 2] == b'6' && *i + 3 < n && buf[*i + 3] == b'~' {
+            // Page Down
+            *i += 4;
+            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
+            return Ok(true);
+        }
+        // SGR mouse: \x1b[<...M or \x1b[<...m
+        if buf[*i + 2] == b'<' {
+            if let Some(consumed) = parse_sgr_mouse_scroll(buf, *i, n) {
+                *i += consumed.len;
+                match consumed.button {
+                    64 => {
+                        // Scroll up
+                        let new = scroll.offset.saturating_add(3).min(scroll.total);
+                        scroll_to(app, session_id, scroll, new)?;
+                        return Ok(true);
                     }
+                    65 => {
+                        // Scroll down
+                        scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(3))?;
+                        return Ok(true);
+                    }
+                    _ => return Ok(true), // consume other mouse events
                 }
             }
         }
-        // Consume unrecognized ESC sequences
+        // Consume unrecognized CSI sequences
         *i += 1;
         return Ok(true);
     }
@@ -1054,16 +1054,17 @@ fn zoomed_loop(
                     if evt.button == 64 {
                         // Scroll up → enter scroll mode and scroll up
                         enter_scroll_mode(app, session_id, &mut scroll)?;
-                        let new = scroll.offset.saturating_add(3).min(scroll.total);
-                        scroll_to(app, session_id, &mut scroll, new)?;
-                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        if scroll.active {
+                            let new = scroll.offset.saturating_add(3).min(scroll.total);
+                            scroll_to(app, session_id, &mut scroll, new)?;
+                            draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        }
                         i += evt.len;
                         continue;
                     }
                     if evt.button == 65 {
                         // Scroll down → enter scroll mode (at bottom)
                         enter_scroll_mode(app, session_id, &mut scroll)?;
-                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
                         i += evt.len;
                         continue;
                     }
@@ -1079,16 +1080,17 @@ fn zoomed_loop(
                 if buf[i + 2] == b'5' && buf[i + 3] == b'~' {
                     // PgUp → enter scroll mode and scroll up a page
                     enter_scroll_mode(app, session_id, &mut scroll)?;
-                    let new = scroll.offset.saturating_add(page).min(scroll.total);
-                    scroll_to(app, session_id, &mut scroll, new)?;
-                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    if scroll.active {
+                        let new = scroll.offset.saturating_add(page).min(scroll.total);
+                        scroll_to(app, session_id, &mut scroll, new)?;
+                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    }
                     i += 4;
                     continue;
                 }
                 if buf[i + 2] == b'6' && buf[i + 3] == b'~' {
                     // PgDn → enter scroll mode (at bottom)
                     enter_scroll_mode(app, session_id, &mut scroll)?;
-                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
                     i += 4;
                     continue;
                 }

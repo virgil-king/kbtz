@@ -169,16 +169,13 @@ impl Passthrough {
         self.vte.screen_mut().set_size(rows, cols);
     }
 
-    /// Enter scroll mode: stop forwarding live output, build a
-    /// temporary VTE from the output buffer for history navigation,
-    /// and return the number of scrollback rows available.
+    /// Enter scroll mode: build a temporary VTE from the output buffer,
+    /// check if there is any scrollback, and if so stop forwarding live
+    /// output and return the number of scrollback rows available.
     ///
-    /// The temporary VTE replays all buffered output, then switches
-    /// away from the alternate screen (if active) so the main
-    /// screen's scrollback is accessible.
+    /// Returns 0 without modifying any state when there is no scrollback
+    /// to navigate (so the caller can silently consume the event).
     fn enter_scroll_mode(&mut self) -> usize {
-        self.active = false;
-
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
         let mut scroll_vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
@@ -190,8 +187,15 @@ impl Passthrough {
             scroll_vte.process(b"\x1b[?1049l");
         }
 
+        let total = Self::scrollback_of(&mut scroll_vte);
+        if total == 0 {
+            // Nothing to scroll — leave state untouched.
+            return 0;
+        }
+
+        self.active = false;
         self.scroll_vte = Some(scroll_vte);
-        self.scrollback_available()
+        total
     }
 
     /// Exit scroll mode: discard the temporary VTE, re-render the
