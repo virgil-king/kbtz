@@ -408,7 +408,7 @@ fn resolve_heredocs(input: &str) -> Result<Vec<(usize, String, Vec<String>)>> {
             let mut found = false;
 
             while i < lines.len() {
-                if lines[i].trim() == delimiter {
+                if lines[i] == delimiter {
                     found = true;
                     i += 1;
                     break;
@@ -975,6 +975,23 @@ DESC
     }
 
     // --- exec integration tests for quoting ---
+
+    #[test]
+    fn exec_heredoc_delimiter_requires_exact_line_match() {
+        let conn = test_conn();
+        // Indented "END" in the body should NOT close the heredoc
+        let input = "\
+add my-task \"A task\"
+note my-task <<END
+before
+  END
+after
+END
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes[0].content, "before\n  END\nafter");
+    }
 
     #[test]
     fn exec_note_with_apostrophe() {
