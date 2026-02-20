@@ -265,6 +265,75 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
     }
 }
 
+// ── Passthrough screen helpers ────────────────────────────────────────
+
+/// Set up the terminal for passthrough mode: raw mode, scroll region
+/// protecting the last row (for the status bar), and clear screen.
+///
+/// Does NOT enter alternate screen — the child (e.g. Claude Code)
+/// manages its own alternate screen.  Adding a second layer would
+/// prevent shift+pgup/pgdn from reaching the child (the terminal
+/// intercepts them for scrollback, which is empty in alt screen) and
+/// would conflict when the child's alt-screen escapes are forwarded.
+fn enter_passthrough_screen(rows: u16) -> Result<()> {
+    terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r", rows - 1)?;
+    execute!(
+        stdout,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+    Ok(())
+}
+
+/// Tear down passthrough mode: reset scroll region and disable raw mode.
+fn leave_passthrough_screen() -> Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[r")?;
+    stdout.flush()?;
+    terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+// ── Stdin helpers ─────────────────────────────────────────────────────
+
+/// Poll stdin with a 100ms timeout. Returns `Some(n)` if `n` bytes were
+/// read (`0` means EOF/error), or `None` on timeout.
+fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
+    let stdin_fd = stdin.as_raw_fd();
+    let mut pfd = libc::pollfd {
+        fd: stdin_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut pfd, 1, 100) } <= 0 {
+        return None;
+    }
+    match stdin.read(buf) {
+        Ok(n) if n > 0 => Some(n),
+        _ => Some(0),
+    }
+}
+
+/// Read the command byte after a PREFIX_KEY, either from the remaining
+/// buffer or by reading one more byte from stdin. Returns `None` on
+/// EOF/error.
+fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
+    if *i < n {
+        let b = buf[*i];
+        *i += 1;
+        Some(b)
+    } else {
+        let mut cmd_buf = [0u8; 1];
+        match stdin.read(&mut cmd_buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(cmd_buf[0]),
+        }
+    }
+}
+
 // ── Tree mode ──────────────────────────────────────────────────────────
 
 fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
@@ -490,25 +559,7 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
         None => return Ok(Action::ReturnToTree),
     };
 
-    // Ensure raw mode
-    terminal::enable_raw_mode()?;
-
-    // Do NOT enter alternate screen here — the child (e.g. Claude Code)
-    // manages its own alternate screen.  Adding a second layer would
-    // prevent shift+pgup/pgdn from reaching the child (the terminal
-    // intercepts them for scrollback, which is empty in alt screen) and
-    // would conflict when the child's alt-screen escapes are forwarded.
-
-    // Set scroll region to protect the status bar on the last line.
-    // Child output stays within rows 1..(rows-1), last row is ours.
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
+    enter_passthrough_screen(app.term.rows)?;
 
     // Start passthrough: flushes buffered output to stdout (everything
     // the child wrote while we were in tree mode), then goes live.
@@ -523,13 +574,7 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
         let _ = session.stop_passthrough();
     }
 
-    // Reset scroll region
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[r")?;
-    stdout.flush()?;
-
-    terminal::disable_raw_mode()?;
-
+    leave_passthrough_screen()?;
     result
 }
 
@@ -678,40 +723,19 @@ fn zoomed_loop(
             );
         }
 
-        // Poll stdin with a timeout so we can check session liveness
-        // and watcher channels even when the user isn't typing.
-        let stdin_fd = stdin.as_raw_fd();
-        let mut pfd = libc::pollfd {
-            fd: stdin_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
-        if ready <= 0 {
-            continue;
-        }
-        let n = match stdin.read(&mut buf) {
-            Ok(0) => return Ok(Action::Quit),
-            Err(_) => return Ok(Action::Quit),
-            Ok(n) => n,
+        let n = match poll_stdin(&mut stdin, &mut buf) {
+            None => continue,
+            Some(0) => return Ok(Action::Quit),
+            Some(n) => n,
         };
 
-        // Process the buffer, scanning for PREFIX_KEY
         let mut i = 0;
         while i < n {
             if buf[i] == PREFIX_KEY {
                 i += 1;
-                // Get the command byte (from remaining buffer or a fresh read)
-                let cmd = if i < n {
-                    let b = buf[i];
-                    i += 1;
-                    b
-                } else {
-                    let mut cmd_buf = [0u8; 1];
-                    match stdin.read(&mut cmd_buf) {
-                        Ok(0) | Err(_) => return Ok(Action::Quit),
-                        Ok(_) => cmd_buf[0],
-                    }
+                let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
+                    Some(b) => b,
+                    None => return Ok(Action::Quit),
                 };
                 if let Some(action) = handle_zoomed_prefix_command(
                     cmd,
@@ -724,8 +748,6 @@ fn zoomed_loop(
                     return Ok(action);
                 }
             } else {
-                // Find the next PREFIX_KEY or end of buffer and write the
-                // entire chunk to the PTY in one call.
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
                     i += 1;
@@ -744,20 +766,8 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     // Ensure the top-level session exists (respawn if exited).
     app.ensure_toplevel()?;
 
-    // Ensure raw mode
-    terminal::enable_raw_mode()?;
+    enter_passthrough_screen(app.term.rows)?;
 
-    // Set scroll region to protect the status bar on the last line.
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
-
-    // Start passthrough
     if let Some(ref toplevel) = app.toplevel {
         toplevel.start_passthrough()?;
     }
@@ -769,14 +779,65 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
         let _ = toplevel.stop_passthrough();
     }
 
-    // Reset scroll region
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[r")?;
-    stdout.flush()?;
-
-    terminal::disable_raw_mode()?;
-
+    leave_passthrough_screen()?;
     result
+}
+
+fn handle_toplevel_prefix_command(
+    cmd: u8,
+    app: &mut App,
+    stdin: &mut io::StdinLock,
+) -> Result<Option<Action>> {
+    match cmd {
+        b't' | b'd' => Ok(Some(Action::ReturnToTree)),
+        b'n' => {
+            let ids = app.session_ids_ordered();
+            if let Some(first_sid) = ids.first() {
+                if let Some(session) = app.sessions.get(first_sid) {
+                    let task = session.task_name().to_string();
+                    return Ok(Some(Action::ZoomIn(task)));
+                }
+            }
+            Ok(None)
+        }
+        b'p' => {
+            let ids = app.session_ids_ordered();
+            if let Some(last_sid) = ids.last() {
+                if let Some(session) = app.sessions.get(last_sid) {
+                    let task = session.task_name().to_string();
+                    return Ok(Some(Action::ZoomIn(task)));
+                }
+            }
+            Ok(None)
+        }
+        b'\t' => {
+            if let Some(task) = app.next_needs_input_session(None) {
+                Ok(Some(Action::ZoomIn(task)))
+            } else {
+                draw_toplevel_status_bar(
+                    app.term.rows,
+                    app.term.cols,
+                    Some("no sessions need input"),
+                );
+                Ok(None)
+            }
+        }
+        PREFIX_KEY => {
+            if let Some(ref mut toplevel) = app.toplevel {
+                toplevel.write_input(&[PREFIX_KEY])?;
+            }
+            Ok(None)
+        }
+        b'?' => {
+            draw_toplevel_help_bar(app.term.rows, app.term.cols);
+            let mut discard = [0u8; 1];
+            let _ = stdin.read(&mut discard);
+            draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
+            Ok(None)
+        }
+        b'q' => Ok(Some(Action::Quit)),
+        _ => Ok(None),
+    }
 }
 
 fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
@@ -803,85 +864,22 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
         // Run lifecycle tick for worker sessions.
         app.tick()?;
 
-        // Poll stdin with a timeout.
-        let stdin_fd = stdin.as_raw_fd();
-        let mut pfd = libc::pollfd {
-            fd: stdin_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
-        if ready <= 0 {
-            continue;
-        }
-        let n = match stdin.read(&mut buf) {
-            Ok(0) => return Ok(Action::Quit),
-            Err(_) => return Ok(Action::Quit),
-            Ok(n) => n,
+        let n = match poll_stdin(&mut stdin, &mut buf) {
+            None => continue,
+            Some(0) => return Ok(Action::Quit),
+            Some(n) => n,
         };
 
-        // Process the buffer, scanning for PREFIX_KEY
         let mut i = 0;
         while i < n {
             if buf[i] == PREFIX_KEY {
                 i += 1;
-                let cmd = if i < n {
-                    let b = buf[i];
-                    i += 1;
-                    b
-                } else {
-                    let mut cmd_buf = [0u8; 1];
-                    match stdin.read(&mut cmd_buf) {
-                        Ok(0) | Err(_) => return Ok(Action::Quit),
-                        Ok(_) => cmd_buf[0],
-                    }
+                let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
+                    Some(b) => b,
+                    None => return Ok(Action::Quit),
                 };
-                match cmd {
-                    b't' | b'd' => return Ok(Action::ReturnToTree),
-                    b'n' => {
-                        // Cycle to first worker session.
-                        let ids = app.session_ids_ordered();
-                        if let Some(first_sid) = ids.first() {
-                            if let Some(session) = app.sessions.get(first_sid) {
-                                let task = session.task_name().to_string();
-                                return Ok(Action::ZoomIn(task));
-                            }
-                        }
-                    }
-                    b'p' => {
-                        // Cycle to last worker session.
-                        let ids = app.session_ids_ordered();
-                        if let Some(last_sid) = ids.last() {
-                            if let Some(session) = app.sessions.get(last_sid) {
-                                let task = session.task_name().to_string();
-                                return Ok(Action::ZoomIn(task));
-                            }
-                        }
-                    }
-                    b'\t' => {
-                        if let Some(task) = app.next_needs_input_session(None) {
-                            return Ok(Action::ZoomIn(task));
-                        } else {
-                            draw_toplevel_status_bar(
-                                app.term.rows,
-                                app.term.cols,
-                                Some("no sessions need input"),
-                            );
-                        }
-                    }
-                    PREFIX_KEY => {
-                        if let Some(ref mut toplevel) = app.toplevel {
-                            toplevel.write_input(&[PREFIX_KEY])?;
-                        }
-                    }
-                    b'?' => {
-                        draw_toplevel_help_bar(app.term.rows, app.term.cols);
-                        let mut discard = [0u8; 1];
-                        let _ = stdin.read(&mut discard);
-                        draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
-                    }
-                    b'q' => return Ok(Action::Quit),
-                    _ => {}
+                if let Some(action) = handle_toplevel_prefix_command(cmd, app, &mut stdin)? {
+                    return Ok(action);
                 }
             } else {
                 let start = i;
