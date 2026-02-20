@@ -113,8 +113,10 @@ impl Watchers {
     }
 
     fn poll(&self, app: &mut App) -> Result<()> {
-        if kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO) {
+        let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
+        if db_event {
             kbtz::watch::drain_events(&self.db_rx);
+            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
             app.refresh_tree()?;
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
@@ -413,26 +415,26 @@ fn tree_loop(
                 match &mode {
                     TreeMode::ConfirmDone(name) => {
                         let name = name.clone();
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Enter => {
-                                if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                    app.tree.error = Some(e.to_string());
-                                }
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                            kbtz::debug_log::log(&format!("confirm done: {name}"));
+                            if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
+                                app.tree.error = Some(e.to_string());
                             }
-                            _ => {}
+                            app.refresh_tree()?;
+                            kbtz::debug_log::log("confirm done: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
                         continue;
                     }
                     TreeMode::ConfirmPause(name) => {
                         let name = name.clone();
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Enter => {
-                                if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
-                                    app.tree.error = Some(e.to_string());
-                                }
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                            kbtz::debug_log::log(&format!("confirm pause: {name}"));
+                            if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
+                                app.tree.error = Some(e.to_string());
                             }
-                            _ => {}
+                            app.refresh_tree()?;
+                            kbtz::debug_log::log("confirm pause: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
                         continue;
@@ -481,8 +483,9 @@ fn tree_loop(
                                     Ok(())
                                 }
                             };
-                            if let Err(e) = result {
-                                app.tree.error = Some(e.to_string());
+                            match result {
+                                Ok(()) => app.refresh_tree()?,
+                                Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
                     }
@@ -498,19 +501,19 @@ fn tree_loop(
                                     mode = TreeMode::ConfirmDone(name);
                                     continue;
                                 }
-                                _ => {
-                                    if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                        app.tree.error = Some(e.to_string());
-                                    }
-                                }
+                                _ => match kbtz::ops::mark_done(&app.conn, &name) {
+                                    Ok(()) => app.refresh_tree()?,
+                                    Err(e) => app.tree.error = Some(e.to_string()),
+                                },
                             }
                         }
                     }
                     KeyCode::Char('U') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
-                            if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
-                                app.tree.error = Some(e.to_string());
+                            match kbtz::ops::force_unassign_task(&app.conn, &name) {
+                                Ok(()) => app.refresh_tree()?,
+                                Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
                     }
@@ -547,7 +550,9 @@ fn tree_loop(
         }
 
         watchers.poll(app)?;
-        app.tick()?;
+        if let Some(desc) = app.tick()? {
+            kbtz::debug_log::log(&format!("tick: {desc}"));
+        }
     }
 }
 
