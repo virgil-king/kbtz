@@ -717,6 +717,11 @@ impl ScrollState {
 fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     if let Some(session) = app.sessions.get(session_id) {
         scroll.total = session.enter_scroll_mode()?;
+        if scroll.total == 0 {
+            // Nothing to scroll — stay in normal mode.
+            session.exit_scroll_mode()?;
+            return Ok(());
+        }
         scroll.offset = 0;
         scroll.active = true;
         // Render the current viewport (offset 0 = live screen).
