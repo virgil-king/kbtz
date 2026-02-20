@@ -348,7 +348,7 @@ fn tree_loop(
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
                                 if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                    app.error = Some(e.to_string());
+                                    app.tree.error = Some(e.to_string());
                                 }
                             }
                             _ => {}
@@ -361,7 +361,7 @@ fn tree_loop(
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Enter => {
                                 if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
-                                    app.error = Some(e.to_string());
+                                    app.tree.error = Some(e.to_string());
                                 }
                             }
                             _ => {}
@@ -372,7 +372,7 @@ fn tree_loop(
                     _ => {}
                 }
 
-                app.error = None;
+                app.tree.error = None;
 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
@@ -393,14 +393,14 @@ fn tree_loop(
                             if app.task_to_session.contains_key(name) {
                                 return Ok(Action::ZoomIn(name.to_string()));
                             } else {
-                                app.error = Some("no active session for this task".into());
+                                app.tree.error = Some("no active session for this task".into());
                             }
                         }
                     }
                     KeyCode::Char('p') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
-                            let status = app.tree_rows[app.cursor].status.as_str();
+                            let status = app.tree.rows[app.tree.cursor].status.as_str();
                             let result = match status {
                                 "paused" => kbtz::ops::unpause_task(&app.conn, &name),
                                 "open" => kbtz::ops::pause_task(&app.conn, &name),
@@ -409,22 +409,22 @@ fn tree_loop(
                                     continue;
                                 }
                                 _ => {
-                                    app.error = Some(format!("cannot pause {status} task"));
+                                    app.tree.error = Some(format!("cannot pause {status} task"));
                                     Ok(())
                                 }
                             };
                             if let Err(e) = result {
-                                app.error = Some(e.to_string());
+                                app.tree.error = Some(e.to_string());
                             }
                         }
                     }
                     KeyCode::Char('d') => {
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
-                            let status = app.tree_rows[app.cursor].status.as_str();
+                            let status = app.tree.rows[app.tree.cursor].status.as_str();
                             match status {
                                 "done" => {
-                                    app.error = Some("task is already done".into());
+                                    app.tree.error = Some("task is already done".into());
                                 }
                                 "active" => {
                                     mode = TreeMode::ConfirmDone(name);
@@ -432,7 +432,7 @@ fn tree_loop(
                                 }
                                 _ => {
                                     if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                        app.error = Some(e.to_string());
+                                        app.tree.error = Some(e.to_string());
                                     }
                                 }
                             }
@@ -442,7 +442,7 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             if let Err(e) = kbtz::ops::force_unassign_task(&app.conn, &name) {
-                                app.error = Some(e.to_string());
+                                app.tree.error = Some(e.to_string());
                             }
                         }
                     }
@@ -450,7 +450,7 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             if let Err(e) = app.spawn_for_task(&name) {
-                                app.error = Some(e.to_string());
+                                app.tree.error = Some(e.to_string());
                             }
                         }
                     }
@@ -464,7 +464,7 @@ fn tree_loop(
                         if let Some(task) = app.next_needs_input_session(None) {
                             return Ok(Action::ZoomIn(task));
                         } else {
-                            app.error = Some("no sessions need input".into());
+                            app.tree.error = Some("no sessions need input".into());
                         }
                     }
                     KeyCode::Char('c') => {
@@ -503,7 +503,7 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     // Set scroll region to protect the status bar on the last line.
     // Child output stays within rows 1..(rows-1), last row is ours.
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.rows - 1)?;
+    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
     execute!(
         stdout,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -578,8 +578,8 @@ fn handle_zoomed_prefix_command(
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
                 draw_status_bar(
-                    app.rows,
-                    app.cols,
+                    app.term.rows,
+                    app.term.cols,
                     task,
                     session_id,
                     last_status,
@@ -595,10 +595,10 @@ fn handle_zoomed_prefix_command(
             Ok(None)
         }
         b'?' => {
-            draw_help_bar(app.rows, app.cols);
+            draw_help_bar(app.term.rows, app.term.cols);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
-            draw_status_bar(app.rows, app.cols, task, session_id, last_status, None);
+            draw_status_bar(app.term.rows, app.term.cols, task, session_id, last_status, None);
             Ok(None)
         }
         b'q' => Ok(Some(Action::Quit)),
@@ -620,7 +620,7 @@ fn zoomed_loop(
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
 
-    draw_status_bar(app.rows, app.cols, task, session_id, &last_status, None);
+    draw_status_bar(app.term.rows, app.term.cols, task, session_id, &last_status, None);
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -656,8 +656,8 @@ fn zoomed_loop(
         }
         if redraw {
             draw_status_bar(
-                app.rows,
-                app.cols,
+                app.term.rows,
+                app.term.cols,
                 task,
                 session_id,
                 &last_status,
@@ -736,7 +736,7 @@ fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 
     // Set scroll region to protect the status bar on the last line.
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.rows - 1)?;
+    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
     execute!(
         stdout,
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -773,7 +773,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 
     let watchers = Watchers::new(app)?;
 
-    draw_toplevel_status_bar(app.rows, app.cols, None);
+    draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -850,8 +850,8 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                             return Ok(Action::ZoomIn(task));
                         } else {
                             draw_toplevel_status_bar(
-                                app.rows,
-                                app.cols,
+                                app.term.rows,
+                                app.term.cols,
                                 Some("no sessions need input"),
                             );
                         }
@@ -862,10 +862,10 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
                         }
                     }
                     b'?' => {
-                        draw_toplevel_help_bar(app.rows, app.cols);
+                        draw_toplevel_help_bar(app.term.rows, app.term.cols);
                         let mut discard = [0u8; 1];
                         let _ = stdin.read(&mut discard);
-                        draw_toplevel_status_bar(app.rows, app.cols, None);
+                        draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
                     }
                     b'q' => return Ok(Action::Quit),
                     _ => {}

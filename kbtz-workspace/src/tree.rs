@@ -15,7 +15,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
-    if app.tree_rows.is_empty() {
+    if app.tree.rows.is_empty() {
         let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
             .style(Style::default().fg(Color::DarkGray))
             .block(
@@ -28,14 +28,15 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let items: Vec<ListItem> = app
-        .tree_rows
+        .tree
+        .rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
             let prefix = ui::tree_prefix(row);
 
             let collapse_indicator = if row.has_children {
-                if app.collapsed.contains(&row.name) {
+                if app.tree.collapsed.contains(&row.name) {
                     "> "
                 } else {
                     "v "
@@ -83,7 +84,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
             ]);
 
             let item = ListItem::new(line);
-            if i == app.cursor {
+            if i == app.tree.cursor {
                 item.style(Style::default().bg(Color::DarkGray))
             } else {
                 item
@@ -105,7 +106,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let text = if let Some(err) = &app.error {
+    let text = if let Some(err) = &app.tree.error {
         Line::from(vec![Span::styled(
             err.as_str(),
             Style::default().fg(Color::Red),
