@@ -714,11 +714,7 @@ impl ScrollState {
     }
 }
 
-fn enter_scroll_mode(
-    app: &App,
-    session_id: &str,
-    scroll: &mut ScrollState,
-) -> Result<()> {
+fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     if let Some(session) = app.sessions.get(session_id) {
         scroll.total = session.enter_scroll_mode()?;
         scroll.offset = 0;
@@ -729,11 +725,7 @@ fn enter_scroll_mode(
     Ok(())
 }
 
-fn exit_scroll_mode(
-    app: &App,
-    session_id: &str,
-    scroll: &mut ScrollState,
-) -> Result<()> {
+fn exit_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     scroll.active = false;
     scroll.offset = 0;
     if let Some(session) = app.sessions.get(session_id) {
@@ -815,15 +807,12 @@ fn handle_scroll_input(
             }
             // SGR mouse: \x1b[<...M or \x1b[<...m
             if buf[*i + 2] == b'<' {
-                if let Some(consumed) =
-                    parse_sgr_mouse_scroll(buf, *i, n)
-                {
+                if let Some(consumed) = parse_sgr_mouse_scroll(buf, *i, n) {
                     *i += consumed.len;
                     match consumed.button {
                         64 => {
                             // Scroll up
-                            let new =
-                                scroll.offset.saturating_add(3).min(scroll.total);
+                            let new = scroll.offset.saturating_add(3).min(scroll.total);
                             scroll_to(app, session_id, scroll, new)?;
                             return Ok(true);
                         }
@@ -905,7 +894,7 @@ fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouse
         return None;
     }
     let mut pos = start + 3; // skip \x1b[<
-    // Parse button number (digits before first ';')
+                             // Parse button number (digits before first ';')
     let btn_start = pos;
     while pos < n && buf[pos].is_ascii_digit() {
         pos += 1;
@@ -1081,17 +1070,12 @@ fn zoomed_loop(
             // ── Normal mode input ──────────────────────────────────
 
             // Check for SGR mouse scroll-up to auto-enter scroll mode
-            if buf[i] == 0x1b
-                && i + 2 < n
-                && buf[i + 1] == b'['
-                && buf[i + 2] == b'<'
-            {
+            if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
                 if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
                     if evt.button == 64 {
                         // Scroll up → enter scroll mode
                         enter_scroll_mode(app, session_id, &mut scroll)?;
-                        let new =
-                            scroll.offset.saturating_add(3).min(scroll.total);
+                        let new = scroll.offset.saturating_add(3).min(scroll.total);
                         scroll_to(app, session_id, &mut scroll, new)?;
                         draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
                         i += evt.len;
