@@ -58,7 +58,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
     ^B Tab          Jump to next session needing input
-    ^B [            Scroll mode (also: scroll wheel up)
+    ^B [            Scroll mode (also: scroll wheel, PgUp/PgDn)
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -1047,7 +1047,7 @@ fn zoomed_loop(
             if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
                 if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
                     if evt.button == 64 {
-                        // Scroll up → enter scroll mode
+                        // Scroll up → enter scroll mode and scroll up
                         enter_scroll_mode(app, session_id, &mut scroll)?;
                         let new = scroll.offset.saturating_add(3).min(scroll.total);
                         scroll_to(app, session_id, &mut scroll, new)?;
@@ -1055,8 +1055,36 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
+                    if evt.button == 65 {
+                        // Scroll down → enter scroll mode (at bottom)
+                        enter_scroll_mode(app, session_id, &mut scroll)?;
+                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        i += evt.len;
+                        continue;
+                    }
                     // Non-scroll mouse: discard (we own mouse reporting)
                     i += evt.len;
+                    continue;
+                }
+            }
+
+            // Check for PgUp/PgDn → enter scroll mode
+            if buf[i] == 0x1b && i + 3 < n && buf[i + 1] == b'[' {
+                let page = (app.term.rows.saturating_sub(2)) as usize;
+                if buf[i + 2] == b'5' && buf[i + 3] == b'~' {
+                    // PgUp → enter scroll mode and scroll up a page
+                    enter_scroll_mode(app, session_id, &mut scroll)?;
+                    let new = scroll.offset.saturating_add(page).min(scroll.total);
+                    scroll_to(app, session_id, &mut scroll, new)?;
+                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    i += 4;
+                    continue;
+                }
+                if buf[i + 2] == b'6' && buf[i + 3] == b'~' {
+                    // PgDn → enter scroll mode (at bottom)
+                    enter_scroll_mode(app, session_id, &mut scroll)?;
+                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    i += 4;
                     continue;
                 }
             }
@@ -1082,13 +1110,22 @@ fn zoomed_loop(
                     draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
                 }
             } else {
-                // Find the next PREFIX_KEY or ESC (potential mouse) or end of
-                // buffer and write the entire chunk to the PTY in one call.
+                // Find the next PREFIX_KEY or ESC sequence we intercept,
+                // and write the entire chunk to the PTY in one call.
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
-                    // Stop before ESC that could be an SGR mouse sequence
-                    if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
-                        break;
+                    if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
+                        // Stop before SGR mouse sequence
+                        if buf[i + 2] == b'<' {
+                            break;
+                        }
+                        // Stop before PgUp/PgDn
+                        if i + 3 < n
+                            && (buf[i + 2] == b'5' || buf[i + 2] == b'6')
+                            && buf[i + 3] == b'~'
+                        {
+                            break;
+                        }
                     }
                     i += 1;
                 }
