@@ -310,6 +310,63 @@ fn parse_exec_tokens(tokens: &[String], display_line: &str) -> Result<Command> {
     Ok(cli.command)
 }
 
+/// Tokenize a line using double-quote-only quoting rules.
+///
+/// Unlike POSIX shell quoting (used by the `shlex` crate), single quotes are
+/// treated as ordinary characters.  This means apostrophes in text like
+/// `Here's` do not start quoted strings.  Only double quotes delimit strings,
+/// with `\"` and `\\` as escape sequences inside them.  Backslashes outside
+/// double quotes are also literal.
+fn tokenize_exec_line(line: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+    let mut in_token = false;
+
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' => in_quotes = false,
+                '\\' => match chars.peek() {
+                    Some(&'"') | Some(&'\\') => {
+                        current.push(chars.next().unwrap());
+                    }
+                    _ => current.push(c),
+                },
+                _ => current.push(c),
+            }
+        } else {
+            match c {
+                '"' => {
+                    in_quotes = true;
+                    in_token = true;
+                }
+                c if c.is_ascii_whitespace() => {
+                    if in_token {
+                        tokens.push(std::mem::take(&mut current));
+                        in_token = false;
+                    }
+                }
+                _ => {
+                    current.push(c);
+                    in_token = true;
+                }
+            }
+        }
+    }
+
+    if in_quotes {
+        bail!("unterminated double quote");
+    }
+
+    if in_token {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
 /// Pre-process exec input to resolve heredoc syntax.
 ///
 /// A token of the form `<<DELIMITER` causes subsequent lines to be accumulated
@@ -330,8 +387,8 @@ fn resolve_heredocs(input: &str) -> Result<Vec<(usize, String, Vec<String>)>> {
             continue;
         }
 
-        let mut tokens = shlex::split(line)
-            .with_context(|| format!("line {lineno}: invalid shell quoting: {line}"))?;
+        let mut tokens = tokenize_exec_line(line)
+            .with_context(|| format!("line {lineno}: invalid quoting: {line}"))?;
 
         // Find heredoc markers
         let heredoc_positions: Vec<usize> = tokens
@@ -844,5 +901,145 @@ DESC
         // Returns None to signal "read from stdin"
         let result = check_note_content(None, false);
         assert_eq!(result.unwrap(), None);
+    }
+
+    // --- tokenize_exec_line unit tests ---
+
+    #[test]
+    fn tokenize_simple_words() {
+        let tokens = tokenize_exec_line("add my-task description").unwrap();
+        assert_eq!(tokens, vec!["add", "my-task", "description"]);
+    }
+
+    #[test]
+    fn tokenize_double_quoted_string() {
+        let tokens = tokenize_exec_line(r#"note task "hello world""#).unwrap();
+        assert_eq!(tokens, vec!["note", "task", "hello world"]);
+    }
+
+    #[test]
+    fn tokenize_apostrophe_unquoted() {
+        let tokens = tokenize_exec_line("note task it's-fine").unwrap();
+        assert_eq!(tokens, vec!["note", "task", "it's-fine"]);
+    }
+
+    #[test]
+    fn tokenize_escaped_quotes_inside_quotes() {
+        let tokens = tokenize_exec_line(r#"note task "say \"hello\"""#).unwrap();
+        assert_eq!(tokens, vec!["note", "task", r#"say "hello""#]);
+    }
+
+    #[test]
+    fn tokenize_escaped_backslash_inside_quotes() {
+        let tokens = tokenize_exec_line(r#"note task "path\\to""#).unwrap();
+        assert_eq!(tokens, vec!["note", "task", r"path\to"]);
+    }
+
+    #[test]
+    fn tokenize_backslash_outside_quotes_is_literal() {
+        let tokens = tokenize_exec_line(r"note task path\to\file").unwrap();
+        assert_eq!(tokens, vec!["note", "task", r"path\to\file"]);
+    }
+
+    #[test]
+    fn tokenize_empty_quoted_string() {
+        let tokens = tokenize_exec_line(r#"add task """#).unwrap();
+        assert_eq!(tokens, vec!["add", "task", ""]);
+    }
+
+    #[test]
+    fn tokenize_adjacent_quoted_and_unquoted() {
+        let tokens = tokenize_exec_line(r#""foo"bar"#).unwrap();
+        assert_eq!(tokens, vec!["foobar"]);
+    }
+
+    #[test]
+    fn tokenize_unterminated_quote_errors() {
+        assert!(tokenize_exec_line(r#"note task "oops"#).is_err());
+    }
+
+    #[test]
+    fn tokenize_empty_input() {
+        assert!(tokenize_exec_line("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tokenize_only_whitespace() {
+        assert!(tokenize_exec_line("   \t  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tokenize_heredoc_marker_preserved() {
+        let tokens = tokenize_exec_line("note task <<EOF").unwrap();
+        assert_eq!(tokens, vec!["note", "task", "<<EOF"]);
+    }
+
+    // --- exec integration tests for quoting ---
+
+    #[test]
+    fn exec_note_with_apostrophe() {
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task \"Here's the issue\"
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Here's the issue");
+    }
+
+    #[test]
+    fn exec_note_with_unquoted_apostrophe() {
+        // Apostrophe in unquoted context should not start a single-quoted string
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task Here's-a-problem
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Here's-a-problem");
+    }
+
+    #[test]
+    fn exec_add_note_flag_with_apostrophe() {
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\" -n \"It's working\"
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "It's working");
+    }
+
+    #[test]
+    fn exec_note_with_nested_double_quotes() {
+        // Double quotes inside double-quoted string should be escapable
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task \"Used the \\\"foo\\\" method\"
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "Used the \"foo\" method");
+    }
+
+    #[test]
+    fn exec_note_with_single_quotes_in_double_quotes() {
+        // Single quotes inside double-quoted strings should be literal
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\"
+note my-task \"It's got 'single quotes' inside\"
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "It's got 'single quotes' inside");
     }
 }

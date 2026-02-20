@@ -286,13 +286,14 @@ pub enum Command {
     /// Reads commands from stdin, one per line, and runs them in a single
     /// database transaction. If any command fails, all changes are rolled back.
     ///
-    /// Lines are parsed with shell quoting rules (single/double quotes, backslash
-    /// escapes). Blank lines and lines starting with # are ignored. Do not prefix
+    /// Lines are parsed with double-quote-only quoting (single quotes/apostrophes
+    /// are ordinary characters). Use \" for literal double quotes inside a quoted
+    /// string. Blank lines and lines starting with # are ignored. Do not prefix
     /// commands with "kbtz":
     ///
     ///     add my-task "A new task"
     ///     block my-task other-task
-    ///     note my-task "A note"
+    ///     note my-task "It's a note with apostrophes"
     ///
     /// Heredoc syntax is supported for multiline arguments (one per command):
     ///
