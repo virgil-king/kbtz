@@ -16,11 +16,22 @@ use crate::lifecycle::{
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus};
 
+pub struct TermSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+pub struct TreeView {
+    pub rows: Vec<TreeRow>,
+    pub cursor: usize,
+    pub collapsed: HashSet<String>,
+    pub error: Option<String>,
+}
+
 pub struct App {
     // kbtz state
     pub db_path: String,
     pub conn: Connection,
-    pub tree_rows: Vec<TreeRow>,
 
     // Session management
     pub sessions: HashMap<String, Box<dyn SessionHandle>>, // session_id -> session
@@ -39,14 +50,8 @@ pub struct App {
     // Top-level task management session (not tied to any task)
     pub toplevel: Option<Box<dyn SessionHandle>>,
 
-    // Terminal
-    pub rows: u16,
-    pub cols: u16,
-
-    // UI state (tree mode)
-    pub cursor: usize,
-    pub collapsed: HashSet<String>,
-    pub error: Option<String>,
+    pub term: TermSize,
+    pub tree: TreeView,
 }
 
 /// What the top-level loop should do next.
@@ -65,7 +70,6 @@ fn session_id_to_filename(session_id: &str) -> String {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
         status_dir: PathBuf,
@@ -73,15 +77,13 @@ impl App {
         manual: bool,
         prefer: Option<String>,
         backend: Box<dyn Backend>,
-        rows: u16,
-        cols: u16,
+        term: TermSize,
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
         let mut app = App {
             db_path,
             conn,
-            tree_rows: Vec::new(),
             sessions: HashMap::new(),
             task_to_session: HashMap::new(),
             counter: 0,
@@ -92,11 +94,13 @@ impl App {
             backend,
             spawner: Box::new(PtySpawner),
             toplevel: None,
-            rows,
-            cols,
-            cursor: 0,
-            collapsed: HashSet::new(),
-            error: None,
+            term,
+            tree: TreeView {
+                rows: Vec::new(),
+                cursor: 0,
+                collapsed: HashSet::new(),
+                error: None,
+            },
         };
         app.refresh_tree()?;
         app.spawn_toplevel()?;
@@ -107,13 +111,13 @@ impl App {
     pub fn refresh_tree(&mut self) -> Result<()> {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
         tasks.retain(|t| t.status != "done");
-        self.tree_rows = kbtz::ui::flatten_tree(&tasks, &self.collapsed, &self.conn)?;
-        if !self.tree_rows.is_empty() {
-            if self.cursor >= self.tree_rows.len() {
-                self.cursor = self.tree_rows.len() - 1;
+        self.tree.rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
+        if !self.tree.rows.is_empty() {
+            if self.tree.cursor >= self.tree.rows.len() {
+                self.tree.cursor = self.tree.rows.len() - 1;
             }
         } else {
-            self.cursor = 0;
+            self.tree.cursor = 0;
         }
         Ok(())
     }
@@ -226,7 +230,7 @@ impl App {
                             // Failed to spawn — release the claim
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                             self.counter -= 1;
-                            self.error = Some(format!("failed to spawn session: {e}"));
+                            self.tree.error = Some(format!("failed to spawn session: {e}"));
                             break;
                         }
                     }
@@ -290,8 +294,8 @@ impl App {
             &arg_refs,
             "toplevel",
             session_id,
-            self.rows,
-            self.cols,
+            self.term.rows,
+            self.term.cols,
             &env_vars,
         )?;
         self.toplevel = Some(session);
@@ -328,8 +332,8 @@ impl App {
             &arg_refs,
             &task.name,
             session_id,
-            self.rows,
-            self.cols,
+            self.term.rows,
+            self.term.cols,
             &env_vars,
         )
     }
@@ -364,8 +368,7 @@ impl App {
 
     /// Propagate terminal resize to all PTYs.
     pub fn handle_resize(&mut self, cols: u16, rows: u16) {
-        self.cols = cols;
-        self.rows = rows;
+        self.term = TermSize { rows, cols };
         for session in self.sessions.values() {
             let _ = session.resize(rows, cols);
         }
@@ -377,30 +380,33 @@ impl App {
     // Navigation
 
     pub fn move_up(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+        if self.tree.cursor > 0 {
+            self.tree.cursor -= 1;
         }
     }
 
     pub fn move_down(&mut self) {
-        if !self.tree_rows.is_empty() && self.cursor < self.tree_rows.len() - 1 {
-            self.cursor += 1;
+        if !self.tree.rows.is_empty() && self.tree.cursor < self.tree.rows.len() - 1 {
+            self.tree.cursor += 1;
         }
     }
 
     pub fn toggle_collapse(&mut self) {
-        if let Some(row) = self.tree_rows.get(self.cursor) {
+        if let Some(row) = self.tree.rows.get(self.tree.cursor) {
             if row.has_children {
                 let name = row.name.clone();
-                if !self.collapsed.remove(&name) {
-                    self.collapsed.insert(name);
+                if !self.tree.collapsed.remove(&name) {
+                    self.tree.collapsed.insert(name);
                 }
             }
         }
     }
 
     pub fn selected_name(&self) -> Option<&str> {
-        self.tree_rows.get(self.cursor).map(|r| r.name.as_str())
+        self.tree
+            .rows
+            .get(self.tree.cursor)
+            .map(|r| r.name.as_str())
     }
 
     /// Get an ordered list of session IDs for cycling.
@@ -636,7 +642,6 @@ mod tests {
         let app = App {
             db_path: ":memory:".to_string(),
             conn,
-            tree_rows: Vec::new(),
             sessions: HashMap::new(),
             task_to_session: HashMap::new(),
             counter: 0,
@@ -647,11 +652,13 @@ mod tests {
             backend: Box::new(StubBackend),
             spawner: Box::new(StubSpawner),
             toplevel: None,
-            rows: 24,
-            cols: 80,
-            cursor: 0,
-            collapsed: HashSet::new(),
-            error: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView {
+                rows: Vec::new(),
+                cursor: 0,
+                collapsed: HashSet::new(),
+                error: None,
+            },
         };
         (app, status_dir)
     }
