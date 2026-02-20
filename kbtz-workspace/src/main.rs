@@ -1317,3 +1317,75 @@ fn draw_help_bar(rows: u16, cols: u16) {
         None,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_sgr_scroll_up() {
+        let buf = b"\x1b[<64;10;5M";
+        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
+        assert_eq!(evt.button, 64);
+        assert_eq!(evt.len, buf.len());
+    }
+
+    #[test]
+    fn parse_sgr_scroll_down() {
+        let buf = b"\x1b[<65;10;5M";
+        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
+        assert_eq!(evt.button, 65);
+        assert_eq!(evt.len, buf.len());
+    }
+
+    #[test]
+    fn parse_sgr_click() {
+        let buf = b"\x1b[<0;10;5M";
+        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
+        assert_eq!(evt.button, 0);
+    }
+
+    #[test]
+    fn parse_sgr_release() {
+        // SGR release uses lowercase 'm'
+        let buf = b"\x1b[<0;10;5m";
+        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
+        assert_eq!(evt.button, 0);
+        assert_eq!(evt.len, buf.len());
+    }
+
+    #[test]
+    fn parse_sgr_incomplete_returns_none() {
+        // Missing terminator
+        let buf = b"\x1b[<64;10;5";
+        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
+    }
+
+    #[test]
+    fn parse_sgr_too_short_returns_none() {
+        let buf = b"\x1b[<";
+        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
+    }
+
+    #[test]
+    fn parse_sgr_no_button_digits_returns_none() {
+        let buf = b"\x1b[<;10;5M";
+        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
+    }
+
+    #[test]
+    fn parse_sgr_at_offset() {
+        let buf = b"xxxxx\x1b[<64;1;1M";
+        let evt = parse_sgr_mouse_scroll(buf, 5, buf.len()).unwrap();
+        assert_eq!(evt.button, 64);
+        assert_eq!(evt.len, buf.len() - 5);
+    }
+
+    #[test]
+    fn parse_sgr_large_coordinates() {
+        let buf = b"\x1b[<64;200;100M";
+        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
+        assert_eq!(evt.button, 64);
+        assert_eq!(evt.len, buf.len());
+    }
+}

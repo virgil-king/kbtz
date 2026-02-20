@@ -616,4 +616,103 @@ mod tests {
         assert!(pt.output_buffer.len() <= OUTPUT_BUFFER_MAX / 2 + 10);
         assert_eq!(&pt.output_buffer[..3], b"\x18\x1b\\");
     }
+
+    #[test]
+    fn exit_scroll_mode_discards_scroll_vte() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        assert!(pt.scroll_vte.is_some());
+
+        pt.exit_scroll_mode();
+        assert!(pt.scroll_vte.is_none());
+        assert!(pt.active);
+    }
+
+    #[test]
+    fn scroll_mode_without_altscreen_has_scrollback() {
+        // When child stays on main screen, scrollback should work.
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        let total = pt.scrollback_available();
+        assert!(total > 0, "expected scrollback on main screen");
+
+        // Render at the top of scrollback.
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, total, 80);
+        assert_eq!(applied, total);
+        let rendered = String::from_utf8_lossy(&buf);
+        assert!(
+            rendered.contains("line 0"),
+            "expected earliest line in scrollback, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn scroll_mode_altscreen_sees_main_screen_lines() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write identifiable content on main screen.
+        pt.process(b"MARKER_MAIN_SCREEN\n");
+        for _ in 0..10 {
+            pt.process(b"filler\n");
+        }
+        // Switch to alt screen.
+        pt.process(b"\x1b[?1049h");
+        pt.process(b"alt content");
+
+        pt.enter_scroll_mode();
+        let total = pt.scrollback_available();
+        assert!(total > 0);
+
+        // Render at the top of scrollback — should contain main screen content.
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, total, 80);
+        assert_eq!(applied, total);
+        let rendered = String::from_utf8_lossy(&buf);
+        assert!(
+            rendered.contains("MARKER_MAIN_SCREEN"),
+            "expected main screen content in scrollback, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn scrollback_available_zero_without_scroll_mode() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        // Without entering scroll mode, scrollback_available returns 0
+        // because no scroll_vte exists.
+        assert_eq!(pt.scrollback_available(), 0);
+    }
+
+    #[test]
+    fn scroll_mode_reenter_rebuilds_scroll_vte() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+
+        pt.enter_scroll_mode();
+        let total1 = pt.scrollback_available();
+        pt.exit_scroll_mode();
+
+        // Add more content.
+        for i in 10..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+
+        // Re-enter: scroll_vte should be rebuilt with new content.
+        pt.enter_scroll_mode();
+        let total2 = pt.scrollback_available();
+        assert!(
+            total2 > total1,
+            "expected more scrollback after adding content: {total2} <= {total1}"
+        );
+    }
 }
