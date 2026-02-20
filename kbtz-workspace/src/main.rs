@@ -776,10 +776,6 @@ fn handle_scroll_input(
             if buf[*i + 2] == b'B' {
                 // Down arrow
                 *i += 3;
-                if scroll.offset == 0 {
-                    exit_scroll_mode(app, session_id, scroll)?;
-                    return Ok(false);
-                }
                 scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
                 return Ok(true);
             }
@@ -793,16 +789,7 @@ fn handle_scroll_input(
             if buf[*i + 2] == b'6' && *i + 3 < n && buf[*i + 3] == b'~' {
                 // Page Down
                 *i += 4;
-                if scroll.offset == 0 {
-                    exit_scroll_mode(app, session_id, scroll)?;
-                    return Ok(false);
-                }
-                let new = scroll.offset.saturating_sub(page);
-                scroll_to(app, session_id, scroll, new)?;
-                if scroll.offset == 0 {
-                    exit_scroll_mode(app, session_id, scroll)?;
-                    return Ok(false);
-                }
+                scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
                 return Ok(true);
             }
             // SGR mouse: \x1b[<...M or \x1b[<...m
@@ -818,16 +805,7 @@ fn handle_scroll_input(
                         }
                         65 => {
                             // Scroll down
-                            if scroll.offset == 0 {
-                                exit_scroll_mode(app, session_id, scroll)?;
-                                return Ok(false);
-                            }
-                            let new = scroll.offset.saturating_sub(3);
-                            scroll_to(app, session_id, scroll, new)?;
-                            if scroll.offset == 0 {
-                                exit_scroll_mode(app, session_id, scroll)?;
-                                return Ok(false);
-                            }
+                            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(3))?;
                             return Ok(true);
                         }
                         _ => return Ok(true), // consume other mouse events
@@ -854,10 +832,6 @@ fn handle_scroll_input(
         }
         b'j' => {
             *i += 1;
-            if scroll.offset == 0 {
-                exit_scroll_mode(app, session_id, scroll)?;
-                return Ok(false);
-            }
             scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
             Ok(true)
         }
