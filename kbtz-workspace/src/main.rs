@@ -883,12 +883,16 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     }
 }
 
-fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
-    let left = " ^B ? help \u{2502} task manager";
-    let content = if let Some(dbg) = debug {
-        let right = format!(" [{dbg}]");
-        let gap = (cols as usize).saturating_sub(left.len() + right.len());
-        format!("{left}{:gap$}{right}", "")
+/// Draws a full-width bar on the last terminal row.
+///
+/// `style` is the ANSI SGR parameter string (e.g. "7" for reverse, "7;33" for
+/// reverse+yellow). `left` is the primary content, and `right` is an optional
+/// right-aligned annotation rendered as `" [right]"`.
+fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>) {
+    let content = if let Some(r) = right {
+        let right_str = format!(" [{r}]");
+        let gap = (cols as usize).saturating_sub(left.len() + right_str.len());
+        format!("{left}{:gap$}{right_str}", "")
     } else {
         left.to_string()
     };
@@ -897,24 +901,24 @@ fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
     let mut out = stdout.lock();
     let _ = write!(
         out,
-        "\x1b7\x1b[{rows};1H\x1b[7m{content}{:padding$}\x1b[0m\x1b8",
+        "\x1b7\x1b[{rows};1H\x1b[{style}m{content}{:padding$}\x1b[0m\x1b8",
         "",
     );
     let _ = out.flush();
 }
 
+fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
+    draw_bar(rows, cols, "7", " ^B ? help \u{2502} task manager", debug);
+}
+
 fn draw_toplevel_help_bar(rows: u16, cols: u16) {
-    let content =
-        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
+    draw_bar(
+        rows,
+        cols,
+        "7;33",
+        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
+        None,
     );
-    let _ = out.flush();
 }
 
 fn draw_status_bar(
@@ -932,34 +936,15 @@ fn draw_status_bar(
         status.indicator(),
         status.label(),
     );
-    let content = if let Some(dbg) = debug {
-        let right = format!(" [{dbg}]");
-        let gap = (cols as usize).saturating_sub(left.len() + right.len());
-        format!("{left}{:gap$}{right}", "")
-    } else {
-        left.clone()
-    };
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
+    draw_bar(rows, cols, "7", &left, debug);
 }
 
 fn draw_help_bar(rows: u16, cols: u16) {
-    let content =
-        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help";
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
+    draw_bar(
+        rows,
+        cols,
+        "7;33",
+        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
+        None,
     );
-    let _ = out.flush();
 }
