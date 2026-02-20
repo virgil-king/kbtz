@@ -598,7 +598,14 @@ fn handle_zoomed_prefix_command(
             draw_help_bar(app.term.rows, app.term.cols);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
-            draw_status_bar(app.term.rows, app.term.cols, task, session_id, last_status, None);
+            draw_status_bar(
+                app.term.rows,
+                app.term.cols,
+                task,
+                session_id,
+                last_status,
+                None,
+            );
             Ok(None)
         }
         b'q' => Ok(Some(Action::Quit)),
@@ -620,7 +627,14 @@ fn zoomed_loop(
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
 
-    draw_status_bar(app.term.rows, app.term.cols, task, session_id, &last_status, None);
+    draw_status_bar(
+        app.term.rows,
+        app.term.cols,
+        task,
+        session_id,
+        &last_status,
+        None,
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {

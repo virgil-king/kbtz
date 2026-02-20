@@ -405,7 +405,10 @@ impl App {
     }
 
     pub fn selected_name(&self) -> Option<&str> {
-        self.tree.rows.get(self.tree.cursor).map(|r| r.name.as_str())
+        self.tree
+            .rows
+            .get(self.tree.cursor)
+            .map(|r| r.name.as_str())
     }
 
     /// Get an ordered list of session IDs for cycling.
