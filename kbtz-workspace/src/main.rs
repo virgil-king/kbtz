@@ -1055,10 +1055,7 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
-                    // Non-scroll mouse: forward to child
-                    if let Some(session) = app.sessions.get_mut(session_id) {
-                        session.write_input(&buf[i..i + evt.len])?;
-                    }
+                    // Non-scroll mouse: discard (we own mouse reporting)
                     i += evt.len;
                     continue;
                 }

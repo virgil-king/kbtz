@@ -113,11 +113,12 @@ impl Passthrough {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let _ = out.write_all(&self.vte.screen().state_formatted());
-        // Ensure SGR mouse reporting is enabled so scroll wheel
-        // events arrive on stdin.  stop() disables all mouse modes,
-        // and state_formatted() only restores visual state, not input
-        // modes like mouse reporting.
-        let _ = out.write_all(b"\x1b[?1003h\x1b[?1006h");
+        // Enable SGR mouse button reporting so scroll wheel events
+        // arrive on stdin.  Mode 1000 = button events only (no
+        // motion), mode 1006 = SGR encoding.  stop() disables all
+        // mouse modes, and state_formatted() only restores visual
+        // state, not input modes.
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
 
         self.active = true;
