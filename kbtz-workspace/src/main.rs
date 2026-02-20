@@ -1043,7 +1043,7 @@ fn zoomed_loop(
 
             // ── Normal mode input ──────────────────────────────────
 
-            // Check for SGR mouse scroll-up to auto-enter scroll mode
+            // Check for SGR mouse events
             if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
                 if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
                     if evt.button == 64 {
@@ -1055,7 +1055,12 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
-                    // Other mouse events: forward to child
+                    // Non-scroll mouse: forward to child
+                    if let Some(session) = app.sessions.get_mut(session_id) {
+                        session.write_input(&buf[i..i + evt.len])?;
+                    }
+                    i += evt.len;
+                    continue;
                 }
             }
 
