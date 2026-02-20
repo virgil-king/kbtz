@@ -72,23 +72,35 @@ pub struct Session {
 /// Max scrollback rows retained per session for the scroll-back viewer.
 const SCROLLBACK_ROWS: usize = 10_000;
 
+/// Max raw output we buffer per session for scrollback replay.
+const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
+
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
 /// every byte the child writes.  When `active` is true the reader
-/// thread also forwards those bytes to stdout.  The VTE retains up
-/// to [`SCROLLBACK_ROWS`] of scrollback which the scroll-mode viewer
-/// can navigate.
+/// thread also forwards those bytes to stdout.
+///
+/// A bounded raw output buffer is kept so that scroll mode can
+/// reconstruct the full terminal history (including content that
+/// predates an alternate-screen switch) by replaying it into a
+/// temporary VTE.
 pub struct Passthrough {
     active: bool,
     vte: vt100::Parser,
+    /// Bounded buffer of raw child output for scrollback reconstruction.
+    output_buffer: Vec<u8>,
+    /// Temporary VTE used during scroll mode, built from `output_buffer`.
+    scroll_vte: Option<vt100::Parser>,
 }
 
 impl Passthrough {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
             active: false,
-            vte: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
+            vte: vt100::Parser::new(rows, cols, 0),
+            output_buffer: Vec::new(),
+            scroll_vte: None,
         }
     }
 
@@ -135,23 +147,51 @@ impl Passthrough {
 
     fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
+        self.output_buffer.extend_from_slice(data);
+        if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
+            let keep_from = self.output_buffer.len() - OUTPUT_BUFFER_MAX / 2;
+            self.output_buffer.drain(..keep_from);
+            // Terminate any escape sequence that was cut mid-stream.
+            // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends
+            // OSC/DCS sequences.
+            self.output_buffer
+                .splice(0..0, b"\x18\x1b\\".iter().copied());
+        }
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.vte.screen_mut().set_size(rows, cols);
     }
 
-    /// Enter scroll mode: stop forwarding live output and return the
-    /// number of scrollback rows available.
+    /// Enter scroll mode: stop forwarding live output, build a
+    /// temporary VTE from the output buffer for history navigation,
+    /// and return the number of scrollback rows available.
+    ///
+    /// The temporary VTE replays all buffered output, then switches
+    /// away from the alternate screen (if active) so the main
+    /// screen's scrollback is accessible.
     fn enter_scroll_mode(&mut self) -> usize {
         self.active = false;
+
+        let screen = self.vte.screen();
+        let (rows, cols) = screen.size();
+        let mut scroll_vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        scroll_vte.process(&self.output_buffer);
+
+        // If the child is on the alternate screen, switch the temp
+        // VTE back to the main screen to access its scrollback.
+        if scroll_vte.screen().alternate_screen() {
+            scroll_vte.process(b"\x1b[?1049l");
+        }
+
+        self.scroll_vte = Some(scroll_vte);
         self.scrollback_available()
     }
 
-    /// Exit scroll mode: reset the scrollback offset, re-render the
-    /// current screen, and resume live forwarding.
+    /// Exit scroll mode: discard the temporary VTE, re-render the
+    /// live screen, and resume live forwarding.
     fn exit_scroll_mode(&mut self) {
-        self.vte.screen_mut().set_scrollback(0);
+        self.scroll_vte = None;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -164,11 +204,15 @@ impl Passthrough {
     /// Set the scrollback offset and write the viewport to `out`.
     /// Returns the clamped offset actually applied.
     fn render_scrollback(&mut self, out: &mut impl Write, offset: usize, cols: u16) -> usize {
-        let max = self.scrollback_available();
+        let svte = match self.scroll_vte.as_mut() {
+            Some(v) => v,
+            None => return 0,
+        };
+        let max = Self::scrollback_of(svte);
         let clamped = offset.min(max);
-        self.vte.screen_mut().set_scrollback(clamped);
+        svte.screen_mut().set_scrollback(clamped);
 
-        for (i, row_bytes) in self.vte.screen().rows_formatted(0, cols).enumerate() {
+        for (i, row_bytes) in svte.screen().rows_formatted(0, cols).enumerate() {
             let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
@@ -180,12 +224,18 @@ impl Passthrough {
 
     /// Total scrollback rows available (not counting the visible screen).
     fn scrollback_available(&mut self) -> usize {
-        // set_scrollback clamps to the internal deque length.
-        // Probe by setting to MAX, reading back, then restoring.
-        let saved = self.vte.screen().scrollback();
-        self.vte.screen_mut().set_scrollback(usize::MAX);
-        let total = self.vte.screen().scrollback();
-        self.vte.screen_mut().set_scrollback(saved);
+        match self.scroll_vte.as_mut() {
+            Some(svte) => Self::scrollback_of(svte),
+            None => 0,
+        }
+    }
+
+    /// Probe a VTE for its total scrollback depth.
+    fn scrollback_of(vte: &mut vt100::Parser) -> usize {
+        let saved = vte.screen().scrollback();
+        vte.screen_mut().set_scrollback(usize::MAX);
+        let total = vte.screen().scrollback();
+        vte.screen_mut().set_scrollback(saved);
         total
     }
 }
@@ -493,12 +543,13 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_vte_has_scrollback() {
+    fn scroll_mode_has_scrollback() {
         let mut pt = Passthrough::new(4, 80);
         // Write enough lines to push some into scrollback.
         for i in 0..10 {
             pt.process(format!("line {i}\n").as_bytes());
         }
+        pt.enter_scroll_mode();
         assert!(
             pt.scrollback_available() > 0,
             "expected scrollback rows, got 0"
@@ -511,13 +562,13 @@ mod tests {
         for i in 0..20 {
             pt.process(format!("line {i}\n").as_bytes());
         }
+        pt.enter_scroll_mode();
         let total = pt.scrollback_available();
         assert!(total > 0);
 
         let mut buf = Vec::new();
         let applied = pt.render_scrollback(&mut buf, total, 80);
         assert_eq!(applied, total);
-        // Output should contain cursor positioning and row content.
         assert!(!buf.is_empty());
     }
 
@@ -525,9 +576,38 @@ mod tests {
     fn scroll_mode_clamps_offset() {
         let mut pt = Passthrough::new(4, 80);
         pt.process(b"hello\n");
+        pt.enter_scroll_mode();
         let total = pt.scrollback_available();
         let mut buf = Vec::new();
         let applied = pt.render_scrollback(&mut buf, total + 100, 80);
         assert_eq!(applied, total);
+    }
+
+    #[test]
+    fn scroll_mode_sees_pre_altscreen_content() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write content on the main screen.
+        for i in 0..10 {
+            pt.process(format!("main line {i}\n").as_bytes());
+        }
+        // Switch to alternate screen (like Claude Code does).
+        pt.process(b"\x1b[?1049h");
+        pt.process(b"alt screen content");
+
+        // Enter scroll mode — should see main screen scrollback.
+        pt.enter_scroll_mode();
+        assert!(
+            pt.scrollback_available() > 0,
+            "expected main screen scrollback to be visible through alt screen"
+        );
+    }
+
+    #[test]
+    fn output_buffer_trims_with_escape_cancel_prefix() {
+        let mut pt = Passthrough::new(24, 80);
+        let chunk = vec![b'x'; OUTPUT_BUFFER_MAX + 1];
+        pt.process(&chunk);
+        assert!(pt.output_buffer.len() <= OUTPUT_BUFFER_MAX / 2 + 10);
+        assert_eq!(&pt.output_buffer[..3], b"\x18\x1b\\");
     }
 }
