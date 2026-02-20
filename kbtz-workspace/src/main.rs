@@ -445,7 +445,7 @@ fn tree_loop(
                 app.tree.error = None;
 
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
+                    KeyCode::Char('q') => {
                         return Ok(Action::Quit);
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
