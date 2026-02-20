@@ -16,6 +16,10 @@ pub trait SessionHandle: Send {
     fn force_kill(&mut self);
     fn start_passthrough(&self) -> Result<()>;
     fn stop_passthrough(&self) -> Result<()>;
+    fn enter_scroll_mode(&self) -> Result<usize>;
+    fn exit_scroll_mode(&self) -> Result<()>;
+    fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize>;
+    fn scrollback_available(&self) -> Result<usize>;
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
@@ -65,67 +69,38 @@ pub struct Session {
     pub stopping_since: Option<Instant>,
 }
 
-/// Max raw output we buffer per session for scrollback replay.
-const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
+/// Max scrollback rows retained per session for the scroll-back viewer.
+const SCROLLBACK_ROWS: usize = 10_000;
 
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
-/// every byte the child writes. When `active` is true the reader
-/// thread also forwards those bytes to stdout.  On zoom-in the main
-/// thread replays the raw output buffer to recreate terminal
-/// scrollback, then sets `active` for live forwarding.
+/// every byte the child writes.  When `active` is true the reader
+/// thread also forwards those bytes to stdout.  The VTE retains up
+/// to [`SCROLLBACK_ROWS`] of scrollback which the scroll-mode viewer
+/// can navigate.
 pub struct Passthrough {
     active: bool,
     vte: vt100::Parser,
-    /// Bounded buffer of raw child output for scrollback replay.
-    output_buffer: Vec<u8>,
 }
 
 impl Passthrough {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
             active: false,
-            vte: vt100::Parser::new(rows, cols, 0),
-            output_buffer: Vec::new(),
+            vte: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
         }
     }
 
-    /// Switch to passthrough mode.  Replay the raw output buffer to
-    /// recreate terminal scrollback, then fix up the visible screen
-    /// with the VTE's current state and set `active` for live
-    /// forwarding.  Both happen under the same Mutex guard so no
-    /// child output is lost.
+    /// Switch to passthrough mode.  Render the VTE's current screen
+    /// state and set `active` for live forwarding.  Both happen under
+    /// the same Mutex guard so no child output is lost.
     fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-
-        // Enter synchronized output mode (DEC Private Mode 2026).
-        // The terminal buffers all output and defers rendering until the
-        // mode is exited.  This prevents the visual "replay" of
-        // historical scrollback — the terminal still processes every
-        // byte and populates its scrollback buffer, but only paints
-        // once at the end.  Terminals that don't support this sequence
-        // simply ignore it (no regression).
-        let _ = out.write_all(b"\x1b[?2026h");
-
-        // Replay raw output to recreate terminal scrollback, stripping
-        // escape sequences that would trigger terminal responses and
-        // appear as garbage input in the child session.
-        crate::scrollback::replay(&mut out, &self.output_buffer);
-
-        // Fix up the visible screen: state_formatted() clears the
-        // screen (without touching scrollback), redraws cell contents,
-        // positions the cursor, and restores input modes.  This
-        // corrects any display issues from buffer trimming or
-        // resize-induced layout drift.
         let _ = out.write_all(&self.vte.screen().state_formatted());
-
-        // Exit synchronized output mode — the terminal renders now.
-        let _ = out.write_all(b"\x1b[?2026l");
-
         let _ = out.flush();
 
         self.active = true;
@@ -160,20 +135,58 @@ impl Passthrough {
 
     fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
-        self.output_buffer.extend_from_slice(data);
-        if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
-            let keep_from = self.output_buffer.len() - OUTPUT_BUFFER_MAX / 2;
-            self.output_buffer.drain(..keep_from);
-            // Terminate any escape sequence that was cut mid-stream.
-            // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends
-            // OSC/DCS sequences.
-            self.output_buffer
-                .splice(0..0, b"\x18\x1b\\".iter().copied());
-        }
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.vte.screen_mut().set_size(rows, cols);
+    }
+
+    /// Enter scroll mode: stop forwarding live output and return the
+    /// number of scrollback rows available.
+    fn enter_scroll_mode(&mut self) -> usize {
+        self.active = false;
+        self.scrollback_available()
+    }
+
+    /// Exit scroll mode: reset the scrollback offset, re-render the
+    /// current screen, and resume live forwarding.
+    fn exit_scroll_mode(&mut self) {
+        self.vte.screen_mut().set_scrollback(0);
+
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(&self.vte.screen().state_formatted());
+        let _ = out.flush();
+
+        self.active = true;
+    }
+
+    /// Set the scrollback offset and write the viewport to `out`.
+    /// Returns the clamped offset actually applied.
+    fn render_scrollback(&mut self, out: &mut impl Write, offset: usize, cols: u16) -> usize {
+        let max = self.scrollback_available();
+        let clamped = offset.min(max);
+        self.vte.screen_mut().set_scrollback(clamped);
+
+        for (i, row_bytes) in self.vte.screen().rows_formatted(0, cols).enumerate() {
+            let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
+            let _ = out.write_all(&row_bytes);
+        }
+        let _ = write!(out, "\x1b[0m");
+        let _ = out.flush();
+
+        clamped
+    }
+
+    /// Total scrollback rows available (not counting the visible screen).
+    fn scrollback_available(&mut self) -> usize {
+        // set_scrollback clamps to the internal deque length.
+        // Probe by setting to MAX, reading back, then restoring.
+        let saved = self.vte.screen().scrollback();
+        self.vte.screen_mut().set_scrollback(usize::MAX);
+        let total = self.vte.screen().scrollback();
+        self.vte.screen_mut().set_scrollback(saved);
+        total
     }
 }
 
@@ -263,6 +276,40 @@ impl SessionHandle for Session {
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
             .stop();
         Ok(())
+    }
+
+    fn enter_scroll_mode(&self) -> Result<usize> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .enter_scroll_mode())
+    }
+
+    fn exit_scroll_mode(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .exit_scroll_mode();
+        Ok(())
+    }
+
+    fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .render_scrollback(&mut out, offset, cols))
+    }
+
+    fn scrollback_available(&self) -> Result<usize> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .scrollback_available())
     }
 
     fn write_input(&mut self, buf: &[u8]) -> Result<()> {
@@ -446,38 +493,41 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_accumulates_output_buffer() {
-        let mut pt = Passthrough::new(24, 80);
-        pt.process(b"hello ");
-        pt.process(b"world");
-        assert_eq!(&pt.output_buffer, b"hello world");
-    }
-
-    #[test]
-    fn passthrough_trims_output_buffer_with_escape_cancel_prefix() {
-        let mut pt = Passthrough::new(24, 80);
-        // Fill just past OUTPUT_BUFFER_MAX to trigger trim.
-        let chunk = vec![b'x'; OUTPUT_BUFFER_MAX + 1];
-        pt.process(&chunk);
-        // After trim, buffer should contain CAN+ST prefix plus ~half of max.
-        assert!(pt.output_buffer.len() <= OUTPUT_BUFFER_MAX / 2 + 10);
-        // CAN (0x18) followed by ST (ESC + backslash) at the start.
-        assert_eq!(&pt.output_buffer[..3], b"\x18\x1b\\");
-    }
-
-    #[test]
-    fn passthrough_vte_state_survives_trim() {
-        let mut pt = Passthrough::new(24, 80);
-        // Write enough to trigger trim, then write identifiable text.
-        let filler = vec![b'\n'; OUTPUT_BUFFER_MAX + 1];
-        pt.process(&filler);
-        pt.process(b"\x1b[1;1Htest");
-        // VTE should reflect the text regardless of buffer trim.
-        let screen = pt.vte.screen();
-        let contents = screen.contents();
+    fn passthrough_vte_has_scrollback() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write enough lines to push some into scrollback.
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
         assert!(
-            contents.starts_with("test"),
-            "expected 'test' at top of screen, got: {contents:?}"
+            pt.scrollback_available() > 0,
+            "expected scrollback rows, got 0"
         );
+    }
+
+    #[test]
+    fn scroll_mode_renders_viewport() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        let total = pt.scrollback_available();
+        assert!(total > 0);
+
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, total, 80);
+        assert_eq!(applied, total);
+        // Output should contain cursor positioning and row content.
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn scroll_mode_clamps_offset() {
+        let mut pt = Passthrough::new(4, 80);
+        pt.process(b"hello\n");
+        let total = pt.scrollback_available();
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, total + 100, 80);
+        assert_eq!(applied, total);
     }
 }

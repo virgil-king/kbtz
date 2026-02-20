@@ -594,6 +594,18 @@ mod tests {
         fn stop_passthrough(&self) -> Result<()> {
             Ok(())
         }
+        fn enter_scroll_mode(&self) -> Result<usize> {
+            Ok(0)
+        }
+        fn exit_scroll_mode(&self) -> Result<()> {
+            Ok(())
+        }
+        fn render_scrollback(&self, _offset: usize, _cols: u16) -> Result<usize> {
+            Ok(0)
+        }
+        fn scrollback_available(&self) -> Result<usize> {
+            Ok(0)
+        }
         fn write_input(&mut self, _buf: &[u8]) -> Result<()> {
             Ok(())
         }

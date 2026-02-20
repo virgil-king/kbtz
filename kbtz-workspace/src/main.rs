@@ -3,7 +3,6 @@ mod backend;
 mod config;
 mod lifecycle;
 mod prompt;
-mod scrollback;
 mod session;
 mod tree;
 
@@ -59,6 +58,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
     ^B Tab          Jump to next session needing input
+    ^B [            Scroll mode (also: scroll wheel up)
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -590,10 +590,19 @@ fn handle_zoomed_prefix_command(
     task: &str,
     stdin: &mut io::StdinLock,
     last_status: &SessionStatus,
+    scroll: &mut ScrollState,
 ) -> Result<Option<Action>> {
     match cmd {
-        b't' | b'd' => Ok(Some(Action::ReturnToTree)),
+        b't' | b'd' => {
+            if scroll.active {
+                exit_scroll_mode(app, session_id, scroll)?;
+            }
+            Ok(Some(Action::ReturnToTree))
+        }
         b'c' => {
+            if scroll.active {
+                exit_scroll_mode(app, session_id, scroll)?;
+            }
             if let Some(session) = app.sessions.get(session_id) {
                 let _ = session.stop_passthrough();
             }
@@ -601,6 +610,9 @@ fn handle_zoomed_prefix_command(
         }
         b'n' => {
             if let Some(next_task) = app.cycle_session(&Action::NextSession, task) {
+                if scroll.active {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                }
                 if let Some(session) = app.sessions.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
@@ -611,6 +623,9 @@ fn handle_zoomed_prefix_command(
         }
         b'p' => {
             if let Some(prev_task) = app.cycle_session(&Action::PrevSession, task) {
+                if scroll.active {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                }
                 if let Some(session) = app.sessions.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
@@ -621,6 +636,9 @@ fn handle_zoomed_prefix_command(
         }
         b'\t' => {
             if let Some(next_task) = app.next_needs_input_session(Some(task)) {
+                if scroll.active {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                }
                 if let Some(session) = app.sessions.get(session_id) {
                     let _ = session.stop_passthrough();
                 }
@@ -637,6 +655,13 @@ fn handle_zoomed_prefix_command(
                 Ok(None)
             }
         }
+        b'[' => {
+            if !scroll.active {
+                enter_scroll_mode(app, session_id, scroll)?;
+                draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
+            }
+            Ok(None)
+        }
         PREFIX_KEY => {
             if let Some(session) = app.sessions.get_mut(session_id) {
                 session.write_input(&[PREFIX_KEY])?;
@@ -647,20 +672,266 @@ fn handle_zoomed_prefix_command(
             draw_help_bar(app.term.rows, app.term.cols);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
-            draw_status_bar(
-                app.term.rows,
-                app.term.cols,
-                task,
-                session_id,
-                last_status,
-                None,
-            );
+            if scroll.active {
+                draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
+            } else {
+                draw_status_bar(
+                    app.term.rows,
+                    app.term.cols,
+                    task,
+                    session_id,
+                    last_status,
+                    None,
+                );
+            }
             Ok(None)
         }
-        b'q' => Ok(Some(Action::Quit)),
+        b'q' => {
+            if scroll.active {
+                exit_scroll_mode(app, session_id, scroll)?;
+            }
+            Ok(Some(Action::Quit))
+        }
         _ => Ok(None),
     }
 }
+
+// ── Scroll mode ────────────────────────────────────────────────────────
+
+struct ScrollState {
+    active: bool,
+    offset: usize,
+    total: usize,
+}
+
+impl ScrollState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            offset: 0,
+            total: 0,
+        }
+    }
+}
+
+fn enter_scroll_mode(
+    app: &App,
+    session_id: &str,
+    scroll: &mut ScrollState,
+) -> Result<()> {
+    if let Some(session) = app.sessions.get(session_id) {
+        scroll.total = session.enter_scroll_mode()?;
+        scroll.offset = 0;
+        scroll.active = true;
+        // Render the current viewport (offset 0 = live screen).
+        session.render_scrollback(0, app.term.cols)?;
+    }
+    Ok(())
+}
+
+fn exit_scroll_mode(
+    app: &App,
+    session_id: &str,
+    scroll: &mut ScrollState,
+) -> Result<()> {
+    scroll.active = false;
+    scroll.offset = 0;
+    if let Some(session) = app.sessions.get(session_id) {
+        session.exit_scroll_mode()?;
+    }
+    Ok(())
+}
+
+fn scroll_to(
+    app: &App,
+    session_id: &str,
+    scroll: &mut ScrollState,
+    new_offset: usize,
+) -> Result<()> {
+    if let Some(session) = app.sessions.get(session_id) {
+        scroll.offset = session.render_scrollback(new_offset, app.term.cols)?;
+        // Update total in case more scrollback accumulated while scrolled.
+        scroll.total = session.scrollback_available()?;
+    }
+    Ok(())
+}
+
+/// Handle input while in scroll mode.  Returns `Ok(true)` if the event
+/// was consumed (caller should redraw scroll status bar), `Ok(false)` if
+/// scroll mode was exited (caller should redraw normal status bar).
+fn handle_scroll_input(
+    app: &App,
+    session_id: &str,
+    scroll: &mut ScrollState,
+    buf: &[u8],
+    i: &mut usize,
+    n: usize,
+    rows: u16,
+) -> Result<bool> {
+    let page = (rows.saturating_sub(2)) as usize; // leave room for status bar
+
+    // Check for ESC sequences (arrow keys, mouse, etc.)
+    if buf[*i] == 0x1b && *i + 1 < n {
+        if buf[*i + 1] == b'[' && *i + 2 < n {
+            // CSI sequence
+            if buf[*i + 2] == b'A' {
+                // Up arrow
+                *i += 3;
+                let new = scroll.offset.saturating_add(1).min(scroll.total);
+                scroll_to(app, session_id, scroll, new)?;
+                return Ok(true);
+            }
+            if buf[*i + 2] == b'B' {
+                // Down arrow
+                *i += 3;
+                if scroll.offset == 0 {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                    return Ok(false);
+                }
+                scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
+                return Ok(true);
+            }
+            if buf[*i + 2] == b'5' && *i + 3 < n && buf[*i + 3] == b'~' {
+                // Page Up
+                *i += 4;
+                let new = scroll.offset.saturating_add(page).min(scroll.total);
+                scroll_to(app, session_id, scroll, new)?;
+                return Ok(true);
+            }
+            if buf[*i + 2] == b'6' && *i + 3 < n && buf[*i + 3] == b'~' {
+                // Page Down
+                *i += 4;
+                if scroll.offset == 0 {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                    return Ok(false);
+                }
+                let new = scroll.offset.saturating_sub(page);
+                scroll_to(app, session_id, scroll, new)?;
+                if scroll.offset == 0 {
+                    exit_scroll_mode(app, session_id, scroll)?;
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+            // SGR mouse: \x1b[<...M or \x1b[<...m
+            if buf[*i + 2] == b'<' {
+                if let Some(consumed) =
+                    parse_sgr_mouse_scroll(buf, *i, n)
+                {
+                    *i += consumed.len;
+                    match consumed.button {
+                        64 => {
+                            // Scroll up
+                            let new =
+                                scroll.offset.saturating_add(3).min(scroll.total);
+                            scroll_to(app, session_id, scroll, new)?;
+                            return Ok(true);
+                        }
+                        65 => {
+                            // Scroll down
+                            if scroll.offset == 0 {
+                                exit_scroll_mode(app, session_id, scroll)?;
+                                return Ok(false);
+                            }
+                            let new = scroll.offset.saturating_sub(3);
+                            scroll_to(app, session_id, scroll, new)?;
+                            if scroll.offset == 0 {
+                                exit_scroll_mode(app, session_id, scroll)?;
+                                return Ok(false);
+                            }
+                            return Ok(true);
+                        }
+                        _ => return Ok(true), // consume other mouse events
+                    }
+                }
+            }
+        }
+        // Consume unrecognized ESC sequences
+        *i += 1;
+        return Ok(true);
+    }
+
+    match buf[*i] {
+        b'q' | 0x1b => {
+            *i += 1;
+            exit_scroll_mode(app, session_id, scroll)?;
+            Ok(false)
+        }
+        b'k' => {
+            *i += 1;
+            let new = scroll.offset.saturating_add(1).min(scroll.total);
+            scroll_to(app, session_id, scroll, new)?;
+            Ok(true)
+        }
+        b'j' => {
+            *i += 1;
+            if scroll.offset == 0 {
+                exit_scroll_mode(app, session_id, scroll)?;
+                return Ok(false);
+            }
+            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
+            Ok(true)
+        }
+        b'g' => {
+            // Go to top of scrollback
+            *i += 1;
+            scroll_to(app, session_id, scroll, scroll.total)?;
+            Ok(true)
+        }
+        b'G' => {
+            // Go to bottom (exit scroll mode)
+            *i += 1;
+            exit_scroll_mode(app, session_id, scroll)?;
+            Ok(false)
+        }
+        _ => {
+            *i += 1;
+            Ok(true) // consume unknown keys in scroll mode
+        }
+    }
+}
+
+struct SgrMouseEvent {
+    button: u16,
+    len: usize,
+}
+
+/// Try to parse an SGR mouse sequence starting at `buf[start]`.
+/// Expected format: \x1b[<button;x;yM (or m for release).
+/// Returns None if the sequence is incomplete.
+fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouseEvent> {
+    // We expect buf[start..start+3] == \x1b[<
+    if start + 3 >= n {
+        return None;
+    }
+    let mut pos = start + 3; // skip \x1b[<
+    // Parse button number (digits before first ';')
+    let btn_start = pos;
+    while pos < n && buf[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    if pos >= n || pos == btn_start {
+        return None;
+    }
+    let button: u16 = std::str::from_utf8(&buf[btn_start..pos])
+        .ok()?
+        .parse()
+        .ok()?;
+    // Skip ;x;y and find M or m
+    while pos < n && buf[pos] != b'M' && buf[pos] != b'm' {
+        pos += 1;
+    }
+    if pos >= n {
+        return None; // incomplete
+    }
+    pos += 1; // consume M/m
+    Some(SgrMouseEvent {
+        button,
+        len: pos - start,
+    })
+}
+
+// ── Zoomed loop ────────────────────────────────────────────────────────
 
 fn zoomed_loop(
     app: &mut App,
@@ -672,6 +943,7 @@ fn zoomed_loop(
     let mut stdin = stdin.lock();
     let mut buf = [0u8; 4096];
     let mut last_status = SessionStatus::Starting;
+    let mut scroll = ScrollState::new();
 
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
@@ -717,7 +989,7 @@ fn zoomed_loop(
         if debug_msg.is_some() {
             redraw = true;
         }
-        if redraw {
+        if redraw && !scroll.active {
             draw_status_bar(
                 app.term.rows,
                 app.term.cols,
@@ -736,6 +1008,99 @@ fn zoomed_loop(
 
         let mut i = 0;
         while i < n {
+            // ── Scroll mode input ──────────────────────────────────
+            if scroll.active {
+                // PREFIX_KEY commands still work in scroll mode
+                if buf[i] == PREFIX_KEY {
+                    i += 1;
+                    let cmd = if i < n {
+                        let b = buf[i];
+                        i += 1;
+                        b
+                    } else {
+                        let mut cmd_buf = [0u8; 1];
+                        match stdin.read(&mut cmd_buf) {
+                            Ok(0) | Err(_) => return Ok(Action::Quit),
+                            Ok(_) => cmd_buf[0],
+                        }
+                    };
+                    if let Some(action) = handle_zoomed_prefix_command(
+                        cmd,
+                        app,
+                        session_id,
+                        task,
+                        &mut stdin,
+                        &last_status,
+                        &mut scroll,
+                    )? {
+                        return Ok(action);
+                    }
+                    if scroll.active {
+                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    } else {
+                        draw_status_bar(
+                            app.term.rows,
+                            app.term.cols,
+                            task,
+                            session_id,
+                            &last_status,
+                            None,
+                        );
+                    }
+                    continue;
+                }
+
+                match handle_scroll_input(
+                    app,
+                    session_id,
+                    &mut scroll,
+                    &buf,
+                    &mut i,
+                    n,
+                    app.term.rows,
+                )? {
+                    true => {
+                        // Still in scroll mode — update status bar
+                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    }
+                    false => {
+                        // Exited scroll mode — restore screen and status
+                        draw_status_bar(
+                            app.term.rows,
+                            app.term.cols,
+                            task,
+                            session_id,
+                            &last_status,
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // ── Normal mode input ──────────────────────────────────
+
+            // Check for SGR mouse scroll-up to auto-enter scroll mode
+            if buf[i] == 0x1b
+                && i + 2 < n
+                && buf[i + 1] == b'['
+                && buf[i + 2] == b'<'
+            {
+                if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
+                    if evt.button == 64 {
+                        // Scroll up → enter scroll mode
+                        enter_scroll_mode(app, session_id, &mut scroll)?;
+                        let new =
+                            scroll.offset.saturating_add(3).min(scroll.total);
+                        scroll_to(app, session_id, &mut scroll, new)?;
+                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        i += evt.len;
+                        continue;
+                    }
+                    // Other mouse events: forward to child
+                }
+            }
+
             if buf[i] == PREFIX_KEY {
                 i += 1;
                 let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
@@ -749,20 +1114,48 @@ fn zoomed_loop(
                     task,
                     &mut stdin,
                     &last_status,
+                    &mut scroll,
                 )? {
                     return Ok(action);
                 }
+                if scroll.active {
+                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                }
             } else {
+                // Find the next PREFIX_KEY or ESC (potential mouse) or end of
+                // buffer and write the entire chunk to the PTY in one call.
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
+                    // Stop before ESC that could be an SGR mouse sequence
+                    if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
+                        break;
+                    }
                     i += 1;
                 }
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    session.write_input(&buf[start..i])?;
+                if i > start {
+                    if let Some(session) = app.sessions.get_mut(session_id) {
+                        session.write_input(&buf[start..i])?;
+                    }
                 }
             }
         }
     }
+}
+
+fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
+    let content = format!(
+        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom",
+        scroll.offset, scroll.total,
+    );
+    let padding = (cols as usize).saturating_sub(content.len());
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = write!(
+        out,
+        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
+        "",
+    );
+    let _ = out.flush();
 }
 
 // ── Top-level mode ─────────────────────────────────────────────────────
@@ -960,7 +1353,7 @@ fn draw_help_bar(rows: u16, cols: u16) {
         rows,
         cols,
         "7;33",
-        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
+        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
         None,
     );
 }
