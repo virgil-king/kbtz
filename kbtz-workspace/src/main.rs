@@ -197,8 +197,7 @@ fn run() -> Result<()> {
         manual,
         prefer,
         backend,
-        rows,
-        cols,
+        app::TermSize { rows, cols },
     )?;
 
     // Initial session spawning

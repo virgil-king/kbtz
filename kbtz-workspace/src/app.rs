@@ -70,7 +70,6 @@ fn session_id_to_filename(session_id: &str) -> String {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
         status_dir: PathBuf,
@@ -78,8 +77,7 @@ impl App {
         manual: bool,
         prefer: Option<String>,
         backend: Box<dyn Backend>,
-        rows: u16,
-        cols: u16,
+        term: TermSize,
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
@@ -96,7 +94,7 @@ impl App {
             backend,
             spawner: Box::new(PtySpawner),
             toplevel: None,
-            term: TermSize { rows, cols },
+            term,
             tree: TreeView {
                 rows: Vec::new(),
                 cursor: 0,
