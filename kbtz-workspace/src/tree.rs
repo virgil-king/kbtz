@@ -198,7 +198,7 @@ pub fn render_help(frame: &mut Frame) {
             Span::raw("Force-unassign task"),
         ]),
         Line::from(vec![
-            Span::styled("  q/Esc      ", Style::default().fg(Color::Cyan)),
+            Span::styled("  q          ", Style::default().fg(Color::Cyan)),
             Span::raw("Quit (releases all sessions)"),
         ]),
         Line::raw(""),
