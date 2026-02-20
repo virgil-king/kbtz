@@ -102,6 +102,16 @@ kbtz note my-task "Fix applied, running tests"
 kbtz block child-one child-two
 ```
 
+**Session suspension:** When your task becomes blocked (either because you set up a blocking relationship or because another agent blocks you), your session will be suspended. A new session will be spawned when the task becomes unblocked. Before blocking your task, always:
+
+1. Add notes capturing your current progress, decisions made, and enough context for a fresh session to resume the work.
+2. Clean up running processes, temp files, or other resources.
+
+```bash
+kbtz note my-task "Progress: implemented X, Y remains. Next step: finish Y after blocker resolves."
+kbtz block blocker-task my-task
+```
+
 ### Viewing task tree
 
 ```bash
