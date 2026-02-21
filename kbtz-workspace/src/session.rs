@@ -195,17 +195,27 @@ impl Passthrough {
 
         self.active = false;
         self.scroll_vte = Some(scroll_vte);
+
+        // Disable mouse tracking so the terminal handles text
+        // selection natively while in scroll mode.
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l");
+        let _ = out.flush();
+
         total
     }
 
     /// Exit scroll mode: discard the temporary VTE, re-render the
-    /// live screen, and resume live forwarding.
+    /// live screen, re-enable mouse tracking, and resume live forwarding.
     fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let _ = out.write_all(&self.vte.screen().state_formatted());
+        // Re-enable SGR mouse button reporting for scroll wheel detection.
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
 
         self.active = true;

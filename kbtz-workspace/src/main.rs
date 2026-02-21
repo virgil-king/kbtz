@@ -798,26 +798,8 @@ fn handle_scroll_input(
             scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
             return Ok(true);
         }
-        // SGR mouse: \x1b[<...M or \x1b[<...m
-        if buf[*i + 2] == b'<' {
-            if let Some(consumed) = parse_sgr_mouse_scroll(buf, *i, n) {
-                *i += consumed.len;
-                match consumed.button {
-                    64 => {
-                        // Scroll up
-                        let new = scroll.offset.saturating_add(3).min(scroll.total);
-                        scroll_to(app, session_id, scroll, new)?;
-                        return Ok(true);
-                    }
-                    65 => {
-                        // Scroll down
-                        scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(3))?;
-                        return Ok(true);
-                    }
-                    _ => return Ok(true), // consume other mouse events
-                }
-            }
-        }
+        // Mouse tracking is disabled in scroll mode (to allow native
+        // text selection), so SGR mouse events won't arrive here.
         // Consume unrecognized CSI sequences
         *i += 1;
         return Ok(true);
@@ -1148,7 +1130,7 @@ fn zoomed_loop(
 
 fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
     let content = format!(
-        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom",
+        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom  mouse:select",
         scroll.offset, scroll.total,
     );
     let padding = (cols as usize).saturating_sub(content.len());
