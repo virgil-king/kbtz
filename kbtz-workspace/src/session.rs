@@ -20,6 +20,7 @@ pub trait SessionHandle: Send {
     fn exit_scroll_mode(&self) -> Result<()>;
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize>;
     fn scrollback_available(&self) -> Result<usize>;
+    fn has_mouse_tracking(&self) -> bool;
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
@@ -105,19 +106,26 @@ impl Passthrough {
     }
 
     /// Switch to passthrough mode.  Render the VTE's current screen
-    /// state and set `active` for live forwarding.  Both happen under
-    /// the same Mutex guard so no child output is lost.
+    /// state plus input modes and set `active` for live forwarding.
+    /// Both happen under the same Mutex guard so no child output is
+    /// lost.
     fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let _ = out.write_all(&self.vte.screen().state_formatted());
-        // Enable SGR mouse button reporting so scroll wheel events
-        // arrive on stdin.  Mode 1000 = button events only (no
-        // motion), mode 1006 = SGR encoding.  stop() disables all
-        // mouse modes, and state_formatted() only restores visual
-        // state, not input modes.
+        // Restore the child's input modes (bracketed paste, keypad
+        // mode, cursor key mode, and any mouse tracking the child
+        // requested).  stop() resets all of these to prevent leaking
+        // into tree mode; state_formatted() only restores visual
+        // state, so we need input_mode_formatted() separately.
+        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
+        // Always enable SGR mouse button reporting so scroll wheel
+        // events trigger scroll mode.  Native text selection still
+        // works by holding Shift (standard terminal behavior, same
+        // as tmux).  Non-scroll mouse events are forwarded to the
+        // child when it has its own mouse tracking.
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
 
@@ -217,10 +225,19 @@ impl Passthrough {
             let _ = out.write_all(b"\x1b[?1049h");
         }
         let _ = out.write_all(&self.vte.screen().state_formatted());
+        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
 
         self.active = true;
+    }
+
+    /// Whether the child has requested any mouse tracking mode.
+    fn has_mouse_tracking(&self) -> bool {
+        !matches!(
+            self.vte.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None
+        )
     }
 
     /// Set the scrollback offset and write the viewport to `out`.
@@ -386,6 +403,13 @@ impl SessionHandle for Session {
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
             .scrollback_available())
+    }
+
+    fn has_mouse_tracking(&self) -> bool {
+        self.passthrough
+            .lock()
+            .map(|pt| pt.has_mouse_tracking())
+            .unwrap_or(false)
     }
 
     fn write_input(&mut self, buf: &[u8]) -> Result<()> {
@@ -768,6 +792,69 @@ mod tests {
         assert!(
             total2 > total1,
             "expected more scrollback after adding content: {total2} <= {total1}"
+        );
+    }
+
+    #[test]
+    fn has_mouse_tracking_default_false() {
+        let pt = Passthrough::new(24, 80);
+        assert!(!pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1000() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1000h enables PressRelease mouse tracking.
+        pt.process(b"\x1b[?1000h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1002() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1002h enables ButtonMotion mouse tracking.
+        pt.process(b"\x1b[?1002h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1003() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1003h enables AnyMotion mouse tracking.
+        pt.process(b"\x1b[?1003h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_false_after_disable() {
+        let mut pt = Passthrough::new(24, 80);
+        pt.process(b"\x1b[?1000h");
+        assert!(pt.has_mouse_tracking());
+        pt.process(b"\x1b[?1000l");
+        assert!(!pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn input_mode_formatted_includes_bracketed_paste() {
+        let mut pt = Passthrough::new(24, 80);
+        // Enable bracketed paste in the child.
+        pt.process(b"\x1b[?2004h");
+        let modes = pt.vte.screen().input_mode_formatted();
+        assert!(
+            modes.windows(8).any(|w| w == b"\x1b[?2004h"),
+            "expected bracketed paste enable in input_mode_formatted()"
+        );
+    }
+
+    #[test]
+    fn input_mode_formatted_includes_mouse_tracking() {
+        let mut pt = Passthrough::new(24, 80);
+        // Enable PressRelease mouse tracking + SGR encoding in the child.
+        pt.process(b"\x1b[?1000h\x1b[?1006h");
+        let modes = pt.vte.screen().input_mode_formatted();
+        assert!(
+            modes.windows(8).any(|w| w == b"\x1b[?1000h"),
+            "expected mouse tracking enable in input_mode_formatted()"
         );
     }
 }

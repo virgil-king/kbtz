@@ -606,6 +606,9 @@ mod tests {
         fn scrollback_available(&self) -> Result<usize> {
             Ok(0)
         }
+        fn has_mouse_tracking(&self) -> bool {
+            false
+        }
         fn write_input(&mut self, _buf: &[u8]) -> Result<()> {
             Ok(())
         }
