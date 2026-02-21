@@ -223,7 +223,11 @@ impl Passthrough {
         svte.screen_mut().set_scrollback(clamped);
 
         for (i, row_bytes) in svte.screen().rows_formatted(0, cols).enumerate() {
-            let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
+            // Reset attributes before clearing so \x1b[K doesn't inherit
+            // stale SGR state (e.g. reverse video) from the previous row.
+            // rows_formatted() emits each row independently starting from
+            // default attrs, so resetting here keeps the terminal in sync.
+            let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
         let _ = write!(out, "\x1b[0m");
@@ -682,6 +686,41 @@ mod tests {
             rendered.contains("MARKER_MAIN_SCREEN"),
             "expected main screen content in scrollback, got: {rendered}"
         );
+    }
+
+    #[test]
+    fn render_scrollback_resets_attrs_before_each_row() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write a line with reverse video, then enough lines to create
+        // scrollback.  When rendering, the row with reverse video should
+        // NOT leak its attributes into the \x1b[K of the following row.
+        pt.process(b"\x1b[7mreversed\x1b[0m\n");
+        for i in 0..10 {
+            pt.process(format!("normal {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        let total = pt.scrollback_available();
+        assert!(total > 0);
+
+        let mut buf = Vec::new();
+        pt.render_scrollback(&mut buf, total, 80);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Every \x1b[K (erase-in-line) must be preceded by \x1b[0m (reset)
+        // so the erase uses the default background, not stale attributes.
+        // The reset appears before the cursor-positioning sequence, so we
+        // check that \x1b[0m occurs between consecutive \x1b[K sequences.
+        let el_positions: Vec<usize> = rendered.match_indices("\x1b[K").map(|(p, _)| p).collect();
+        assert!(!el_positions.is_empty(), "expected at least one \\x1b[K");
+        let mut prev_end = 0;
+        for &pos in &el_positions {
+            let segment = &rendered[prev_end..pos];
+            assert!(
+                segment.contains("\x1b[0m"),
+                "no \\x1b[0m reset before \\x1b[K at byte {pos}; segment: {segment:?}"
+            );
+            prev_end = pos + 3; // skip past "\x1b[K"
+        }
     }
 
     #[test]
