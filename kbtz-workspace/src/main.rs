@@ -1068,7 +1068,16 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
-                    // Non-scroll mouse: discard (we own mouse reporting)
+                    // Non-scroll mouse: forward to child if it
+                    // requested mouse tracking (so it can handle its
+                    // own clicks/drags).  Otherwise discard — the
+                    // event is an artifact of kbtz's forced mouse
+                    // enable for scroll wheel detection.
+                    if let Some(session) = app.sessions.get_mut(session_id) {
+                        if session.has_mouse_tracking() {
+                            session.write_input(&buf[i..i + evt.len])?;
+                        }
+                    }
                     i += evt.len;
                     continue;
                 }
@@ -1122,7 +1131,8 @@ fn zoomed_loop(
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
                     if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
-                        // Stop before SGR mouse sequence
+                        // Stop before SGR mouse sequence (scroll wheel
+                        // events are intercepted for scroll mode)
                         if buf[i + 2] == b'<' {
                             break;
                         }
