@@ -713,17 +713,12 @@ impl ScrollState {
     }
 }
 
-/// Try to enter scroll mode.  If the session has no scrollback, this is
-/// a no-op and `scroll.active` remains false.  When scroll mode IS
-/// entered, the scroll status bar is drawn immediately so the bar and
-/// `scroll.active` are always in sync.
+/// Enter scroll mode.  Freezes the screen and disables mouse tracking
+/// so the terminal can handle native text selection.  Works even when
+/// there is no scrollback (the user can still select visible text).
 fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     if let Some(session) = app.sessions.get(session_id) {
         scroll.total = session.enter_scroll_mode()?;
-        if scroll.total == 0 {
-            // Session had no scrollback — it left state untouched.
-            return Ok(());
-        }
         scroll.offset = 0;
         scroll.active = true;
         // Render the current viewport (offset 0 = live screen).
@@ -798,8 +793,6 @@ fn handle_scroll_input(
             scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
             return Ok(true);
         }
-        // Mouse tracking is disabled in scroll mode (to allow native
-        // text selection), so SGR mouse events won't arrive here.
         // Consume unrecognized CSI sequences
         *i += 1;
         return Ok(true);
@@ -1050,7 +1043,16 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
-                    // Non-scroll mouse: discard (we own mouse reporting)
+                    if evt.button == 0 {
+                        // Left click → enter scroll mode for text selection
+                        enter_scroll_mode(app, session_id, &mut scroll)?;
+                        if scroll.active {
+                            draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        }
+                        i += evt.len;
+                        continue;
+                    }
+                    // Other non-scroll mouse: discard
                     i += evt.len;
                     continue;
                 }

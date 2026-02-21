@@ -170,11 +170,8 @@ impl Passthrough {
     }
 
     /// Enter scroll mode: build a temporary VTE from the output buffer,
-    /// check if there is any scrollback, and if so stop forwarding live
-    /// output and return the number of scrollback rows available.
-    ///
-    /// Returns 0 without modifying any state when there is no scrollback
-    /// to navigate (so the caller can silently consume the event).
+    /// stop forwarding live output, disable mouse tracking for native
+    /// text selection, and return the number of scrollback rows available.
     fn enter_scroll_mode(&mut self) -> usize {
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
@@ -188,10 +185,6 @@ impl Passthrough {
         }
 
         let total = Self::scrollback_of(&mut scroll_vte);
-        if total == 0 {
-            // Nothing to scroll — leave state untouched.
-            return 0;
-        }
 
         self.active = false;
         self.scroll_vte = Some(scroll_vte);
