@@ -784,4 +784,67 @@ mod tests {
             "expected more scrollback after adding content: {total2} <= {total1}"
         );
     }
+
+    #[test]
+    fn has_mouse_tracking_default_false() {
+        let pt = Passthrough::new(24, 80);
+        assert!(!pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1000() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1000h enables PressRelease mouse tracking.
+        pt.process(b"\x1b[?1000h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1002() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1002h enables ButtonMotion mouse tracking.
+        pt.process(b"\x1b[?1002h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_after_mode_1003() {
+        let mut pt = Passthrough::new(24, 80);
+        // \x1b[?1003h enables AnyMotion mouse tracking.
+        pt.process(b"\x1b[?1003h");
+        assert!(pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn has_mouse_tracking_false_after_disable() {
+        let mut pt = Passthrough::new(24, 80);
+        pt.process(b"\x1b[?1000h");
+        assert!(pt.has_mouse_tracking());
+        pt.process(b"\x1b[?1000l");
+        assert!(!pt.has_mouse_tracking());
+    }
+
+    #[test]
+    fn input_mode_formatted_includes_bracketed_paste() {
+        let mut pt = Passthrough::new(24, 80);
+        // Enable bracketed paste in the child.
+        pt.process(b"\x1b[?2004h");
+        let modes = pt.vte.screen().input_mode_formatted();
+        assert!(
+            modes.windows(8).any(|w| w == b"\x1b[?2004h"),
+            "expected bracketed paste enable in input_mode_formatted()"
+        );
+    }
+
+    #[test]
+    fn input_mode_formatted_includes_mouse_tracking() {
+        let mut pt = Passthrough::new(24, 80);
+        // Enable PressRelease mouse tracking + SGR encoding in the child.
+        pt.process(b"\x1b[?1000h\x1b[?1006h");
+        let modes = pt.vte.screen().input_mode_formatted();
+        assert!(
+            modes.windows(8).any(|w| w == b"\x1b[?1000h"),
+            "expected mouse tracking enable in input_mode_formatted()"
+        );
+    }
 }
