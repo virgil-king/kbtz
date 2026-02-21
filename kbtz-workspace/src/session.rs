@@ -189,25 +189,34 @@ impl Passthrough {
         self.active = false;
         self.scroll_vte = Some(scroll_vte);
 
-        // Disable mouse tracking so the terminal handles text
-        // selection natively while in scroll mode.
+        // Enter alternate screen and disable mouse tracking.
+        // The alternate screen gives us a clean canvas for the frozen
+        // viewport and — critically — causes the terminal to convert
+        // scroll wheel events into arrow key sequences.  Disabling
+        // mouse tracking allows native text selection.
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l");
+        let _ = out.write_all(b"\x1b[?1049h\x1b[?1000l\x1b[?1006l");
         let _ = out.flush();
 
         total
     }
 
-    /// Exit scroll mode: discard the temporary VTE, re-render the
-    /// live screen, re-enable mouse tracking, and resume live forwarding.
+    /// Exit scroll mode: discard the temporary VTE, leave alternate
+    /// screen, re-render the live screen, re-enable mouse tracking,
+    /// and resume live forwarding.
     fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        // Leave the alternate screen we entered for scroll mode.
+        let _ = out.write_all(b"\x1b[?1049l");
+        // Restore the child's screen state and re-enable mouse tracking.
+        if self.vte.screen().alternate_screen() {
+            let _ = out.write_all(b"\x1b[?1049h");
+        }
         let _ = out.write_all(&self.vte.screen().state_formatted());
-        // Re-enable SGR mouse button reporting for scroll wheel detection.
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
 
