@@ -84,6 +84,13 @@ impl App {
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
+        // Agent sessions run concurrent kbtz commands that hold BEGIN IMMEDIATE
+        // transactions.  With up to max_concurrency sessions all writing at
+        // once, the workspace's own writes may need to queue behind them.
+        // 60 seconds is generous enough that normal DB contention never crashes
+        // the workspace, while still failing fast on genuine lock problems.
+        conn.execute_batch("PRAGMA busy_timeout = 60000;")
+            .context("failed to set workspace busy_timeout")?;
         let mut app = App {
             db_path,
             conn,
