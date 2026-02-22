@@ -144,7 +144,14 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn is_alive(&mut self) -> bool {
-        self.socket_path.exists()
+        // Check process liveness first: if the shepherd was SIGKILLed its
+        // cleanup code never ran and the socket file is left behind.
+        // EPERM means the process exists but we can't signal it — treat as alive.
+        let ret = unsafe { libc::kill(self.shepherd_pid as libc::pid_t, 0) };
+        let process_alive = ret == 0
+            || (ret == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+        process_alive && self.socket_path.exists()
     }
 
     fn mark_stopping(&mut self) {
@@ -331,7 +338,7 @@ mod tests {
             status: SessionStatus::Starting,
             task_name: "test".to_string(),
             session_id: "test-id".to_string(),
-            shepherd_pid: 1,
+            shepherd_pid: std::process::id(),
             stopping_since: None,
         };
 
