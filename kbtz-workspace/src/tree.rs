@@ -45,8 +45,8 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             // Session indicator (robot + session status) when a session
-            // exists, task status icon otherwise.  The robot prefix is a
-            // fixed-width column so names stay vertically aligned.
+            // exists, task status icon otherwise.  Left-aligned so a
+            // single icon sits in the same column as the robot emoji.
             let (bot, icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name)
             {
                 if let Some(session) = app.sessions.get(sid) {
@@ -56,10 +56,10 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
                         format!(" {}", sid),
                     )
                 } else {
-                    ("  ", ui::icon_for_task(row).to_string(), String::new())
+                    ("", format!("{}  ", ui::icon_for_task(row)), String::new())
                 }
             } else {
-                ("  ", ui::icon_for_task(row).to_string(), String::new())
+                ("", format!("{}  ", ui::icon_for_task(row)), String::new())
             };
             let style = ui::status_style(&row.status);
 
