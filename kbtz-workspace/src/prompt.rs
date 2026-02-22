@@ -59,10 +59,18 @@ review — they will either request changes or ask you to merge the PR.
 
 ## Decomposing into subtasks
 
-The workspace automatically assigns agents to new tasks. When your work has
-independent pieces, you can create subtasks and the workspace will spawn
-separate agents to work on them in parallel. This is the primary way to
-get parallelism — take advantage of it when your task is parallelizable.
+The workspace automatically assigns agents to new tasks. **Do not work on
+tasks you create** — a dedicated agent session will be spawned for each one.
+Your job is to define clear descriptions, closure conditions, and notes so
+the spawned agent has enough context to complete the work independently. If
+your task depends on the result, block your task on it
+(`kbtz block <new-task> $KBTZ_TASK`) and use `kbtz wait` to wait for it
+to complete.
+
+When your work has independent pieces, you can create subtasks and the
+workspace will spawn separate agents to work on them in parallel. This is
+the primary way to get parallelism — take advantage of it when your task
+is parallelizable.
 
 ### When to decompose
 
@@ -196,6 +204,9 @@ are easy to find from the task:
    status first with `kbtz show` before starting work.
 7. Always note branch names and PR URLs on your task (see "Tracking
    branches and PRs" above).
+8. Do not work on tasks you create. The workspace spawns a dedicated
+   agent for each new task. Write clear descriptions, closure conditions,
+   and notes so the spawned agent can complete the work independently.
 "#;
 
 /// Protocol instructions for the top-level task management session.
