@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use ratatui::widgets::ListState;
+use rusqlite::ffi::ErrorCode;
 use rusqlite::Connection;
 
 use kbtz::model::Task;
@@ -70,6 +71,14 @@ pub enum Action {
 
 fn session_id_to_filename(session_id: &str) -> String {
     session_id.replace('/', "-")
+}
+
+/// Returns true if the error is an SQLite SQLITE_BUSY (database locked)
+/// error, indicating transient lock contention rather than a real failure.
+fn is_db_busy(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<rusqlite::Error>().is_some_and(
+        |e| matches!(e, rusqlite::Error::SqliteFailure(f, _) if f.code == ErrorCode::DatabaseBusy),
+    )
 }
 
 impl App {
@@ -231,7 +240,17 @@ impl App {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())? {
+            let claim = match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())
+            {
+                Ok(v) => v,
+                Err(e) if is_db_busy(&e) => {
+                    // Transient lock contention — skip this tick, try again next time.
+                    self.counter -= 1;
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            match claim {
                 Some(task_name) => {
                     let task = ops::get_task(&self.conn, &task_name)?;
                     match self.spawn_session(&task, &session_id) {

@@ -149,8 +149,7 @@ impl SessionHandle for ShepherdSession {
         // EPERM means the process exists but we can't signal it — treat as alive.
         let ret = unsafe { libc::kill(self.shepherd_pid as libc::pid_t, 0) };
         let process_alive = ret == 0
-            || (ret == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+            || (ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
         process_alive && self.socket_path.exists()
     }
 
