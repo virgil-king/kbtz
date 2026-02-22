@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use crate::app::App;
 use kbtz::ui;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, chunks[1]);
 }
 
-fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
+fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.tree.rows.is_empty() {
         let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
             .style(Style::default().fg(Color::DarkGray))
@@ -31,8 +31,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         .tree
         .rows
         .iter()
-        .enumerate()
-        .map(|(i, row)| {
+        .map(|row| {
             let prefix = ui::tree_prefix(row);
 
             let collapse_indicator = if row.has_children {
@@ -87,12 +86,7 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
                 Span::raw(desc),
             ]);
 
-            let item = ListItem::new(line);
-            if i == app.tree.cursor {
-                item.style(Style::default().bg(Color::DarkGray))
-            } else {
-                item
-            }
+            ListItem::new(line)
         })
         .collect();
 
@@ -104,9 +98,11 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         format!(" kbtz-workspace ({active}/{max} sessions) ")
     };
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .highlight_style(Style::default().bg(Color::DarkGray));
 
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(list, area, &mut app.tree.list_state);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
