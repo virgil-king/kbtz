@@ -257,7 +257,7 @@ impl Passthrough {
     /// Mouse tracking is disabled so the terminal handles click-drag
     /// selection and system copy shortcuts natively.  Scrolling within
     /// scroll mode is keyboard-only (j/k, arrows, PgUp/PgDn, g/G).
-    fn enter_scroll_mode(&mut self) -> usize {
+    pub(crate) fn enter_scroll_mode(&mut self) -> usize {
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
         let mut scroll_vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
@@ -287,7 +287,7 @@ impl Passthrough {
 
     /// Exit scroll mode: discard the temporary VTE, re-render the live
     /// screen with input modes, and resume live forwarding.
-    fn exit_scroll_mode(&mut self) {
+    pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
 
         let stdout = std::io::stdout();
@@ -304,7 +304,7 @@ impl Passthrough {
     }
 
     /// Whether the child has requested any mouse tracking mode.
-    fn has_mouse_tracking(&self) -> bool {
+    pub(crate) fn has_mouse_tracking(&self) -> bool {
         !matches!(
             self.vte.screen().mouse_protocol_mode(),
             vt100::MouseProtocolMode::None
@@ -313,7 +313,12 @@ impl Passthrough {
 
     /// Set the scrollback offset and write the viewport to `out`.
     /// Returns the clamped offset actually applied.
-    fn render_scrollback(&mut self, out: &mut impl Write, offset: usize, cols: u16) -> usize {
+    pub(crate) fn render_scrollback(
+        &mut self,
+        out: &mut impl Write,
+        offset: usize,
+        cols: u16,
+    ) -> usize {
         let svte = match self.scroll_vte.as_mut() {
             Some(v) => v,
             None => return 0,
@@ -337,7 +342,7 @@ impl Passthrough {
     }
 
     /// Total scrollback rows available (not counting the visible screen).
-    fn scrollback_available(&mut self) -> usize {
+    pub(crate) fn scrollback_available(&mut self) -> usize {
         match self.scroll_vte.as_mut() {
             Some(svte) => Self::scrollback_of(svte),
             None => 0,

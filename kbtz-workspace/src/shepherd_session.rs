@@ -175,6 +175,47 @@ impl SessionHandle for ShepherdSession {
         Ok(())
     }
 
+    fn enter_scroll_mode(&self) -> Result<usize> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .enter_scroll_mode())
+    }
+
+    fn exit_scroll_mode(&self) -> Result<()> {
+        self.passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .exit_scroll_mode();
+        Ok(())
+    }
+
+    fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .render_scrollback(&mut out, offset, cols))
+    }
+
+    fn scrollback_available(&self) -> Result<usize> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .scrollback_available())
+    }
+
+    fn has_mouse_tracking(&self) -> bool {
+        self.passthrough
+            .lock()
+            .map(|pt| pt.has_mouse_tracking())
+            .unwrap_or(false)
+    }
+
     fn write_input(&mut self, buf: &[u8]) -> Result<()> {
         let mut writer = self
             .writer

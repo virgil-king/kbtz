@@ -416,8 +416,8 @@ impl App {
                         &pid_path,
                         &task_name,
                         &session_id,
-                        self.rows,
-                        self.cols,
+                        self.term.rows,
+                        self.term.cols,
                     ) {
                         Ok(session) => {
                             if let Some(n) = session_id
