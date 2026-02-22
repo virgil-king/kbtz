@@ -196,13 +196,13 @@ All commands use a `Ctrl-B` prefix (like tmux):
 | `^B ?` | Show help |
 | `^B q` | Quit |
 
-Scroll wheel up, Page Up, and left-click also enter scroll mode.
+Page Up and left-click also enter scroll mode.
 
 ### Scroll mode
 
-Scroll mode freezes the session output and switches to the terminal's alternate screen with mouse tracking disabled. This enables:
+Scroll mode freezes the session output and disables mouse tracking. This enables:
 
-- **Scrolling** via keyboard (`j`/`k`, arrows, PgUp/PgDn, `g`/`G`) and scroll wheel (the alternate screen causes the terminal to convert scroll wheel events into arrow key sequences)
+- **Scrolling** via keyboard (`j`/`k`, arrows, PgUp/PgDn, `g`/`G`)
 - **Native text selection** via click-drag, with copy using your terminal's native shortcut (Ctrl+Shift+C on Linux, Cmd+C on macOS)
 
 | Key | Action |

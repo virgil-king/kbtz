@@ -180,6 +180,10 @@ impl Passthrough {
     /// Enter scroll mode: build a temporary VTE from the output buffer,
     /// stop forwarding live output, disable mouse tracking for native
     /// text selection, and return the number of scrollback rows available.
+    ///
+    /// Mouse tracking is disabled so the terminal handles click-drag
+    /// selection and system copy shortcuts natively.  Scrolling within
+    /// scroll mode is keyboard-only (j/k, arrows, PgUp/PgDn, g/G).
     fn enter_scroll_mode(&mut self) -> usize {
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
@@ -197,33 +201,27 @@ impl Passthrough {
         self.active = false;
         self.scroll_vte = Some(scroll_vte);
 
-        // Enter alternate screen and disable mouse tracking.
-        // The alternate screen gives us a clean canvas for the frozen
-        // viewport and — critically — causes the terminal to convert
-        // scroll wheel events into arrow key sequences.  Disabling
-        // mouse tracking allows native text selection.
+        // Disable mouse tracking for native text selection, and hide
+        // the cursor (the user isn't typing, so a blinking cursor is
+        // distracting).
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(b"\x1b[?1049h\x1b[?1000l\x1b[?1006l");
+        let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?25l");
         let _ = out.flush();
 
         total
     }
 
-    /// Exit scroll mode: discard the temporary VTE, leave alternate
-    /// screen, re-render the live screen, re-enable mouse tracking,
-    /// and resume live forwarding.
+    /// Exit scroll mode: discard the temporary VTE, re-render the live
+    /// screen with input modes, and resume live forwarding.
     fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        // Leave the alternate screen we entered for scroll mode.
-        let _ = out.write_all(b"\x1b[?1049l");
-        // Restore the child's screen state and re-enable mouse tracking.
-        if self.vte.screen().alternate_screen() {
-            let _ = out.write_all(b"\x1b[?1049h");
-        }
+        // Restore the child's full screen state (including cursor
+        // visibility) and input modes, then re-enable forced mouse
+        // tracking for scroll wheel detection.
         let _ = out.write_all(&self.vte.screen().state_formatted());
         let _ = out.write_all(&self.vte.screen().input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");

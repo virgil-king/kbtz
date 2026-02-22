@@ -58,7 +58,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
     ^B Tab          Jump to next session needing input
-    ^B [            Scroll mode (also: scroll wheel, PgUp/PgDn)
+    ^B [            Scroll mode (also: PgUp, left-click)
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -1026,25 +1026,12 @@ fn zoomed_loop(
             // Check for SGR mouse events
             if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
                 if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
-                    if evt.button == 64 {
-                        // Scroll up → enter scroll mode and scroll up
-                        enter_scroll_mode(app, session_id, &mut scroll)?;
-                        if scroll.active {
-                            let new = scroll.offset.saturating_add(3).min(scroll.total);
-                            scroll_to(app, session_id, &mut scroll, new)?;
-                            draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
-                        }
-                        i += evt.len;
-                        continue;
-                    }
-                    if evt.button == 65 {
-                        // Scroll down → enter scroll mode (at bottom)
-                        enter_scroll_mode(app, session_id, &mut scroll)?;
-                        i += evt.len;
-                        continue;
-                    }
                     if evt.button == 0 {
-                        // Left click → enter scroll mode for text selection
+                        // Left click → enter scroll mode for text selection.
+                        // The initial click is consumed (mouse tracking is
+                        // disabled on entry so subsequent clicks are native),
+                        // but that's fine — the user clicks once to enter,
+                        // then click-drags to select.
                         enter_scroll_mode(app, session_id, &mut scroll)?;
                         if scroll.active {
                             draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
@@ -1052,11 +1039,9 @@ fn zoomed_loop(
                         i += evt.len;
                         continue;
                     }
-                    // Non-scroll mouse: forward to child if it
-                    // requested mouse tracking (so it can handle its
-                    // own clicks/drags).  Otherwise discard — the
-                    // event is an artifact of kbtz's forced mouse
-                    // enable for scroll wheel detection.
+                    // Forward other mouse events to child if it requested
+                    // mouse tracking, otherwise discard (artifact of kbtz's
+                    // forced mouse enable).
                     if let Some(session) = app.sessions.get_mut(session_id) {
                         if session.has_mouse_tracking() {
                             session.write_input(&buf[i..i + evt.len])?;
@@ -1078,12 +1063,6 @@ fn zoomed_loop(
                         scroll_to(app, session_id, &mut scroll, new)?;
                         draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
                     }
-                    i += 4;
-                    continue;
-                }
-                if buf[i + 2] == b'6' && buf[i + 3] == b'~' {
-                    // PgDn → enter scroll mode (at bottom)
-                    enter_scroll_mode(app, session_id, &mut scroll)?;
                     i += 4;
                     continue;
                 }
@@ -1115,16 +1094,12 @@ fn zoomed_loop(
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
                     if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
-                        // Stop before SGR mouse sequence (scroll wheel
-                        // events are intercepted for scroll mode)
+                        // Stop before SGR mouse sequence (handled above)
                         if buf[i + 2] == b'<' {
                             break;
                         }
-                        // Stop before PgUp/PgDn
-                        if i + 3 < n
-                            && (buf[i + 2] == b'5' || buf[i + 2] == b'6')
-                            && buf[i + 3] == b'~'
-                        {
+                        // Stop before PgUp (enters scroll mode)
+                        if buf[i + 2] == b'5' && i + 3 < n && buf[i + 3] == b'~' {
                             break;
                         }
                     }
@@ -1142,7 +1117,7 @@ fn zoomed_loop(
 
 fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
     let content = format!(
-        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom  mouse:select",
+        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom  click+drag:select",
         scroll.offset, scroll.total,
     );
     let padding = (cols as usize).saturating_sub(content.len());
