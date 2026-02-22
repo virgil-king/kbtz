@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use ratatui::widgets::ListState;
 use rusqlite::Connection;
 
 use kbtz::model::Task;
@@ -24,6 +25,7 @@ pub struct TermSize {
 pub struct TreeView {
     pub rows: Vec<TreeRow>,
     pub cursor: usize,
+    pub list_state: ListState,
     pub collapsed: HashSet<String>,
     pub error: Option<String>,
 }
@@ -98,6 +100,7 @@ impl App {
             tree: TreeView {
                 rows: Vec::new(),
                 cursor: 0,
+                list_state: ListState::default(),
                 collapsed: HashSet::new(),
                 error: None,
             },
@@ -116,8 +119,10 @@ impl App {
             if self.tree.cursor >= self.tree.rows.len() {
                 self.tree.cursor = self.tree.rows.len() - 1;
             }
+            self.tree.list_state.select(Some(self.tree.cursor));
         } else {
             self.tree.cursor = 0;
+            self.tree.list_state.select(None);
         }
         Ok(())
     }
@@ -382,12 +387,14 @@ impl App {
     pub fn move_up(&mut self) {
         if self.tree.cursor > 0 {
             self.tree.cursor -= 1;
+            self.tree.list_state.select(Some(self.tree.cursor));
         }
     }
 
     pub fn move_down(&mut self) {
         if !self.tree.rows.is_empty() && self.tree.cursor < self.tree.rows.len() - 1 {
             self.tree.cursor += 1;
+            self.tree.list_state.select(Some(self.tree.cursor));
         }
     }
 
@@ -671,6 +678,7 @@ mod tests {
             tree: TreeView {
                 rows: Vec::new(),
                 cursor: 0,
+                list_state: ListState::default(),
                 collapsed: HashSet::new(),
                 error: None,
             },
