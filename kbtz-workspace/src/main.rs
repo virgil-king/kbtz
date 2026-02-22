@@ -8,6 +8,7 @@ mod shepherd_session;
 mod tree;
 
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,7 +159,12 @@ fn run() -> Result<()> {
 
     // Acquire exclusive lock on the status directory to prevent concurrent instances.
     let lock_path = status_dir.join("workspace.lock");
-    let _lock_file = std::fs::File::create(&lock_path).context("failed to create lock file")?;
+    let _lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(&lock_path)
+        .context("failed to create lock file")?;
     let lock_fd = _lock_file.as_raw_fd();
     let lock_result = unsafe { libc::flock(lock_fd, libc::LOCK_EX | libc::LOCK_NB) };
     if lock_result != 0 {

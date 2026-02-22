@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -102,22 +101,12 @@ impl SessionSpawner for ShepherdSpawner {
         for (k, v) in env_vars {
             cmd.env(k, v);
         }
-        // Detach: don't inherit stdin/stdout/stderr, and close all other
-        // inherited file descriptors (e.g. SQLite WAL files opened by the
-        // parent) so they can't interfere with the shepherd or any kbtz
-        // subprocesses it spawns.
+        // Detach stdio.  All other FDs (SQLite, sockets, inotify) are
+        // already opened with O_CLOEXEC / SOCK_CLOEXEC / IN_CLOEXEC by
+        // their respective libraries, so no extra cleanup is needed.
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        // SAFETY: close_fds runs after fork() but before exec().  We
-        // mark all fds >= 3 as close-on-exec so exec() closes them
-        // without touching fds 0-2 (which the Command infrastructure
-        // needs for stdio setup).  close_range(CLOSE_RANGE_CLOEXEC) is
-        // available on Linux 5.11+; on older kernels we fall back to
-        // iterating /proc/self/fd.
-        unsafe {
-            cmd.pre_exec(close_inherited_fds);
-        }
 
         cmd.spawn().with_context(|| {
             format!(
@@ -142,32 +131,6 @@ impl SessionSpawner for ShepherdSpawner {
         ShepherdSession::connect(&socket_path, &pid_path, task_name, session_id, rows, cols)
             .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
-}
-
-/// Called in the forked child (after fork, before exec) to mark all file
-/// descriptors ≥ 3 as close-on-exec.  This prevents the shepherd and any
-/// kbtz processes it spawns from inheriting SQLite WAL/SHM file descriptors
-/// opened by the parent workspace, which can trigger spurious `SQLITE_BUSY`
-/// errors in the parent.
-///
-/// Uses `close_range(2)` with `CLOSE_RANGE_CLOEXEC` (Linux ≥ 5.11), which
-/// atomically sets `O_CLOEXEC` on every fd in the range without closing them,
-/// so `exec()` performs the actual closing after stdio has been set up.
-fn close_inherited_fds() -> std::io::Result<()> {
-    // CLOSE_RANGE_CLOEXEC = 4  (include/uapi/linux/close_range.h)
-    const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3u32 as libc::c_ulong,
-            u32::MAX as libc::c_ulong,
-            CLOSE_RANGE_CLOEXEC as libc::c_ulong,
-        )
-    };
-    if ret == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 pub struct Session {
