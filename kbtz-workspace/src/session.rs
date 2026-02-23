@@ -1,9 +1,12 @@
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+
+use crate::shepherd_session::ShepherdSession;
 
 pub trait SessionHandle: Send {
     fn task_name(&self) -> &str;
@@ -58,6 +61,78 @@ impl SessionSpawner for PtySpawner {
     }
 }
 
+pub struct ShepherdSpawner {
+    pub status_dir: PathBuf,
+}
+
+impl SessionSpawner for ShepherdSpawner {
+    fn spawn(
+        &self,
+        command: &str,
+        args: &[&str],
+        task_name: &str,
+        session_id: &str,
+        rows: u16,
+        cols: u16,
+        env_vars: &[(&str, &str)],
+    ) -> Result<Box<dyn SessionHandle>> {
+        let filename = session_id.replace('/', "-");
+        let socket_path = self.status_dir.join(format!("{filename}.sock"));
+        let pid_path = self.status_dir.join(format!("{filename}.pid"));
+
+        // Find kbtz-shepherd binary next to the current executable
+        let self_exe = std::env::current_exe().context("failed to get current executable path")?;
+        let shepherd_bin = self_exe.with_file_name("kbtz-shepherd");
+        if !shepherd_bin.exists() {
+            bail!(
+                "kbtz-shepherd binary not found at {}",
+                shepherd_bin.display()
+            );
+        }
+
+        // Build shepherd command: kbtz-shepherd <socket> <pid> <rows> <cols> <command> [args...]
+        let mut cmd = std::process::Command::new(&shepherd_bin);
+        cmd.arg(&socket_path)
+            .arg(&pid_path)
+            .arg(rows.to_string())
+            .arg(cols.to_string())
+            .arg(command)
+            .args(args);
+        for (k, v) in env_vars {
+            cmd.env(k, v);
+        }
+        // Detach stdio.  All other FDs (SQLite, sockets, inotify) are
+        // already opened with O_CLOEXEC / SOCK_CLOEXEC / IN_CLOEXEC by
+        // their respective libraries, so no extra cleanup is needed.
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        cmd.spawn().with_context(|| {
+            format!(
+                "failed to spawn kbtz-shepherd at {}",
+                shepherd_bin.display()
+            )
+        })?;
+
+        // Wait for socket to appear (shepherd needs a moment to start)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket_path.exists() {
+            if Instant::now() >= deadline {
+                bail!(
+                    "shepherd did not create socket at {} within 5 seconds",
+                    socket_path.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Connect to the shepherd
+        ShepherdSession::connect(&socket_path, &pid_path, task_name, session_id, rows, cols)
+            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+    }
+}
+
 pub struct Session {
     pub master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -87,7 +162,7 @@ const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
 /// predates an alternate-screen switch) by replaying it into a
 /// temporary VTE.
 pub struct Passthrough {
-    active: bool,
+    pub(crate) active: bool,
     vte: vt100::Parser,
     /// Bounded buffer of raw child output for scrollback reconstruction.
     output_buffer: Vec<u8>,
@@ -109,7 +184,7 @@ impl Passthrough {
     /// state plus input modes and set `active` for live forwarding.
     /// Both happen under the same Mutex guard so no child output is
     /// lost.
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
@@ -132,7 +207,7 @@ impl Passthrough {
         self.active = true;
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if !self.active {
             return;
         }
@@ -159,7 +234,7 @@ impl Passthrough {
         let _ = out.flush();
     }
 
-    fn process(&mut self, data: &[u8]) {
+    pub(crate) fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
         self.output_buffer.extend_from_slice(data);
         if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
@@ -173,7 +248,7 @@ impl Passthrough {
         }
     }
 
-    fn set_size(&mut self, rows: u16, cols: u16) {
+    pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
         self.vte.screen_mut().set_size(rows, cols);
     }
 
@@ -184,7 +259,7 @@ impl Passthrough {
     /// Mouse tracking is disabled so the terminal handles click-drag
     /// selection and system copy shortcuts natively.  Scrolling within
     /// scroll mode is keyboard-only (j/k, arrows, PgUp/PgDn, g/G).
-    fn enter_scroll_mode(&mut self) -> usize {
+    pub(crate) fn enter_scroll_mode(&mut self) -> usize {
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
         let mut scroll_vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
@@ -214,7 +289,7 @@ impl Passthrough {
 
     /// Exit scroll mode: discard the temporary VTE, re-render the live
     /// screen with input modes, and resume live forwarding.
-    fn exit_scroll_mode(&mut self) {
+    pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
 
         let stdout = std::io::stdout();
@@ -231,7 +306,7 @@ impl Passthrough {
     }
 
     /// Whether the child has requested any mouse tracking mode.
-    fn has_mouse_tracking(&self) -> bool {
+    pub(crate) fn has_mouse_tracking(&self) -> bool {
         !matches!(
             self.vte.screen().mouse_protocol_mode(),
             vt100::MouseProtocolMode::None
@@ -240,7 +315,12 @@ impl Passthrough {
 
     /// Set the scrollback offset and write the viewport to `out`.
     /// Returns the clamped offset actually applied.
-    fn render_scrollback(&mut self, out: &mut impl Write, offset: usize, cols: u16) -> usize {
+    pub(crate) fn render_scrollback(
+        &mut self,
+        out: &mut impl Write,
+        offset: usize,
+        cols: u16,
+    ) -> usize {
         let svte = match self.scroll_vte.as_mut() {
             Some(v) => v,
             None => return 0,
@@ -264,7 +344,7 @@ impl Passthrough {
     }
 
     /// Total scrollback rows available (not counting the visible screen).
-    fn scrollback_available(&mut self) -> usize {
+    pub(crate) fn scrollback_available(&mut self) -> usize {
         match self.scroll_vte.as_mut() {
             Some(svte) => Self::scrollback_of(svte),
             None => 0,

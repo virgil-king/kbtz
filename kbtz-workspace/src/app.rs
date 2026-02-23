@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use ratatui::widgets::ListState;
+use rusqlite::ffi::ErrorCode;
 use rusqlite::Connection;
 
 use kbtz::model::Task;
@@ -15,7 +16,8 @@ use crate::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus};
+use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
+use crate::shepherd_session::ShepherdSession;
 
 pub struct TermSize {
     pub rows: u16,
@@ -71,6 +73,14 @@ fn session_id_to_filename(session_id: &str) -> String {
     session_id.replace('/', "-")
 }
 
+/// Returns true if the error is an SQLite SQLITE_BUSY (database locked)
+/// error, indicating transient lock contention rather than a real failure.
+fn is_db_busy(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<rusqlite::Error>().is_some_and(
+        |e| matches!(e, rusqlite::Error::SqliteFailure(f, _) if f.code == ErrorCode::DatabaseBusy),
+    )
+}
+
 impl App {
     pub fn new(
         db_path: String,
@@ -83,18 +93,25 @@ impl App {
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
+        // Agent sessions run concurrent kbtz commands that hold BEGIN IMMEDIATE
+        // transactions.  With up to max_concurrency sessions all writing at
+        // once, the workspace's own writes may need to queue behind them.
+        // 60 seconds is generous enough that normal DB contention never crashes
+        // the workspace, while still failing fast on genuine lock problems.
+        conn.execute_batch("PRAGMA busy_timeout = 60000;")
+            .context("failed to set workspace busy_timeout")?;
         let mut app = App {
             db_path,
             conn,
             sessions: HashMap::new(),
             task_to_session: HashMap::new(),
             counter: 0,
-            status_dir,
+            status_dir: status_dir.clone(),
             max_concurrency,
             manual,
             prefer,
             backend,
-            spawner: Box::new(PtySpawner),
+            spawner: Box::new(ShepherdSpawner { status_dir }),
             toplevel: None,
             term,
             tree: TreeView {
@@ -106,6 +123,7 @@ impl App {
             },
         };
         app.refresh_tree()?;
+        app.reconnect_sessions()?;
         app.spawn_toplevel()?;
         Ok(app)
     }
@@ -222,7 +240,17 @@ impl App {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())? {
+            let claim = match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())
+            {
+                Ok(v) => v,
+                Err(e) if is_db_busy(&e) => {
+                    // Transient lock contention — skip this tick, try again next time.
+                    self.counter -= 1;
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            match claim {
                 Some(task_name) => {
                     let task = ops::get_task(&self.conn, &task_name)?;
                     match self.spawn_session(&task, &session_id) {
@@ -285,6 +313,10 @@ impl App {
     }
 
     /// Spawn the top-level task management session.
+    ///
+    /// The toplevel is ephemeral — it's killed on quit and respawned on start.
+    /// We use PtySpawner (not ShepherdSpawner) because there's no value in
+    /// persisting a session that has no task claim and is cheap to recreate.
     fn spawn_toplevel(&mut self) -> Result<()> {
         let task_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
@@ -294,7 +326,7 @@ impl App {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = "ws/toplevel";
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
-        let session = self.spawner.spawn(
+        let session = PtySpawner.spawn(
             self.backend.command(),
             &arg_refs,
             "toplevel",
@@ -354,21 +386,104 @@ impl App {
         Ok(())
     }
 
-    /// Remove a session, cleaning up its status file and releasing the task.
+    /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
             let _ = session.stop_passthrough();
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
             let _ = ops::release_task(&self.conn, &task_name, &sid);
-            // Only remove the task→session mapping if it still points to this
+            // Only remove the task->session mapping if it still points to this
             // session. A new session may have already claimed the same task
-            // (e.g. after a pause→unpause cycle), and we must not clobber it.
+            // (e.g. after a pause->unpause cycle), and we must not clobber it.
             if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
                 self.task_to_session.remove(&task_name);
             }
-            let _ = std::fs::remove_file(self.status_dir.join(session_id_to_filename(session_id)));
+            let filename = session_id_to_filename(session_id);
+            let _ = std::fs::remove_file(self.status_dir.join(&filename));
+            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.sock")));
+            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
         }
+    }
+
+    /// Reconnect to shepherd sessions from a previous workspace instance.
+    pub fn reconnect_sessions(&mut self) -> Result<()> {
+        let entries = std::fs::read_dir(&self.status_dir)?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let session_id = stem.replacen('-', "/", 1);
+            let pid_path = path.with_extension("pid");
+
+            // Verify the shepherd process is still alive before attempting to connect.
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                    if !alive {
+                        // Shepherd died — clean up stale files
+                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::remove_file(&pid_path);
+                        if let Some(task_name) = self.find_task_for_session(&session_id) {
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Look up the task claim in the DB
+            match self.find_task_for_session(&session_id) {
+                Some(task_name) => {
+                    match ShepherdSession::connect(
+                        &path,
+                        &pid_path,
+                        &task_name,
+                        &session_id,
+                        self.term.rows,
+                        self.term.cols,
+                    ) {
+                        Ok(session) => {
+                            if let Some(n) = session_id
+                                .strip_prefix("ws/")
+                                .and_then(|s| s.parse::<u64>().ok())
+                            {
+                                self.counter = self.counter.max(n);
+                            }
+                            self.task_to_session.insert(task_name, session_id.clone());
+                            self.sessions.insert(session_id, Box::new(session));
+                        }
+                        Err(_) => {
+                            // Stale socket -- clean up
+                            let _ = std::fs::remove_file(&path);
+                            let _ = std::fs::remove_file(&pid_path);
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                        }
+                    }
+                }
+                None => {
+                    // No task claim -- orphaned shepherd. Kill and clean up.
+                    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                            unsafe { libc::kill(pid, libc::SIGKILL) };
+                        }
+                    }
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(&pid_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn find_task_for_session(&self, session_id: &str) -> Option<String> {
+        ops::list_tasks(&self.conn, None, true, None, None, None)
+            .ok()?
+            .into_iter()
+            .find(|t| t.assignee.as_deref() == Some(session_id))
+            .map(|t| t.name)
     }
 
     /// Propagate terminal resize to all PTYs.
@@ -479,44 +594,35 @@ impl App {
         }
     }
 
-    /// Gracefully shut down all sessions and clean up status files.
+    /// Detach from worker sessions and kill the toplevel session.
     ///
-    /// Requests exit from all sessions via the backend, then waits up to
-    /// GRACEFUL_TIMEOUT for them to exit before force-killing.
+    /// Worker sessions persist via their shepherd processes and will be
+    /// reconnected on next startup. Task claims are left intact because
+    /// the shepherds are still running. Only the toplevel session (ephemeral,
+    /// no task claim) is killed. Status files are cleaned up, but .sock,
+    /// .pid, and .lock files are preserved — they belong to the shepherds.
     pub fn shutdown(&mut self) {
-        // Request exit from all sessions (workers + toplevel).
-        for session in self.sessions.values_mut() {
+        // Drop all worker sessions (disconnects from sockets).
+        // This does NOT kill the shepherds — they persist.
+        // Don't release task claims — shepherds are still running.
+        for (_, session) in self.sessions.drain() {
             let _ = session.stop_passthrough();
-            self.backend.request_exit(session.as_mut());
         }
+        self.task_to_session.clear();
+
+        // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
             let _ = toplevel.stop_passthrough();
             self.backend.request_exit(toplevel.as_mut());
         }
-
-        // Wait for all to exit, up to the timeout.
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
-            let workers_dead = self.sessions.values_mut().all(|s| !s.is_alive());
             let toplevel_dead = self.toplevel.as_mut().is_none_or(|s| !s.is_alive());
-            if (workers_dead && toplevel_dead) || std::time::Instant::now() >= deadline {
+            if toplevel_dead || std::time::Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-
-        // Force-kill any stragglers and release tasks.
-        for (_, mut session) in self.sessions.drain() {
-            if session.is_alive() {
-                session.force_kill();
-            }
-            let task_name = session.task_name().to_string();
-            let sid = session.session_id().to_string();
-            let _ = ops::release_task(&self.conn, &task_name, &sid);
-        }
-        self.task_to_session.clear();
-
-        // Force-kill top-level if still alive.
         if let Some(ref mut toplevel) = self.toplevel {
             if toplevel.is_alive() {
                 toplevel.force_kill();
@@ -524,10 +630,14 @@ impl App {
         }
         self.toplevel = None;
 
-        // Clean up status files.
+        // Clean up status files only (not .sock, .pid, or .lock — those belong to shepherds).
         if let Ok(entries) = std::fs::read_dir(&self.status_dir) {
             for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str());
+                if ext != Some("sock") && ext != Some("pid") && ext != Some("lock") {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
     }
