@@ -10,10 +10,7 @@ The name comes from "kibitz" -- to watch and offer commentary.
 - **Structure work with dependencies** — parent/child and blocking relationships between tasks so agents work in the right order
 - **Unblocked tasks immediately get their own agent** — when a task's dependencies are satisfied, the workspace claims it and spawns a new session automatically
 
-kbtz has two components:
-
-- **`kbtz-workspace`** — The terminal workspace you interact with. Manages concurrent agent sessions against a shared task database with a tmux-like interface for monitoring and interacting with them.
-- **`kbtz`** — The underlying CLI that agents use to interact with the task database: creating tasks, setting dependencies, claiming work, and adding notes.
+kbtz has two components: `kbtz-workspace` (the terminal workspace you interact with) and `kbtz` (the underlying CLI that agents use to manage tasks).
 
 ## Install
 
@@ -235,20 +232,6 @@ Cycle detection prevents circular dependencies.
 |---------|-------------|
 | `kbtz wait` | Block until the database changes (uses inotify) |
 | `kbtz exec` | Execute commands from stdin atomically in a single transaction |
-
-### Multi-agent usage
-
-Multiple agents can safely share a single kbtz database. Claims use compare-and-swap guards so only one agent can claim a given task. A typical agent loop:
-
-```bash
-while true; do
-    kbtz wait
-    TASK=$(kbtz claim-next "$SESSION_ID" --prefer "$PREFER" 2>/dev/null | awk '/^Name:/{print $2}') || continue
-    # ... work on $TASK ...
-    kbtz done "$TASK"
-    PREFER="$TASK"
-done
-```
 
 ### Claude Code plugin
 
