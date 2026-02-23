@@ -13,7 +13,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -918,6 +918,77 @@ fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouse
     })
 }
 
+/// Refresh the terminal after a resize or wake from sleep while in zoomed mode.
+///
+/// Exits scroll mode if active, stops passthrough, updates dimensions if the
+/// terminal size changed, re-establishes the scroll region, clears the screen,
+/// and re-renders the session's VTE state.
+fn refresh_zoomed_screen(
+    app: &mut App,
+    session_id: &str,
+    task: &str,
+    last_status: &SessionStatus,
+    scroll: &mut ScrollState,
+) -> Result<()> {
+    if scroll.active {
+        exit_scroll_mode(app, session_id, scroll)?;
+    }
+    if let Some(session) = app.sessions.get(session_id) {
+        let _ = session.stop_passthrough();
+    }
+    let (cols, rows) = terminal::size()?;
+    if cols != app.term.cols || rows != app.term.rows {
+        app.handle_resize(cols, rows);
+    }
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
+    execute!(
+        stdout,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+    if let Some(session) = app.sessions.get(session_id) {
+        session.start_passthrough()?;
+    }
+    draw_status_bar(
+        app.term.rows,
+        app.term.cols,
+        task,
+        session_id,
+        last_status,
+        None,
+    );
+    Ok(())
+}
+
+/// Refresh the terminal after a resize or wake from sleep while in toplevel mode.
+fn refresh_toplevel_screen(app: &mut App) -> Result<()> {
+    if let Some(ref toplevel) = app.toplevel {
+        let _ = toplevel.stop_passthrough();
+    }
+    let (cols, rows) = terminal::size()?;
+    if cols != app.term.cols || rows != app.term.rows {
+        app.handle_resize(cols, rows);
+    }
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
+    execute!(
+        stdout,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+    if let Some(ref toplevel) = app.toplevel {
+        toplevel.start_passthrough()?;
+    }
+    draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
+    Ok(())
+}
+
+/// Duration threshold for detecting a sleep/wake cycle.  If the main loop
+/// iteration takes longer than this, the system was likely sleeping and
+/// the terminal needs a full refresh.
+const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
+
 // ── Zoomed loop ────────────────────────────────────────────────────────
 
 fn zoomed_loop(
@@ -934,6 +1005,7 @@ fn zoomed_loop(
 
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
+    let mut last_iter = Instant::now();
 
     draw_status_bar(
         app.term.rows,
@@ -962,6 +1034,25 @@ fn zoomed_loop(
 
         if !app.sessions.contains_key(session_id) {
             return Ok(Action::ReturnToTree);
+        }
+
+        // Detect terminal resize or wake from sleep.  The zoomed loop
+        // bypasses crossterm's event system (using raw libc::poll), so
+        // SIGWINCH is not delivered as a Resize event.  We detect resize
+        // by polling terminal::size() each iteration, and detect sleep
+        // via a time-jump (the 100ms poll timeout took >2s).
+        let elapsed = last_iter.elapsed();
+        last_iter = Instant::now();
+        let (cur_cols, cur_rows) = terminal::size()?;
+        let size_changed = cur_cols != app.term.cols || cur_rows != app.term.rows;
+        if size_changed || elapsed > SLEEP_THRESHOLD {
+            kbtz::debug_log::log(&format!(
+                "zoomed refresh: size_changed={size_changed} elapsed={elapsed:?}"
+            ));
+            refresh_zoomed_screen(app, session_id, task, &last_status, &mut scroll)?;
+            if !app.sessions.contains_key(session_id) {
+                return Ok(Action::ReturnToTree);
+            }
         }
 
         // Redraw status bar when status or debug info changes
@@ -1289,6 +1380,7 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     let mut buf = [0u8; 4096];
 
     let watchers = Watchers::new(app)?;
+    let mut last_iter = Instant::now();
 
     draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
 
@@ -1306,6 +1398,18 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
 
         // Run lifecycle tick for worker sessions.
         app.tick()?;
+
+        // Detect terminal resize or wake from sleep (same as zoomed_loop).
+        let elapsed = last_iter.elapsed();
+        last_iter = Instant::now();
+        let (cur_cols, cur_rows) = terminal::size()?;
+        let size_changed = cur_cols != app.term.cols || cur_rows != app.term.rows;
+        if size_changed || elapsed > SLEEP_THRESHOLD {
+            kbtz::debug_log::log(&format!(
+                "toplevel refresh: size_changed={size_changed} elapsed={elapsed:?}"
+            ));
+            refresh_toplevel_screen(app)?;
+        }
 
         let n = match poll_stdin(&mut stdin, &mut buf) {
             None => continue,
