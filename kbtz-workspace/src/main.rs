@@ -58,7 +58,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
     ^B Tab          Jump to next session needing input
-    ^B [            Scroll mode (also: PgUp, left-click)
+    ^B [            Scroll mode (also: Shift+Up, PgUp, left-click)
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
     ^B q            Quit"
@@ -780,6 +780,29 @@ fn handle_scroll_input(
             scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
             return Ok(true);
         }
+        // Shift+Up (CSI 1;2A)
+        if buf[*i + 2] == b'1'
+            && *i + 5 < n
+            && buf[*i + 3] == b';'
+            && buf[*i + 4] == b'2'
+            && buf[*i + 5] == b'A'
+        {
+            *i += 6;
+            let new = scroll.offset.saturating_add(1).min(scroll.total);
+            scroll_to(app, session_id, scroll, new)?;
+            return Ok(true);
+        }
+        // Shift+Down (CSI 1;2B)
+        if buf[*i + 2] == b'1'
+            && *i + 5 < n
+            && buf[*i + 3] == b';'
+            && buf[*i + 4] == b'2'
+            && buf[*i + 5] == b'B'
+        {
+            *i += 6;
+            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
+            return Ok(true);
+        }
         if buf[*i + 2] == b'5' && *i + 3 < n && buf[*i + 3] == b'~' {
             // Page Up
             *i += 4;
@@ -1052,6 +1075,25 @@ fn zoomed_loop(
                 }
             }
 
+            // Check for Shift+Up → enter scroll mode and scroll up 1 line
+            if buf[i] == 0x1b
+                && i + 5 < n
+                && buf[i + 1] == b'['
+                && buf[i + 2] == b'1'
+                && buf[i + 3] == b';'
+                && buf[i + 4] == b'2'
+                && buf[i + 5] == b'A'
+            {
+                enter_scroll_mode(app, session_id, &mut scroll)?;
+                if scroll.active {
+                    let new = scroll.offset.saturating_add(1).min(scroll.total);
+                    scroll_to(app, session_id, &mut scroll, new)?;
+                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                }
+                i += 6;
+                continue;
+            }
+
             // Check for PgUp/PgDn → enter scroll mode
             if buf[i] == 0x1b && i + 3 < n && buf[i + 1] == b'[' {
                 let page = (app.term.rows.saturating_sub(2)) as usize;
@@ -1098,6 +1140,15 @@ fn zoomed_loop(
                         if buf[i + 2] == b'<' {
                             break;
                         }
+                        // Stop before Shift+Up (enters scroll mode)
+                        if buf[i + 2] == b'1'
+                            && i + 5 < n
+                            && buf[i + 3] == b';'
+                            && buf[i + 4] == b'2'
+                            && buf[i + 5] == b'A'
+                        {
+                            break;
+                        }
                         // Stop before PgUp (enters scroll mode)
                         if buf[i + 2] == b'5' && i + 3 < n && buf[i + 3] == b'~' {
                             break;
@@ -1117,7 +1168,7 @@ fn zoomed_loop(
 
 fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
     let content = format!(
-        " [SCROLL] line {}/{}  q:exit  k/\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bottom  click+drag:select",
+        " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
         scroll.offset, scroll.total,
     );
     let padding = (cols as usize).saturating_sub(content.len());
