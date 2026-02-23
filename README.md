@@ -103,7 +103,7 @@ Scroll mode freezes the session output and renders the frozen viewport directly 
 
 ### Session lifecycle
 
-1. **Claim** — The workspace calls `kbtz claim-next` to atomically claim the best available task. Tasks are ranked by FTS relevance (if `--prefer` is set), number of tasks they would unblock, and age.
+1. **Claim** — When there is an available task and available session capacity, the workspace generates a new session ID and atomically claims the best available task for that ID. Tasks are ranked by FTS relevance (if `--prefer` is set), number of tasks they would unblock, and age.
 
 2. **Spawn** — A PTY is allocated and the configured command (default: `claude`) is launched with the agent protocol injected via `--append-system-prompt`. Each session gets environment variables: `KBTZ_DB`, `KBTZ_TASK`, `KBTZ_SESSION_ID`, and `KBTZ_WORKSPACE_DIR`.
 
