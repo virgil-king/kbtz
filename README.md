@@ -236,20 +236,6 @@ Cycle detection prevents circular dependencies.
 | `kbtz wait` | Block until the database changes (uses inotify) |
 | `kbtz exec` | Execute commands from stdin atomically in a single transaction |
 
-### Multi-agent usage
-
-Multiple agents can safely share a single kbtz database. Claims use compare-and-swap guards so only one agent can claim a given task. A typical agent loop:
-
-```bash
-while true; do
-    kbtz wait
-    TASK=$(kbtz claim-next "$SESSION_ID" --prefer "$PREFER" 2>/dev/null | awk '/^Name:/{print $2}') || continue
-    # ... work on $TASK ...
-    kbtz done "$TASK"
-    PREFER="$TASK"
-done
-```
-
 ### Claude Code plugin
 
 The `plugin/` directory contains a Claude Code plugin with a kbtz command reference and hooks.
