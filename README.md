@@ -10,7 +10,10 @@ The name comes from "kibitz" -- to watch and offer commentary.
 - **Structure work with dependencies** — parent/child and blocking relationships between tasks so agents work in the right order
 - **Unblocked tasks immediately get their own agent** — when a task's dependencies are satisfied, the workspace claims it and spawns a new session automatically
 
-kbtz has two components: `kbtz-workspace` (the terminal workspace you interact with) and `kbtz` (the underlying CLI that agents use to manage tasks).
+kbtz has two components:
+
+- **`kbtz-workspace`** — The terminal workspace you interact with. Manages concurrent agent sessions against a shared task database with a tmux-like interface for monitoring and interacting with them.
+- **`kbtz`** — The underlying CLI that agents use to interact with the task database: creating tasks, setting dependencies, claiming work, and adding notes.
 
 ## Install
 
