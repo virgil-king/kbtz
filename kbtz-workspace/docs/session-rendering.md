@@ -66,7 +66,7 @@ restores the child's screen state.
 - Communication via Unix socket with a framed protocol (protocol.rs)
 - Messages: `PtyOutput`, `PtyInput`, `Resize`, `InitialState`, `Shutdown`
 - On connect, shepherd sends `InitialState` (full output buffer) to
-  reconstruct the VTE state
+  reconstruct the VTE state (see "Shepherd Reconnection and Scrollback" below)
 - Reader thread reads `PtyOutput` messages, feeds `Passthrough.vte`
 
 ## Scroll Mode
@@ -233,6 +233,66 @@ in-memory VTE parser, never reaching the real terminal. vt100 handles
 resize reflow natively. No raw byte buffer needed.
 
 **Status**: Implemented, tests passing, awaiting user testing.
+
+## Shepherd Reconnection and Scrollback
+
+### The problem
+
+The shepherd accumulates a raw byte output buffer of everything the child
+ever wrote. On reconnect, it sends this entire buffer as `InitialState`.
+With `SCROLLBACK_ROWS` enabled on the workspace VTE, replaying this buffer
+causes every intermediate screen redraw to accumulate in scrollback —
+producing thousands of duplicate lines.
+
+For Claude Code specifically, this is severe: Claude Code redraws its
+viewport dozens of times per second on the main screen. A long session
+produces megabytes of raw output. Replaying it into a VTE with 10,000
+rows of scrollback fills scrollback with intermediate render frames.
+
+### Current fix
+
+Process `InitialState` through a temporary VTE with `scrollback=0` to
+extract only the final screen state (`state_formatted()`), then feed that
+into the real Passthrough (which has `SCROLLBACK_ROWS`). This eliminates
+duplication but loses all pre-reconnection scrollback.
+
+### Trade-off
+
+After reconnection, scroll mode only shows content generated from that
+point forward. Pre-reconnection history is lost. This is similar to
+tmux's client behavior (the server owns the scrollback), except tmux's
+server does maintain structured scrollback and makes it available to
+re-attaching clients.
+
+### Future: shepherd-side scrollback
+
+The shepherd could maintain its own VTE with `SCROLLBACK_ROWS` and send
+structured screen state (not raw bytes) on reconnect. This would:
+
+1. **Preserve scrollback across reconnections** — the shepherd owns the
+   scrollback, like tmux's server
+2. **Reduce reconnection payload** — `state_formatted()` is much smaller
+   than the full raw buffer
+3. **Eliminate the temp VTE workaround** on the workspace side
+
+This requires the shepherd to maintain a VTE parser, which it currently
+does not. The shepherd currently just accumulates raw bytes and forwards
+`PtyOutput` messages. Adding a VTE to the shepherd would make it more
+like a tmux server.
+
+### Alternative: structured scrollback serialization
+
+A more complete solution would serialize the VTE's scrollback grid
+(structured line data) from the shepherd to the workspace. The `vt100`
+crate's `Screen` derives `Clone` but has no serialization support. This
+would require either:
+
+- Adding serde support to `vt100::Screen` (upstream change)
+- A custom serialization format for the grid data
+- Using `rows_formatted()` with scrollback offset to serialize line-by-line
+
+This is significantly more complex but would provide perfect scrollback
+preservation with reflow support.
 
 ## Key vt100 Internals
 

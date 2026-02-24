@@ -44,30 +44,10 @@ impl ShepherdSession {
             .context("failed to clone Unix stream for reader")?;
         let write_stream = stream;
 
-        let mut reader = BufReader::new(read_stream);
-
-        // Read the first message — must be InitialState
-        let first_msg = protocol::read_message(&mut reader)
-            .context("failed to read initial message from shepherd")?;
-        let initial_data = match first_msg {
-            Some(Message::InitialState(data)) => data,
-            Some(other) => bail!(
-                "expected InitialState from shepherd, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-            None => bail!("shepherd closed connection before sending InitialState"),
-        };
-
         let pty_rows = rows.saturating_sub(1);
-        let mut pt = Passthrough::new(pty_rows, cols);
-        pt.process(&initial_data);
-        let passthrough = Arc::new(Mutex::new(pt));
 
-        // Spawn reader thread
-        let pt_clone = Arc::clone(&passthrough);
-        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
-
-        // Send initial Resize to tell the shepherd our current terminal size
+        // Size-first handshake: send Resize before reading InitialState
+        // so the shepherd builds the restore sequence at our terminal size.
         let writer = Mutex::new(BufWriter::new(write_stream));
         {
             let mut w = writer
@@ -82,6 +62,31 @@ impl ShepherdSession {
             )
             .context("failed to send initial resize to shepherd")?;
         }
+
+        let mut reader = BufReader::new(read_stream);
+
+        // Read InitialState — shepherd builds this from structured VTE
+        // data (scrollback rows + state_formatted), not raw byte replay.
+        let first_msg = protocol::read_message(&mut reader)
+            .context("failed to read initial message from shepherd")?;
+        let initial_data = match first_msg {
+            Some(Message::InitialState(data)) => data,
+            Some(other) => bail!(
+                "expected InitialState from shepherd, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+            None => bail!("shepherd closed connection before sending InitialState"),
+        };
+
+        // Process directly — the restore sequence is structured data at
+        // our terminal size, so no temp VTE or filtering needed.
+        let mut pt = Passthrough::new(pty_rows, cols);
+        pt.process(&initial_data);
+        let passthrough = Arc::new(Mutex::new(pt));
+
+        // Spawn reader thread
+        let pt_clone = Arc::clone(&passthrough);
+        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
 
         Ok(ShepherdSession {
             socket_path: socket_path.to_path_buf(),
@@ -278,14 +283,13 @@ mod tests {
     use std::io::BufReader;
 
     /// Helper: create a ShepherdSession with one end of a UnixStream pair,
-    /// after sending the required InitialState handshake on the other end.
+    /// simulating the size-first handshake.
     fn make_test_session(socket_path: &Path) -> (ShepherdSession, BufReader<UnixStream>) {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
 
-        // The server side sends InitialState, then the client connects.
-        // But connect() expects to connect to a path. We need to build
-        // the ShepherdSession manually for testing since we can't use a
-        // real filesystem socket with UnixStream::pair().
+        // Simulate the shepherd side: it will receive a Resize first,
+        // then send InitialState.  For tests we just send InitialState
+        // with simple content (the test helper doesn't need a real VTE).
         let mut server_writer = BufWriter::new(server_stream.try_clone().unwrap());
         protocol::write_message(
             &mut server_writer,
@@ -298,7 +302,8 @@ mod tests {
 
         let mut reader = BufReader::new(read_stream);
 
-        // Read the InitialState
+        // Read InitialState (in real code the client sends Resize first,
+        // but in this test helper we skip that since there's no real shepherd).
         let first_msg = protocol::read_message(&mut reader).unwrap().unwrap();
         let initial_data = match first_msg {
             Message::InitialState(data) => data,

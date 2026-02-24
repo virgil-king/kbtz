@@ -152,8 +152,7 @@ pub struct Session {
     pub stopping_since: Option<Instant>,
 }
 
-/// Max scrollback rows retained per session for the scroll-back viewer.
-const SCROLLBACK_ROWS: usize = 10_000;
+use kbtz_workspace::SCROLLBACK_ROWS;
 
 /// Shared state between the reader thread and the main thread.
 ///
