@@ -229,6 +229,8 @@ impl Passthrough {
         } else {
             let _ = write!(out, "\x1b[?25h");
         }
+        // Restore child's input modes (bracketed paste, keypad, cursor keys).
+        let _ = out.write_all(&screen.input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
         screen.clone()
@@ -240,18 +242,7 @@ impl Passthrough {
     }
 
     pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
-        // Resize both screens (main and alt).  The vt100 crate's
-        // set_size() only resizes the active screen.  A terminal has
-        // one physical size, so both grids must match.  Failing to
-        // resize the inactive screen causes scroll mode to show
-        // content at the wrong dimensions.
-        let was_alt = self.vte.screen().alternate_screen();
-        if was_alt {
-            self.vte.process(b"\x1b[?47l"); // expose main grid
-            self.vte.screen_mut().set_size(rows, cols);
-            self.vte.process(b"\x1b[?47h"); // restore alt grid
-        }
-        self.vte.screen_mut().set_size(rows, cols);
+        kbtz_workspace::resize_both_screens(&mut self.vte, rows, cols);
     }
 
     /// Enter scroll mode: snapshot the main screen (with scrollback)
@@ -275,25 +266,6 @@ impl Passthrough {
         // Probe scrollback depth.
         snapshot.set_scrollback(usize::MAX);
         let total = snapshot.scrollback();
-        snapshot.set_scrollback(0);
-
-        // Diagnostic: log scrollback content to help debug duplication.
-        let cols = snapshot.size().1;
-        kbtz::debug_log::log(&format!(
-            "enter_scroll_mode: was_alt={was_alt} scrollback_depth={total} screen_size={:?}",
-            snapshot.size()
-        ));
-        // Log first 30 scrollback lines (from oldest).
-        for offset in (1..=total.min(30)).rev() {
-            snapshot.set_scrollback(offset);
-            if let Some(row) = snapshot.rows(0, cols).next() {
-                let text = row.to_string();
-                let trimmed = text.trim_end();
-                if !trimmed.is_empty() {
-                    kbtz::debug_log::log(&format!("  scrollback[offset={offset}]: {trimmed:?}"));
-                }
-            }
-        }
         snapshot.set_scrollback(0);
 
         self.scroll_screen = Some(snapshot);

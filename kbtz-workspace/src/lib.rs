@@ -4,6 +4,19 @@ pub mod protocol;
 /// Shared between the workspace (session.rs) and the shepherd.
 pub const SCROLLBACK_ROWS: usize = 10_000;
 
+/// Resize both the main and alternate screen grids.  The vt100 crate's
+/// `set_size()` only resizes the active screen; a terminal has one
+/// physical size so both grids must match.
+pub fn resize_both_screens(vte: &mut vt100::Parser, rows: u16, cols: u16) {
+    let was_alt = vte.screen().alternate_screen();
+    if was_alt {
+        vte.process(b"\x1b[?47l"); // expose main grid
+        vte.screen_mut().set_size(rows, cols);
+        vte.process(b"\x1b[?47h"); // restore alt grid
+    }
+    vte.screen_mut().set_size(rows, cols);
+}
+
 /// Build a synthetic byte stream from a VTE that, when processed by a
 /// fresh `vt100::Parser` with `SCROLLBACK_ROWS`, reproduces the screen
 /// state including scrollback.

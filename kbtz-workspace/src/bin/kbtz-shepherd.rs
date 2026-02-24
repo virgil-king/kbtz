@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use kbtz_workspace::protocol::{self, Message};
-use kbtz_workspace::{build_restore_sequence, SCROLLBACK_ROWS};
+use kbtz_workspace::{build_restore_sequence, resize_both_screens, SCROLLBACK_ROWS};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -346,19 +346,6 @@ fn run(
             }
         }
     }
-}
-
-/// Resize both the main and alternate screen grids.  The vt100 crate's
-/// `set_size()` only resizes the active screen; a terminal has one
-/// physical size so both grids must match.
-fn resize_both_screens(vte: &mut vt100::Parser, rows: u16, cols: u16) {
-    let was_alt = vte.screen().alternate_screen();
-    if was_alt {
-        vte.process(b"\x1b[?47l"); // expose main grid
-        vte.screen_mut().set_size(rows, cols);
-        vte.process(b"\x1b[?47h"); // restore alt grid
-    }
-    vte.screen_mut().set_size(rows, cols);
 }
 
 fn forward_sigterm(child_pid: Option<u32>) {
