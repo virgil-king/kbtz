@@ -22,8 +22,27 @@ use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
-use app::{Action, App};
+use app::{Action, App, TOPLEVEL_SESSION_ID};
 use session::SessionStatus;
+
+/// Identifies the session that a passthrough loop is attached to.
+enum SessionKind<'a> {
+    TopLevel,
+    Worker { session_id: &'a str, task: &'a str },
+}
+
+impl SessionKind<'_> {
+    fn session_id(&self) -> &str {
+        match self {
+            SessionKind::TopLevel => TOPLEVEL_SESSION_ID,
+            SessionKind::Worker { session_id, .. } => session_id,
+        }
+    }
+
+    fn is_toplevel(&self) -> bool {
+        matches!(self, SessionKind::TopLevel)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -274,10 +293,21 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
             }
             Action::ZoomIn(ref task) => {
                 let task = task.clone();
-                action = zoomed_mode(app, &task, running)?;
+                let sid = match app.task_to_session.get(&task) {
+                    Some(sid) => sid.clone(),
+                    None => {
+                        action = Action::ReturnToTree;
+                        continue;
+                    }
+                };
+                let kind = SessionKind::Worker {
+                    session_id: &sid,
+                    task: &task,
+                };
+                action = passthrough_mode(app, &kind, running)?;
             }
             Action::TopLevel => {
-                action = toplevel_mode(app, running)?;
+                action = passthrough_mode(app, &SessionKind::TopLevel, running)?;
             }
             Action::NextSession | Action::PrevSession => {
                 // Shouldn't happen at top level, treat as tree
@@ -577,26 +607,27 @@ fn tree_loop(
     }
 }
 
-// ── Zoomed mode ────────────────────────────────────────────────────────
+// ── Passthrough mode (unified for both worker and toplevel sessions) ──
 
-fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<Action> {
-    let session_id = match app.task_to_session.get(task) {
-        Some(sid) => sid.clone(),
-        None => return Ok(Action::ReturnToTree),
-    };
+fn passthrough_mode(
+    app: &mut App,
+    kind: &SessionKind,
+    running: &Arc<AtomicBool>,
+) -> Result<Action> {
+    if kind.is_toplevel() {
+        app.ensure_toplevel()?;
+    }
 
     enter_passthrough_screen(app.term.rows)?;
 
-    // Start passthrough: flushes buffered output to stdout (everything
-    // the child wrote while we were in tree mode), then goes live.
-    if let Some(session) = app.sessions.get(&session_id) {
+    let sid = kind.session_id();
+    if let Some(session) = app.get_session(sid) {
         session.start_passthrough()?;
     }
 
-    let result = zoomed_loop(app, task, &session_id, running);
+    let result = passthrough_loop(app, kind, running);
 
-    // Stop passthrough (resets input modes like mouse tracking)
-    if let Some(session) = app.sessions.get(&session_id) {
+    if let Some(session) = app.get_session(sid) {
         let _ = session.stop_passthrough();
     }
 
@@ -604,37 +635,49 @@ fn zoomed_mode(app: &mut App, task: &str, running: &Arc<AtomicBool>) -> Result<A
     result
 }
 
-fn handle_zoomed_prefix_command(
+fn handle_prefix_command(
     cmd: u8,
     app: &mut App,
-    session_id: &str,
-    task: &str,
+    kind: &SessionKind,
     stdin: &mut io::StdinLock,
-    last_status: &SessionStatus,
     scroll: &mut ScrollState,
+    last_status: &SessionStatus,
 ) -> Result<Option<Action>> {
+    let sid = kind.session_id();
+    let rows = app.term.rows;
+    let cols = app.term.cols;
+
     match cmd {
         b't' | b'd' => {
             if scroll.active {
-                exit_scroll_mode(app, session_id, scroll)?;
+                exit_scroll_mode(app, sid, scroll)?;
             }
             Ok(Some(Action::ReturnToTree))
         }
-        b'c' => {
+        b'c' if !kind.is_toplevel() => {
             if scroll.active {
-                exit_scroll_mode(app, session_id, scroll)?;
+                exit_scroll_mode(app, sid, scroll)?;
             }
-            if let Some(session) = app.sessions.get(session_id) {
+            if let Some(session) = app.get_session(sid) {
                 let _ = session.stop_passthrough();
             }
             Ok(Some(Action::TopLevel))
         }
         b'n' => {
-            if let Some(next_task) = app.cycle_session(&Action::NextSession, task) {
-                if scroll.active {
-                    exit_scroll_mode(app, session_id, scroll)?;
+            let next_task = match kind {
+                SessionKind::Worker { task, .. } => {
+                    app.cycle_session(&Action::NextSession, task)
                 }
-                if let Some(session) = app.sessions.get(session_id) {
+                SessionKind::TopLevel => app
+                    .session_ids_ordered()
+                    .first()
+                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+            };
+            if let Some(next_task) = next_task {
+                if scroll.active {
+                    exit_scroll_mode(app, sid, scroll)?;
+                }
+                if let Some(session) = app.get_session(sid) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
@@ -643,11 +686,20 @@ fn handle_zoomed_prefix_command(
             }
         }
         b'p' => {
-            if let Some(prev_task) = app.cycle_session(&Action::PrevSession, task) {
-                if scroll.active {
-                    exit_scroll_mode(app, session_id, scroll)?;
+            let prev_task = match kind {
+                SessionKind::Worker { task, .. } => {
+                    app.cycle_session(&Action::PrevSession, task)
                 }
-                if let Some(session) = app.sessions.get(session_id) {
+                SessionKind::TopLevel => app
+                    .session_ids_ordered()
+                    .last()
+                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+            };
+            if let Some(prev_task) = prev_task {
+                if scroll.active {
+                    exit_scroll_mode(app, sid, scroll)?;
+                }
+                if let Some(session) = app.get_session(sid) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(prev_task)))
@@ -656,59 +708,49 @@ fn handle_zoomed_prefix_command(
             }
         }
         b'\t' => {
-            if let Some(next_task) = app.next_needs_input_session(Some(task)) {
+            let exclude = match kind {
+                SessionKind::Worker { task, .. } => Some(*task),
+                SessionKind::TopLevel => None,
+            };
+            if let Some(next_task) = app.next_needs_input_session(exclude) {
                 if scroll.active {
-                    exit_scroll_mode(app, session_id, scroll)?;
+                    exit_scroll_mode(app, sid, scroll)?;
                 }
-                if let Some(session) = app.sessions.get(session_id) {
+                if let Some(session) = app.get_session(sid) {
                     let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
-                draw_status_bar(
-                    app.term.rows,
-                    app.term.cols,
-                    task,
-                    session_id,
-                    last_status,
-                    Some("no sessions need input"),
-                );
+                draw_normal_status_bar(rows, cols, kind, last_status, Some("no sessions need input"));
                 Ok(None)
             }
         }
         b'[' => {
             if !scroll.active {
-                enter_scroll_mode(app, session_id, scroll)?;
+                enter_scroll_mode(app, sid, scroll)?;
             }
             Ok(None)
         }
         PREFIX_KEY => {
-            if let Some(session) = app.sessions.get_mut(session_id) {
+            if let Some(session) = app.get_session_mut(sid) {
                 session.write_input(&[PREFIX_KEY])?;
             }
             Ok(None)
         }
         b'?' => {
-            draw_help_bar(app.term.rows, app.term.cols);
+            draw_help_bar(rows, cols, kind);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
             if scroll.active {
-                draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
+                draw_scroll_status_bar(rows, cols, scroll);
             } else {
-                draw_status_bar(
-                    app.term.rows,
-                    app.term.cols,
-                    task,
-                    session_id,
-                    last_status,
-                    None,
-                );
+                draw_normal_status_bar(rows, cols, kind, last_status, None);
             }
             Ok(None)
         }
         b'q' => {
             if scroll.active {
-                exit_scroll_mode(app, session_id, scroll)?;
+                exit_scroll_mode(app, sid, scroll)?;
             }
             Ok(Some(Action::Quit))
         }
@@ -738,7 +780,7 @@ impl ScrollState {
 /// so the terminal can handle native text selection.  Works even when
 /// there is no scrollback (the user can still select visible text).
 fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
-    if let Some(session) = app.sessions.get(session_id) {
+    if let Some(session) = app.get_session(session_id) {
         scroll.total = session.enter_scroll_mode()?;
         scroll.offset = 0;
         scroll.active = true;
@@ -752,7 +794,7 @@ fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> R
 fn exit_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
     scroll.active = false;
     scroll.offset = 0;
-    if let Some(session) = app.sessions.get(session_id) {
+    if let Some(session) = app.get_session(session_id) {
         session.exit_scroll_mode()?;
     }
     Ok(())
@@ -764,7 +806,7 @@ fn scroll_to(
     scroll: &mut ScrollState,
     new_offset: usize,
 ) -> Result<()> {
-    if let Some(session) = app.sessions.get(session_id) {
+    if let Some(session) = app.get_session(session_id) {
         scroll.offset = session.render_scrollback(new_offset, app.term.cols)?;
         // Update total in case more scrollback accumulated while scrolled.
         scroll.total = session.scrollback_available()?;
@@ -918,12 +960,11 @@ fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouse
     })
 }
 
-// ── Zoomed loop ────────────────────────────────────────────────────────
+// ── Passthrough loop ──────────────────────────────────────────────────
 
-fn zoomed_loop(
+fn passthrough_loop(
     app: &mut App,
-    task: &str,
-    session_id: &str,
+    kind: &SessionKind,
     running: &Arc<AtomicBool>,
 ) -> Result<Action> {
     let stdin = io::stdin();
@@ -932,24 +973,19 @@ fn zoomed_loop(
     let mut last_status = SessionStatus::Starting;
     let mut scroll = ScrollState::new();
 
+    let sid = kind.session_id();
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
 
-    draw_status_bar(
-        app.term.rows,
-        app.term.cols,
-        task,
-        session_id,
-        &last_status,
-        None,
-    );
+    draw_normal_status_bar(app.term.rows, app.term.cols, kind, &last_status, None);
 
     loop {
         if !running.load(Ordering::SeqCst) {
             return Ok(Action::Quit);
         }
 
-        if !app.sessions.contains_key(session_id) {
+        // Check session liveness (is_alive needs &mut).
+        if app.get_session_mut(sid).is_none_or(|s| !s.is_alive()) {
             return Ok(Action::ReturnToTree);
         }
 
@@ -960,28 +996,30 @@ fn zoomed_loop(
             debug_msg = Some(msg);
         }
 
-        if !app.sessions.contains_key(session_id) {
+        // Re-check after tick (session may have been removed).
+        if app.get_session(sid).is_none() {
             return Ok(Action::ReturnToTree);
         }
 
-        // Redraw status bar when status or debug info changes
+        // Redraw status bar when status or debug info changes.
         let mut redraw = false;
-        if let Some(session) = app.sessions.get(session_id) {
-            let status = session.status().clone();
-            if status != last_status {
-                last_status = status;
-                redraw = true;
+        if let SessionKind::Worker { session_id, .. } = kind {
+            if let Some(session) = app.sessions.get(*session_id) {
+                let status = session.status().clone();
+                if status != last_status {
+                    last_status = status;
+                    redraw = true;
+                }
             }
         }
         if debug_msg.is_some() {
             redraw = true;
         }
         if redraw && !scroll.active {
-            draw_status_bar(
+            draw_normal_status_bar(
                 app.term.rows,
                 app.term.cols,
-                task,
-                session_id,
+                kind,
                 &last_status,
                 debug_msg.take().as_deref(),
             );
@@ -993,6 +1031,9 @@ fn zoomed_loop(
             Some(n) => n,
         };
 
+        let rows = app.term.rows;
+        let cols = app.term.cols;
+
         let mut i = 0;
         while i < n {
             // ── Scroll mode input ──────────────────────────────────
@@ -1000,67 +1041,26 @@ fn zoomed_loop(
                 // PREFIX_KEY commands still work in scroll mode
                 if buf[i] == PREFIX_KEY {
                     i += 1;
-                    let cmd = if i < n {
-                        let b = buf[i];
-                        i += 1;
-                        b
-                    } else {
-                        let mut cmd_buf = [0u8; 1];
-                        match stdin.read(&mut cmd_buf) {
-                            Ok(0) | Err(_) => return Ok(Action::Quit),
-                            Ok(_) => cmd_buf[0],
-                        }
+                    let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
+                        Some(b) => b,
+                        None => return Ok(Action::Quit),
                     };
-                    if let Some(action) = handle_zoomed_prefix_command(
-                        cmd,
-                        app,
-                        session_id,
-                        task,
-                        &mut stdin,
-                        &last_status,
-                        &mut scroll,
-                    )? {
+                    if let Some(action) =
+                        handle_prefix_command(cmd, app, kind, &mut stdin, &mut scroll, &last_status)?
+                    {
                         return Ok(action);
                     }
                     if scroll.active {
-                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        draw_scroll_status_bar(rows, cols, &scroll);
                     } else {
-                        draw_status_bar(
-                            app.term.rows,
-                            app.term.cols,
-                            task,
-                            session_id,
-                            &last_status,
-                            None,
-                        );
+                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
                     }
                     continue;
                 }
 
-                match handle_scroll_input(
-                    app,
-                    session_id,
-                    &mut scroll,
-                    &buf,
-                    &mut i,
-                    n,
-                    app.term.rows,
-                )? {
-                    true => {
-                        // Still in scroll mode — update status bar
-                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
-                    }
-                    false => {
-                        // Exited scroll mode — restore screen and status
-                        draw_status_bar(
-                            app.term.rows,
-                            app.term.cols,
-                            task,
-                            session_id,
-                            &last_status,
-                            None,
-                        );
-                    }
+                match handle_scroll_input(app, sid, &mut scroll, &buf, &mut i, n, rows)? {
+                    true => draw_scroll_status_bar(rows, cols, &scroll),
+                    false => draw_normal_status_bar(rows, cols, kind, &last_status, None),
                 }
                 continue;
             }
@@ -1072,21 +1072,16 @@ fn zoomed_loop(
                 if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
                     if evt.button == 0 {
                         // Left click → enter scroll mode for text selection.
-                        // The initial click is consumed (mouse tracking is
-                        // disabled on entry so subsequent clicks are native),
-                        // but that's fine — the user clicks once to enter,
-                        // then click-drags to select.
-                        enter_scroll_mode(app, session_id, &mut scroll)?;
+                        enter_scroll_mode(app, sid, &mut scroll)?;
                         if scroll.active {
-                            draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                            draw_scroll_status_bar(rows, cols, &scroll);
                         }
                         i += evt.len;
                         continue;
                     }
                     // Forward other mouse events to child if it requested
-                    // mouse tracking, otherwise discard (artifact of kbtz's
-                    // forced mouse enable).
-                    if let Some(session) = app.sessions.get_mut(session_id) {
+                    // mouse tracking, otherwise discard.
+                    if let Some(session) = app.get_session_mut(sid) {
                         if session.has_mouse_tracking() {
                             session.write_input(&buf[i..i + evt.len])?;
                         }
@@ -1105,26 +1100,25 @@ fn zoomed_loop(
                 && buf[i + 4] == b'2'
                 && buf[i + 5] == b'A'
             {
-                enter_scroll_mode(app, session_id, &mut scroll)?;
+                enter_scroll_mode(app, sid, &mut scroll)?;
                 if scroll.active {
                     let new = scroll.offset.saturating_add(1).min(scroll.total);
-                    scroll_to(app, session_id, &mut scroll, new)?;
-                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    scroll_to(app, sid, &mut scroll, new)?;
+                    draw_scroll_status_bar(rows, cols, &scroll);
                 }
                 i += 6;
                 continue;
             }
 
-            // Check for PgUp/PgDn → enter scroll mode
+            // Check for PgUp → enter scroll mode
             if buf[i] == 0x1b && i + 3 < n && buf[i + 1] == b'[' {
-                let page = (app.term.rows.saturating_sub(2)) as usize;
+                let page = (rows.saturating_sub(2)) as usize;
                 if buf[i + 2] == b'5' && buf[i + 3] == b'~' {
-                    // PgUp → enter scroll mode and scroll up a page
-                    enter_scroll_mode(app, session_id, &mut scroll)?;
+                    enter_scroll_mode(app, sid, &mut scroll)?;
                     if scroll.active {
                         let new = scroll.offset.saturating_add(page).min(scroll.total);
-                        scroll_to(app, session_id, &mut scroll, new)?;
-                        draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                        scroll_to(app, sid, &mut scroll, new)?;
+                        draw_scroll_status_bar(rows, cols, &scroll);
                     }
                     i += 4;
                     continue;
@@ -1137,19 +1131,13 @@ fn zoomed_loop(
                     Some(b) => b,
                     None => return Ok(Action::Quit),
                 };
-                if let Some(action) = handle_zoomed_prefix_command(
-                    cmd,
-                    app,
-                    session_id,
-                    task,
-                    &mut stdin,
-                    &last_status,
-                    &mut scroll,
-                )? {
+                if let Some(action) =
+                    handle_prefix_command(cmd, app, kind, &mut stdin, &mut scroll, &last_status)?
+                {
                     return Ok(action);
                 }
                 if scroll.active {
-                    draw_scroll_status_bar(app.term.rows, app.term.cols, &scroll);
+                    draw_scroll_status_bar(rows, cols, &scroll);
                 }
             } else {
                 // Find the next PREFIX_KEY or ESC sequence we intercept,
@@ -1157,11 +1145,11 @@ fn zoomed_loop(
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
                     if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
-                        // Stop before SGR mouse sequence (handled above)
+                        // Stop before SGR mouse sequence
                         if buf[i + 2] == b'<' {
                             break;
                         }
-                        // Stop before Shift+Up (enters scroll mode)
+                        // Stop before Shift+Up
                         if buf[i + 2] == b'1'
                             && i + 5 < n
                             && buf[i + 3] == b';'
@@ -1170,7 +1158,7 @@ fn zoomed_loop(
                         {
                             break;
                         }
-                        // Stop before PgUp (enters scroll mode)
+                        // Stop before PgUp
                         if buf[i + 2] == b'5' && i + 3 < n && buf[i + 3] == b'~' {
                             break;
                         }
@@ -1178,159 +1166,9 @@ fn zoomed_loop(
                     i += 1;
                 }
                 if i > start {
-                    if let Some(session) = app.sessions.get_mut(session_id) {
+                    if let Some(session) = app.get_session_mut(sid) {
                         session.write_input(&buf[start..i])?;
                     }
-                }
-            }
-        }
-    }
-}
-
-fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
-    let content = format!(
-        " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
-        scroll.offset, scroll.total,
-    );
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
-}
-
-// ── Top-level mode ─────────────────────────────────────────────────────
-
-fn toplevel_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
-    // Ensure the top-level session exists (respawn if exited).
-    app.ensure_toplevel()?;
-
-    enter_passthrough_screen(app.term.rows)?;
-
-    if let Some(ref toplevel) = app.toplevel {
-        toplevel.start_passthrough()?;
-    }
-
-    let result = toplevel_loop(app, running);
-
-    // Stop passthrough (resets input modes like mouse tracking)
-    if let Some(ref toplevel) = app.toplevel {
-        let _ = toplevel.stop_passthrough();
-    }
-
-    leave_passthrough_screen()?;
-    result
-}
-
-fn handle_toplevel_prefix_command(
-    cmd: u8,
-    app: &mut App,
-    stdin: &mut io::StdinLock,
-) -> Result<Option<Action>> {
-    match cmd {
-        b't' | b'd' => Ok(Some(Action::ReturnToTree)),
-        b'n' => {
-            let ids = app.session_ids_ordered();
-            if let Some(first_sid) = ids.first() {
-                if let Some(session) = app.sessions.get(first_sid) {
-                    let task = session.task_name().to_string();
-                    return Ok(Some(Action::ZoomIn(task)));
-                }
-            }
-            Ok(None)
-        }
-        b'p' => {
-            let ids = app.session_ids_ordered();
-            if let Some(last_sid) = ids.last() {
-                if let Some(session) = app.sessions.get(last_sid) {
-                    let task = session.task_name().to_string();
-                    return Ok(Some(Action::ZoomIn(task)));
-                }
-            }
-            Ok(None)
-        }
-        b'\t' => {
-            if let Some(task) = app.next_needs_input_session(None) {
-                Ok(Some(Action::ZoomIn(task)))
-            } else {
-                draw_toplevel_status_bar(
-                    app.term.rows,
-                    app.term.cols,
-                    Some("no sessions need input"),
-                );
-                Ok(None)
-            }
-        }
-        PREFIX_KEY => {
-            if let Some(ref mut toplevel) = app.toplevel {
-                toplevel.write_input(&[PREFIX_KEY])?;
-            }
-            Ok(None)
-        }
-        b'?' => {
-            draw_toplevel_help_bar(app.term.rows, app.term.cols);
-            let mut discard = [0u8; 1];
-            let _ = stdin.read(&mut discard);
-            draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
-            Ok(None)
-        }
-        b'q' => Ok(Some(Action::Quit)),
-        _ => Ok(None),
-    }
-}
-
-fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
-    let stdin = io::stdin();
-    let mut stdin = stdin.lock();
-    let mut buf = [0u8; 4096];
-
-    let watchers = Watchers::new(app)?;
-
-    draw_toplevel_status_bar(app.term.rows, app.term.cols, None);
-
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            return Ok(Action::Quit);
-        }
-
-        // If top-level session has exited, return to tree.
-        if app.toplevel.as_mut().is_none_or(|s| !s.is_alive()) {
-            return Ok(Action::ReturnToTree);
-        }
-
-        watchers.poll(app)?;
-
-        // Run lifecycle tick for worker sessions.
-        app.tick()?;
-
-        let n = match poll_stdin(&mut stdin, &mut buf) {
-            None => continue,
-            Some(0) => return Ok(Action::Quit),
-            Some(n) => n,
-        };
-
-        let mut i = 0;
-        while i < n {
-            if buf[i] == PREFIX_KEY {
-                i += 1;
-                let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
-                    Some(b) => b,
-                    None => return Ok(Action::Quit),
-                };
-                if let Some(action) = handle_toplevel_prefix_command(cmd, app, &mut stdin)? {
-                    return Ok(action);
-                }
-            } else {
-                let start = i;
-                while i < n && buf[i] != PREFIX_KEY {
-                    i += 1;
-                }
-                if let Some(ref mut toplevel) = app.toplevel {
-                    toplevel.write_input(&buf[start..i])?;
                 }
             }
         }
@@ -1361,46 +1199,54 @@ fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>) 
     let _ = out.flush();
 }
 
-fn draw_toplevel_status_bar(rows: u16, cols: u16, debug: Option<&str>) {
-    draw_bar(rows, cols, "7", " ^B ? help \u{2502} task manager", debug);
-}
-
-fn draw_toplevel_help_bar(rows: u16, cols: u16) {
-    draw_bar(
-        rows,
-        cols,
-        "7;33",
-        " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
-        None,
+fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
+    let content = format!(
+        " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
+        scroll.offset, scroll.total,
     );
+    let padding = (cols as usize).saturating_sub(content.len());
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = write!(
+        out,
+        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
+        "",
+    );
+    let _ = out.flush();
 }
 
-fn draw_status_bar(
+fn draw_normal_status_bar(
     rows: u16,
     cols: u16,
-    task: &str,
-    session_id: &str,
+    kind: &SessionKind,
     status: &SessionStatus,
     debug: Option<&str>,
 ) {
-    let left = format!(
-        " ^B ? help │ {} ({}) │ {} {}",
-        task,
-        session_id,
-        status.indicator(),
-        status.label(),
-    );
+    let left = match kind {
+        SessionKind::TopLevel => " ^B ? help \u{2502} task manager".to_string(),
+        SessionKind::Worker { task, session_id } => {
+            format!(
+                " ^B ? help │ {} ({}) │ {} {}",
+                task,
+                session_id,
+                status.indicator(),
+                status.label(),
+            )
+        }
+    };
     draw_bar(rows, cols, "7", &left, debug);
 }
 
-fn draw_help_bar(rows: u16, cols: u16) {
-    draw_bar(
-        rows,
-        cols,
-        "7;33",
-        " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help",
-        None,
-    );
+fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind) {
+    let content = match kind {
+        SessionKind::TopLevel => {
+            " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
+        }
+        SessionKind::Worker { .. } => {
+            " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
+        }
+    };
+    draw_bar(rows, cols, "7;33", content, None);
 }
 
 #[cfg(test)]
