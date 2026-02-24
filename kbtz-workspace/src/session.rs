@@ -192,7 +192,11 @@ impl Passthrough {
     /// Render the current screen state to `out`, diffing against `prev`.
     /// Also emits forced mouse tracking.  Returns a clone of the current
     /// screen to use as `prev` next time.
-    pub(crate) fn render_diff(&mut self, out: &mut impl Write, prev: &vt100::Screen) -> vt100::Screen {
+    pub(crate) fn render_diff(
+        &mut self,
+        out: &mut impl Write,
+        prev: &vt100::Screen,
+    ) -> vt100::Screen {
         self.dirty.store(false, Ordering::Relaxed);
         let screen = self.vte.screen();
         let diff = screen.state_diff(prev);

@@ -272,11 +272,7 @@ fn run() -> Result<()> {
             "\x1b[?1004l", // disable focus event reporting
         )
     );
-    let _ = execute!(
-        stdout,
-        crossterm::cursor::Show,
-        LeaveAlternateScreen,
-    );
+    let _ = execute!(stdout, crossterm::cursor::Show, LeaveAlternateScreen,);
 
     result
 }
@@ -633,9 +629,7 @@ fn handle_prefix_command(
         }
         b'n' => {
             let next_task = match kind {
-                SessionKind::Worker { task, .. } => {
-                    app.cycle_session(&Action::NextSession, task)
-                }
+                SessionKind::Worker { task, .. } => app.cycle_session(&Action::NextSession, task),
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .first()
@@ -652,9 +646,7 @@ fn handle_prefix_command(
         }
         b'p' => {
             let prev_task = match kind {
-                SessionKind::Worker { task, .. } => {
-                    app.cycle_session(&Action::PrevSession, task)
-                }
+                SessionKind::Worker { task, .. } => app.cycle_session(&Action::PrevSession, task),
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .last()
@@ -680,7 +672,13 @@ fn handle_prefix_command(
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
-                draw_normal_status_bar(rows, cols, kind, last_status, Some("no sessions need input"));
+                draw_normal_status_bar(
+                    rows,
+                    cols,
+                    kind,
+                    last_status,
+                    Some("no sessions need input"),
+                );
                 Ok(None)
             }
         }
@@ -1091,9 +1089,14 @@ fn passthrough_loop(
                         Some(b) => b,
                         None => return Ok(Action::Quit),
                     };
-                    if let Some(action) =
-                        handle_prefix_command(cmd, app, kind, &mut stdin, &mut scroll, &last_status)?
-                    {
+                    if let Some(action) = handle_prefix_command(
+                        cmd,
+                        app,
+                        kind,
+                        &mut stdin,
+                        &mut scroll,
+                        &last_status,
+                    )? {
                         return Ok(action);
                     }
                     if scroll.active {
