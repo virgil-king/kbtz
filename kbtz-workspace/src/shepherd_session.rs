@@ -132,8 +132,7 @@ fn reconnect_to_shepherd(
     // accumulated terminal state.  Any output produced during the brief
     // disconnect is in the shepherd's buffer but will flow through the new
     // reader thread from this point forward.
-    let first_msg =
-        protocol::read_message(&mut reader).context("reconnect: read InitialState")?;
+    let first_msg = protocol::read_message(&mut reader).context("reconnect: read InitialState")?;
     match first_msg {
         Some(Message::InitialState(_)) => {}
         Some(other) => bail!(
@@ -228,8 +227,8 @@ impl SessionHandle for ShepherdSession {
         // The shepherd process is alive, but the reader thread may have died
         // (e.g. socket disrupted during macOS sleep/wake).  Try to reconnect
         // so the session self-heals instead of appearing alive but frozen.
-        if !self.reader_alive.load(Ordering::SeqCst) {
-            if reconnect_to_shepherd(
+        if !self.reader_alive.load(Ordering::SeqCst)
+            && reconnect_to_shepherd(
                 &self.socket_path,
                 &self.writer,
                 &self.passthrough,
@@ -238,11 +237,10 @@ impl SessionHandle for ShepherdSession {
                 self.last_cols,
             )
             .is_err()
-            {
-                // Reconnection failed — shepherd may be shutting down.
-                // Report dead so lifecycle can reap the session.
-                return false;
-            }
+        {
+            // Reconnection failed — shepherd may be shutting down.
+            // Report dead so lifecycle can reap the session.
+            return false;
         }
 
         true
@@ -502,11 +500,8 @@ mod tests {
             // Accept up to 2 connections (initial + reconnect).
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
-                protocol::write_message(
-                    &mut stream,
-                    &Message::InitialState(b"state".to_vec()),
-                )
-                .unwrap();
+                protocol::write_message(&mut stream, &Message::InitialState(b"state".to_vec()))
+                    .unwrap();
                 connections.push(stream);
             }
             connections
