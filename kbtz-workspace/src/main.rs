@@ -318,8 +318,8 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
 
 // ── Stdin helpers ─────────────────────────────────────────────────────
 
-/// Poll stdin with a 100ms timeout. Returns `Some(n)` if `n` bytes were
-/// read (`0` means EOF/error), or `None` on timeout.
+/// Poll stdin with a 16ms (~60 fps) timeout. Returns `Some(n)` if `n`
+/// bytes were read (`0` means EOF/error), or `None` on timeout.
 fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
     let stdin_fd = stdin.as_raw_fd();
     let mut pfd = libc::pollfd {
@@ -327,7 +327,7 @@ fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
         events: libc::POLLIN,
         revents: 0,
     };
-    if unsafe { libc::poll(&mut pfd, 1, 100) } <= 0 {
+    if unsafe { libc::poll(&mut pfd, 1, 16) } <= 0 {
         return None;
     }
     match stdin.read(buf) {
