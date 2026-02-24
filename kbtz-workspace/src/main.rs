@@ -357,7 +357,15 @@ fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLoc
 
 fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     terminal::enable_raw_mode()?;
-    let stdout = io::stdout();
+    // Reset scroll region and clear stale passthrough content so ratatui
+    // starts with a clean slate.
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[r")?;
+    execute!(
+        stdout,
+        terminal::Clear(terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
