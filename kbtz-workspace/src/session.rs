@@ -234,6 +234,13 @@ impl Passthrough {
 
     pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
         self.vte.screen_mut().set_size(rows, cols);
+        // Reset the output buffer to the current screen state so that
+        // scroll mode replays content at the new size.  Without this,
+        // the buffer contains bytes written at the old width which wrap
+        // differently and create duplicate-looking scrollback.
+        self.output_buffer.clear();
+        self.output_buffer
+            .extend_from_slice(&self.vte.screen().state_formatted());
     }
 
     /// Enter scroll mode: build a temporary VTE from the output buffer
