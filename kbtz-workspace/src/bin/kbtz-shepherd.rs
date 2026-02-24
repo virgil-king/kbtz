@@ -256,8 +256,7 @@ fn run(
                     let mut new_client = stream;
                     // Set a read timeout so a misbehaving client sending a
                     // partial frame can't stall the main loop indefinitely.
-                    let _ =
-                        new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
                     // Size-first handshake: read Resize from the workspace
                     // so we can build InitialState at the correct dimensions.

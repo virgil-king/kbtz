@@ -159,7 +159,9 @@ mod tests {
         // Source at 80 cols, write long lines.
         let mut src = vt100::Parser::new(5, 80, SCROLLBACK_ROWS);
         for i in 0..20 {
-            src.process(format!("this is a long line number {i} with plenty of content\r\n").as_bytes());
+            src.process(
+                format!("this is a long line number {i} with plenty of content\r\n").as_bytes(),
+            );
         }
 
         // Resize source to 40 cols (simulating workspace reconnecting at
