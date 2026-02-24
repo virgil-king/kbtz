@@ -1,6 +1,7 @@
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,6 +14,7 @@ pub struct ShepherdSession {
     socket_path: PathBuf,
     writer: Mutex<BufWriter<UnixStream>>,
     passthrough: Arc<Mutex<Passthrough>>,
+    reader_alive: Arc<AtomicBool>,
     status: SessionStatus,
     task_name: String,
     session_id: String,
@@ -62,10 +64,12 @@ impl ShepherdSession {
         let mut pt = Passthrough::new(pty_rows, cols);
         pt.process(&initial_data);
         let passthrough = Arc::new(Mutex::new(pt));
+        let reader_alive = Arc::new(AtomicBool::new(true));
 
         // Spawn reader thread
         let pt_clone = Arc::clone(&passthrough);
-        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
+        let ra = Arc::clone(&reader_alive);
+        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone, ra));
 
         // Send initial Resize to tell the shepherd our current terminal size
         let writer = Mutex::new(BufWriter::new(write_stream));
@@ -83,10 +87,15 @@ impl ShepherdSession {
             .context("failed to send initial resize to shepherd")?;
         }
 
+        kbtz::debug_log::log(&format!(
+            "shepherd session connected: {session_id} pid={shepherd_pid}"
+        ));
+
         Ok(ShepherdSession {
             socket_path: socket_path.to_path_buf(),
             writer,
             passthrough,
+            reader_alive,
             status: SessionStatus::Starting,
             task_name: task_name.to_string(),
             session_id: session_id.to_string(),
@@ -96,11 +105,16 @@ impl ShepherdSession {
     }
 }
 
-fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mutex<Passthrough>>) {
+fn shepherd_reader_thread(
+    mut reader: BufReader<UnixStream>,
+    passthrough: Arc<Mutex<Passthrough>>,
+    reader_alive: Arc<AtomicBool>,
+) {
     loop {
         match protocol::read_message(&mut reader) {
             Ok(Some(Message::PtyOutput(data))) => {
                 let Ok(mut pt) = passthrough.lock() else {
+                    kbtz::debug_log::log("shepherd reader: passthrough mutex poisoned");
                     break;
                 };
                 pt.process(&data);
@@ -111,10 +125,20 @@ fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mu
                     let _ = out.flush();
                 }
             }
-            Ok(Some(_)) => {}           // Ignore unexpected messages
-            Ok(None) | Err(_) => break, // EOF or error
+            Ok(Some(_)) => {} // Ignore unexpected messages
+            Ok(None) => {
+                kbtz::debug_log::log("shepherd reader: EOF from shepherd");
+                break;
+            }
+            Err(e) => {
+                kbtz::debug_log::log(&format!("shepherd reader: error: {e}"));
+                break;
+            }
         }
     }
+
+    reader_alive.store(false, Ordering::SeqCst);
+    kbtz::debug_log::log("shepherd reader thread exiting");
 }
 
 fn is_broken_pipe(e: &anyhow::Error) -> bool {
@@ -229,6 +253,10 @@ impl SessionHandle for ShepherdSession {
             .map_err(|_| anyhow::anyhow!("writer mutex poisoned"))?;
         if let Err(e) = protocol::write_message(&mut *writer, &Message::PtyInput(buf.to_vec())) {
             if is_broken_pipe(&e) {
+                kbtz::debug_log::log(&format!(
+                    "shepherd write_input: broken pipe for {}",
+                    self.session_id
+                ));
                 return Ok(());
             }
             return Err(e).context("write input to shepherd");
@@ -264,6 +292,10 @@ impl SessionHandle for ShepherdSession {
 
     fn process_id(&self) -> Option<u32> {
         Some(self.shepherd_pid)
+    }
+
+    fn reader_alive(&self) -> bool {
+        self.reader_alive.load(Ordering::SeqCst)
     }
 }
 
@@ -304,13 +336,16 @@ mod tests {
         pt.process(&initial_data);
         let passthrough = Arc::new(Mutex::new(pt));
 
+        let reader_alive = Arc::new(AtomicBool::new(true));
         let pt_clone = Arc::clone(&passthrough);
-        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
+        let ra = Arc::clone(&reader_alive);
+        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone, ra));
 
         let session = ShepherdSession {
             socket_path: socket_path.to_path_buf(),
             writer: Mutex::new(BufWriter::new(write_stream)),
             passthrough,
+            reader_alive,
             status: SessionStatus::Starting,
             task_name: "test-task".to_string(),
             session_id: "test-session".to_string(),
@@ -334,6 +369,7 @@ mod tests {
             socket_path: socket_path.clone(),
             writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
             passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
+            reader_alive: Arc::new(AtomicBool::new(true)),
             status: SessionStatus::Starting,
             task_name: "test".to_string(),
             session_id: "test-id".to_string(),

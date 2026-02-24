@@ -1036,22 +1036,37 @@ fn zoomed_loop(
             return Ok(Action::ReturnToTree);
         }
 
-        // Detect terminal resize or wake from sleep.  The zoomed loop
-        // bypasses crossterm's event system (using raw libc::poll), so
-        // SIGWINCH is not delivered as a Resize event.  We detect resize
-        // by polling terminal::size() each iteration, and detect sleep
-        // via a time-jump (the 100ms poll timeout took >2s).
+        // Detect terminal resize.  The zoomed loop bypasses crossterm's
+        // event system (using raw libc::poll), so SIGWINCH is not
+        // delivered as a Resize event.  We poll terminal::size() each
+        // iteration to catch resizes.
         let elapsed = last_iter.elapsed();
         last_iter = Instant::now();
-        let (cur_cols, cur_rows) = terminal::size()?;
-        let size_changed = cur_cols != app.term.cols || cur_rows != app.term.rows;
-        if size_changed || elapsed > SLEEP_THRESHOLD {
+        if elapsed > SLEEP_THRESHOLD {
             kbtz::debug_log::log(&format!(
-                "zoomed refresh: size_changed={size_changed} elapsed={elapsed:?}"
+                "zoomed: time jump detected ({elapsed:?}), possible sleep/wake"
+            ));
+        }
+        let (cur_cols, cur_rows) = terminal::size()?;
+        if cur_cols != app.term.cols || cur_rows != app.term.rows {
+            kbtz::debug_log::log(&format!(
+                "zoomed refresh: resize {}x{} -> {cur_cols}x{cur_rows}",
+                app.term.cols, app.term.rows
             ));
             refresh_zoomed_screen(app, session_id, task, &last_status, &mut scroll)?;
             if !app.sessions.contains_key(session_id) {
                 return Ok(Action::ReturnToTree);
+            }
+        }
+
+        // Detect dead reader thread.  This is diagnostic — if the reader
+        // thread exits (socket error, shepherd disconnect, etc.), the session
+        // becomes a zombie: display freezes, keystrokes are silently discarded.
+        if let Some(session) = app.sessions.get(session_id) {
+            if !session.reader_alive() {
+                kbtz::debug_log::log(&format!(
+                    "zoomed: reader dead for {session_id} (task={task})"
+                ));
             }
         }
 
@@ -1399,16 +1414,28 @@ fn toplevel_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
         // Run lifecycle tick for worker sessions.
         app.tick()?;
 
-        // Detect terminal resize or wake from sleep (same as zoomed_loop).
+        // Detect terminal resize (same as zoomed_loop).
         let elapsed = last_iter.elapsed();
         last_iter = Instant::now();
-        let (cur_cols, cur_rows) = terminal::size()?;
-        let size_changed = cur_cols != app.term.cols || cur_rows != app.term.rows;
-        if size_changed || elapsed > SLEEP_THRESHOLD {
+        if elapsed > SLEEP_THRESHOLD {
             kbtz::debug_log::log(&format!(
-                "toplevel refresh: size_changed={size_changed} elapsed={elapsed:?}"
+                "toplevel: time jump detected ({elapsed:?}), possible sleep/wake"
+            ));
+        }
+        let (cur_cols, cur_rows) = terminal::size()?;
+        if cur_cols != app.term.cols || cur_rows != app.term.rows {
+            kbtz::debug_log::log(&format!(
+                "toplevel refresh: resize {}x{} -> {cur_cols}x{cur_rows}",
+                app.term.cols, app.term.rows
             ));
             refresh_toplevel_screen(app)?;
+        }
+
+        // Detect dead reader thread on toplevel session.
+        if let Some(ref toplevel) = app.toplevel {
+            if !toplevel.reader_alive() {
+                kbtz::debug_log::log("toplevel: reader dead");
+            }
         }
 
         let n = match poll_stdin(&mut stdin, &mut buf) {

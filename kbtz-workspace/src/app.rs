@@ -735,6 +735,9 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+        fn reader_alive(&self) -> bool {
+            true
+        }
     }
 
     struct StubBackend;

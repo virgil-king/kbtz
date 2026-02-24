@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ pub trait SessionHandle: Send {
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
+    fn reader_alive(&self) -> bool;
 }
 
 pub trait SessionSpawner: Send {
@@ -138,6 +140,7 @@ pub struct Session {
     writer: Box<dyn Write + Send>,
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
     pub passthrough: Arc<Mutex<Passthrough>>,
+    reader_alive: Arc<AtomicBool>,
     pub status: SessionStatus,
     pub task_name: String,
     pub session_id: String,
@@ -495,12 +498,20 @@ impl SessionHandle for Session {
             // EIO means the child exited and the slave PTY side closed.
             // Discard the write — the session will be reaped on the next tick.
             if e.raw_os_error() == Some(libc::EIO) {
+                kbtz::debug_log::log(&format!(
+                    "PTY write_input: EIO for {}",
+                    self.session_id
+                ));
                 return Ok(());
             }
             return Err(e).context("write to PTY");
         }
         if let Err(e) = self.writer.flush() {
             if e.raw_os_error() == Some(libc::EIO) {
+                kbtz::debug_log::log(&format!(
+                    "PTY write_input flush: EIO for {}",
+                    self.session_id
+                ));
                 return Ok(());
             }
             return Err(e).context("flush PTY");
@@ -526,6 +537,10 @@ impl SessionHandle for Session {
 
     fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    fn reader_alive(&self) -> bool {
+        self.reader_alive.load(Ordering::SeqCst)
     }
 }
 
@@ -565,12 +580,14 @@ impl Session {
         drop(pair.slave);
 
         let passthrough = Arc::new(Mutex::new(Passthrough::new(pty_rows, cols)));
+        let reader_alive = Arc::new(AtomicBool::new(true));
         let reader = pair
             .master
             .try_clone_reader()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let pt = Arc::clone(&passthrough);
-        std::thread::spawn(move || reader_thread(reader, pt));
+        let ra = Arc::clone(&reader_alive);
+        std::thread::spawn(move || reader_thread(reader, pt, ra));
 
         let writer = pair
             .master
@@ -582,6 +599,7 @@ impl Session {
             writer,
             child,
             passthrough,
+            reader_alive,
             status: SessionStatus::Starting,
             task_name: task_name.to_string(),
             session_id: session_id.to_string(),
@@ -590,15 +608,27 @@ impl Session {
     }
 }
 
-fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
+fn reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    passthrough: Arc<Mutex<Passthrough>>,
+    reader_alive: Arc<AtomicBool>,
+) {
     let mut buf = [0u8; 4096];
     let stdout = std::io::stdout();
 
     loop {
         match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                kbtz::debug_log::log("PTY reader: EOF");
+                break;
+            }
+            Err(e) => {
+                kbtz::debug_log::log(&format!("PTY reader: error: {e}"));
+                break;
+            }
             Ok(n) => {
                 let Ok(mut pt) = passthrough.lock() else {
+                    kbtz::debug_log::log("PTY reader: passthrough mutex poisoned");
                     break;
                 };
                 pt.process(&buf[..n]);
@@ -611,6 +641,9 @@ fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passth
             }
         }
     }
+
+    reader_alive.store(false, Ordering::SeqCst);
+    kbtz::debug_log::log("PTY reader thread exiting");
 }
 
 #[cfg(test)]
