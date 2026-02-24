@@ -58,6 +58,8 @@ pub struct App {
     pub tree: TreeView,
 }
 
+pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
+
 /// What the top-level loop should do next.
 pub enum Action {
     Continue,
@@ -126,6 +128,31 @@ impl App {
         app.reconnect_sessions()?;
         app.spawn_toplevel()?;
         Ok(app)
+    }
+
+    /// Look up any session by its session_id, checking both worker sessions
+    /// and the toplevel session.
+    pub fn get_session(&self, session_id: &str) -> Option<&dyn SessionHandle> {
+        if session_id == TOPLEVEL_SESSION_ID {
+            self.toplevel.as_ref().map(|s| s.as_ref())
+        } else {
+            self.sessions.get(session_id).map(|s| s.as_ref())
+        }
+    }
+
+    /// Mutable variant of `get_session`.
+    pub fn get_session_mut(&mut self, session_id: &str) -> Option<&mut dyn SessionHandle> {
+        if session_id == TOPLEVEL_SESSION_ID {
+            match self.toplevel {
+                Some(ref mut s) => Some(&mut **s),
+                None => None,
+            }
+        } else {
+            match self.sessions.get_mut(session_id) {
+                Some(s) => Some(&mut **s),
+                None => None,
+            }
+        }
     }
 
     /// Rebuild the tree view from the database.
@@ -324,7 +351,7 @@ impl App {
             .backend
             .toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let session_id = "ws/toplevel";
+        let session_id = TOPLEVEL_SESSION_ID;
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
         let session = PtySpawner.spawn(
             self.backend.command(),
