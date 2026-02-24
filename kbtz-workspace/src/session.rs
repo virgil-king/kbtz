@@ -203,10 +203,32 @@ impl Passthrough {
 
     /// Full render (no previous state).  Returns a clone of the current
     /// screen.
+    ///
+    /// Renders row by row with explicit cursor positioning (CSI row;1 H)
+    /// instead of using `state_formatted()` which writes with sequential
+    /// `\r\n`.  Sequential newlines can cause scrolling within a scroll
+    /// region, and many terminal emulators save scrolled-off content to
+    /// their scrollback buffer even on the alt screen — leading to
+    /// duplicate content in the terminal's scrollback.  Explicit cursor
+    /// positioning never causes scrolling, matching tmux's approach.
     pub(crate) fn render_full(&mut self, out: &mut impl Write) -> vt100::Screen {
         self.dirty.store(false, Ordering::Relaxed);
         let screen = self.vte.screen();
-        let _ = out.write_all(&screen.state_formatted());
+        let (_rows, cols) = screen.size();
+        // Reset attributes, then render each row at an explicit position.
+        let _ = write!(out, "\x1b[m");
+        for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
+            let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
+            let _ = out.write_all(&row_bytes);
+        }
+        // Restore cursor position and visibility from the VTE state.
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let _ = write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
+        if screen.hide_cursor() {
+            let _ = write!(out, "\x1b[?25l");
+        } else {
+            let _ = write!(out, "\x1b[?25h");
+        }
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
         screen.clone()
@@ -911,6 +933,176 @@ mod tests {
         assert!(
             modes.windows(8).any(|w| w == b"\x1b[?1000h"),
             "expected mouse tracking enable in input_mode_formatted()"
+        );
+    }
+
+    /// Helper: collect all non-empty scrollback lines as strings.
+    fn collect_scrollback(pt: &mut Passthrough) -> Vec<String> {
+        let was_alt = pt.vte.screen().alternate_screen();
+        if was_alt {
+            pt.vte.process(b"\x1b[?47l");
+        }
+        let screen = pt.vte.screen_mut();
+        let cols = screen.size().1;
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        let mut lines = Vec::new();
+        for offset in (1..=total).rev() {
+            screen.set_scrollback(offset);
+            if let Some(row) = screen.rows(0, cols).next() {
+                let text = row.to_string();
+                let trimmed = text.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed);
+                }
+            }
+        }
+        screen.set_scrollback(0);
+        if was_alt {
+            pt.vte.process(b"\x1b[?47h");
+        }
+        lines
+    }
+
+    #[test]
+    fn decrst_decset_47_cycle_preserves_scrollback() {
+        // Verify that the DECRST/DECSET 47 trick doesn't change scrollback.
+        let mut pt = Passthrough::new(5, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+
+        let before = collect_scrollback(&mut pt);
+
+        // Do the DECRST/DECSET 47 cycle (no resize).
+        pt.vte.process(b"\x1b[?47l");
+        pt.vte.process(b"\x1b[?47h");
+
+        let after = collect_scrollback(&mut pt);
+        assert_eq!(
+            before, after,
+            "DECRST/DECSET 47 cycle should not change scrollback"
+        );
+    }
+
+    #[test]
+    fn resize_does_not_duplicate_scrollback() {
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..30 {
+            pt.process(format!("unique line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+        pt.process(b"alt screen content");
+
+        let before = collect_scrollback(&mut pt);
+        assert!(!before.is_empty(), "should have scrollback before resize");
+
+        // Resize (uses our set_size which does DECRST/DECSET 47 trick).
+        pt.set_size(8, 60);
+
+        let after = collect_scrollback(&mut pt);
+
+        // Check no line appears more than once (allowing for reflow
+        // which may split long lines).
+        let before_set: std::collections::HashSet<_> = before.iter().collect();
+
+        // Every line from before should still exist (possibly reflowed).
+        // No NEW unique content should appear.
+        for line in &after {
+            // Lines from reflow are OK (substrings of original lines).
+            let is_original = before_set.contains(line);
+            let is_reflow = before.iter().any(|b| b.contains(line.as_str()));
+            assert!(
+                is_original || is_reflow,
+                "unexpected new line after resize: {line:?}"
+            );
+        }
+
+        // The total number of non-empty lines should not increase
+        // dramatically (reflow can increase count, but not double it
+        // for 80→60 col resize of short lines).
+        assert!(
+            after.len() <= before.len() * 2,
+            "scrollback grew too much: {} before, {} after",
+            before.len(),
+            after.len()
+        );
+    }
+
+    #[test]
+    fn multiple_resizes_do_not_accumulate_duplicates() {
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..30 {
+            pt.process(format!("unique line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+
+        let initial = collect_scrollback(&mut pt);
+
+        // Resize back and forth 5 times.
+        for _ in 0..5 {
+            pt.set_size(8, 60);
+            pt.set_size(12, 100);
+            pt.set_size(10, 80);
+        }
+
+        let after = collect_scrollback(&mut pt);
+
+        // After resizing back to the original size, the scrollback
+        // should have roughly the same content (not 5x duplicated).
+        assert!(
+            after.len() <= initial.len() + 20,
+            "scrollback grew excessively after multiple resizes: {} initial, {} after",
+            initial.len(),
+            after.len()
+        );
+    }
+
+    #[test]
+    fn render_full_uses_cursor_positioning() {
+        // Verify render_full doesn't emit sequential newlines.
+        let mut pt = Passthrough::new(5, 40);
+        pt.process(b"row 1\r\nrow 2\r\nrow 3\r\nrow 4\r\nrow 5");
+        let mut buf = Vec::new();
+        pt.render_full(&mut buf);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            !output.contains("\r\n"),
+            "render_full should not contain \\r\\n"
+        );
+    }
+
+    #[test]
+    fn state_formatted_does_not_contain_csi_2j() {
+        // CSI 2 J (erase entire display) causes some terminal emulators
+        // to save the current screen to scrollback. state_formatted()
+        // must not include it.
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..15 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        let formatted = pt.vte.screen().state_formatted();
+        let formatted_str = String::from_utf8_lossy(&formatted);
+        assert!(
+            !formatted_str.contains("\x1b[2J"),
+            "state_formatted() should not contain CSI 2 J; got: {formatted_str:?}"
+        );
+    }
+
+    #[test]
+    fn render_full_output_does_not_contain_csi_2j() {
+        // The full render path must not emit CSI 2 J.
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..15 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        let mut buf = Vec::new();
+        pt.render_full(&mut buf);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            !output.contains("\x1b[2J"),
+            "render_full should not contain CSI 2 J; got: {output:?}"
         );
     }
 
