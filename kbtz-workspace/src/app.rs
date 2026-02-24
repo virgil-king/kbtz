@@ -516,10 +516,10 @@ impl App {
     /// Propagate terminal resize to all PTYs.
     pub fn handle_resize(&mut self, cols: u16, rows: u16) {
         self.term = TermSize { rows, cols };
-        for session in self.sessions.values() {
+        for session in self.sessions.values_mut() {
             let _ = session.resize(rows, cols);
         }
-        if let Some(ref toplevel) = self.toplevel {
+        if let Some(ref mut toplevel) = self.toplevel {
             let _ = toplevel.resize(rows, cols);
         }
     }
@@ -756,7 +756,7 @@ mod tests {
         fn write_input(&mut self, _buf: &[u8]) -> Result<()> {
             Ok(())
         }
-        fn resize(&self, _rows: u16, _cols: u16) -> Result<()> {
+        fn resize(&mut self, _rows: u16, _cols: u16) -> Result<()> {
             Ok(())
         }
         fn process_id(&self) -> Option<u32> {

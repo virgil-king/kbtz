@@ -25,7 +25,7 @@ pub trait SessionHandle: Send {
     fn scrollback_available(&self) -> Result<usize>;
     fn has_mouse_tracking(&self) -> bool;
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
-    fn resize(&self, rows: u16, cols: u16) -> Result<()>;
+    fn resize(&mut self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
 }
 
@@ -508,7 +508,7 @@ impl SessionHandle for Session {
         Ok(())
     }
 
-    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+    fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         let pty_rows = rows.saturating_sub(1);
         self.passthrough
             .lock()
