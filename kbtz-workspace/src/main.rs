@@ -13,7 +13,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -960,6 +960,47 @@ fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouse
     })
 }
 
+/// Refresh the terminal after a resize or wake from sleep.
+///
+/// Exits scroll mode if active, stops passthrough, updates dimensions if the
+/// terminal size changed, re-establishes the scroll region, clears the screen,
+/// and re-renders the session's VTE state.
+fn refresh_passthrough_screen(
+    app: &mut App,
+    kind: &SessionKind,
+    last_status: &SessionStatus,
+    scroll: &mut ScrollState,
+) -> Result<()> {
+    let sid = kind.session_id();
+    if scroll.active {
+        exit_scroll_mode(app, sid, scroll)?;
+    }
+    if let Some(session) = app.get_session(sid) {
+        let _ = session.stop_passthrough();
+    }
+    let (cols, rows) = terminal::size()?;
+    if cols != app.term.cols || rows != app.term.rows {
+        app.handle_resize(cols, rows);
+    }
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
+    execute!(
+        stdout,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
+    if let Some(session) = app.get_session(sid) {
+        session.start_passthrough()?;
+    }
+    draw_normal_status_bar(app.term.rows, app.term.cols, kind, last_status, None);
+    Ok(())
+}
+
+/// Duration threshold for detecting a sleep/wake cycle.  If the main loop
+/// iteration takes longer than this, the system was likely sleeping and
+/// the terminal needs a full refresh.
+const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
+
 // ── Passthrough loop ──────────────────────────────────────────────────
 
 fn passthrough_loop(
@@ -976,6 +1017,7 @@ fn passthrough_loop(
     let sid = kind.session_id();
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
+    let mut last_iter = Instant::now();
 
     draw_normal_status_bar(app.term.rows, app.term.cols, kind, &last_status, None);
 
@@ -999,6 +1041,25 @@ fn passthrough_loop(
         // Re-check after tick (session may have been removed).
         if app.get_session(sid).is_none() {
             return Ok(Action::ReturnToTree);
+        }
+
+        // Detect terminal resize or wake from sleep.  The passthrough loop
+        // bypasses crossterm's event system (using raw libc::poll), so
+        // SIGWINCH is not delivered as a Resize event.  We detect resize
+        // by polling terminal::size() each iteration, and detect sleep
+        // via a time-jump (the 100ms poll timeout took >2s).
+        let elapsed = last_iter.elapsed();
+        last_iter = Instant::now();
+        let (cur_cols, cur_rows) = terminal::size()?;
+        let size_changed = cur_cols != app.term.cols || cur_rows != app.term.rows;
+        if size_changed || elapsed > SLEEP_THRESHOLD {
+            kbtz::debug_log::log(&format!(
+                "passthrough refresh: size_changed={size_changed} elapsed={elapsed:?}"
+            ));
+            refresh_passthrough_screen(app, kind, &last_status, &mut scroll)?;
+            if app.get_session(sid).is_none() {
+                return Ok(Action::ReturnToTree);
+            }
         }
 
         // Redraw status bar when status or debug info changes.
