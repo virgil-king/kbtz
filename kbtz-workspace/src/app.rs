@@ -416,7 +416,6 @@ impl App {
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
-            let _ = session.stop_passthrough();
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
             let _ = ops::release_task(&self.conn, &task_name, &sid);
@@ -632,14 +631,11 @@ impl App {
         // Drop all worker sessions (disconnects from sockets).
         // This does NOT kill the shepherds — they persist.
         // Don't release task claims — shepherds are still running.
-        for (_, session) in self.sessions.drain() {
-            let _ = session.stop_passthrough();
-        }
+        for (_, _session) in self.sessions.drain() {}
         self.task_to_session.clear();
 
         // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
-            let _ = toplevel.stop_passthrough();
             self.backend.request_exit(toplevel.as_mut());
         }
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
@@ -732,11 +728,11 @@ mod tests {
         fn force_kill(&mut self) {
             self.alive = false;
         }
-        fn start_passthrough(&self) -> Result<()> {
-            Ok(())
+        fn render_screen(&self, _prev: &vt100::Screen) -> Result<vt100::Screen> {
+            Ok(vt100::Parser::new(24, 80, 0).screen().clone())
         }
-        fn stop_passthrough(&self) -> Result<()> {
-            Ok(())
+        fn render_screen_full(&self) -> Result<vt100::Screen> {
+            Ok(vt100::Parser::new(24, 80, 0).screen().clone())
         }
         fn enter_scroll_mode(&self) -> Result<usize> {
             Ok(0)
@@ -761,6 +757,9 @@ mod tests {
         }
         fn process_id(&self) -> Option<u32> {
             None
+        }
+        fn has_new_output(&self) -> bool {
+            false
         }
     }
 

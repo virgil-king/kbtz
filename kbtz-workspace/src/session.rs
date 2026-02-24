@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,8 +18,12 @@ pub trait SessionHandle: Send {
     fn is_alive(&mut self) -> bool;
     fn mark_stopping(&mut self);
     fn force_kill(&mut self);
-    fn start_passthrough(&self) -> Result<()>;
-    fn stop_passthrough(&self) -> Result<()>;
+    /// Render the current VTE screen state to stdout, using `state_diff`
+    /// against `prev` for efficient updates.  Returns a clone of the
+    /// current screen to use as `prev` on the next call.
+    fn render_screen(&self, prev: &vt100::Screen) -> Result<vt100::Screen>;
+    /// Full render from scratch (no previous screen to diff against).
+    fn render_screen_full(&self) -> Result<vt100::Screen>;
     fn enter_scroll_mode(&self) -> Result<usize>;
     fn exit_scroll_mode(&self) -> Result<()>;
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize>;
@@ -27,6 +32,8 @@ pub trait SessionHandle: Send {
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
+    /// Returns true if the session has new output since the last render.
+    fn has_new_output(&self) -> bool;
 }
 
 pub trait SessionSpawner: Send {
@@ -154,16 +161,18 @@ const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
-/// every byte the child writes.  When `active` is true the reader
-/// thread also forwards those bytes to stdout.
+/// every byte the child writes.  The main thread renders the VTE
+/// screen state to stdout using `state_diff` for efficient updates.
 ///
 /// A bounded raw output buffer is kept so that scroll mode can
 /// reconstruct the full terminal history (including content that
 /// predates an alternate-screen switch) by replaying it into a
 /// temporary VTE.
 pub struct Passthrough {
-    pub(crate) active: bool,
     vte: vt100::Parser,
+    /// Set by `process()` when new data arrives; cleared by the main
+    /// thread after rendering.
+    dirty: Arc<AtomicBool>,
     /// Bounded buffer of raw child output for scrollback reconstruction.
     output_buffer: Vec<u8>,
     /// Temporary VTE used during scroll mode, built from `output_buffer`.
@@ -173,69 +182,40 @@ pub struct Passthrough {
 impl Passthrough {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
-            active: false,
             vte: vt100::Parser::new(rows, cols, 0),
+            dirty: Arc::new(AtomicBool::new(false)),
             output_buffer: Vec::new(),
             scroll_vte: None,
         }
     }
 
-    /// Switch to passthrough mode.  Render the VTE's current screen
-    /// state plus input modes and set `active` for live forwarding.
-    /// Both happen under the same Mutex guard so no child output is
-    /// lost.
-    pub(crate) fn start(&mut self) {
-        debug_assert!(!self.active, "start() called while already active");
-
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let _ = out.write_all(&self.vte.screen().state_formatted());
-        // Restore the child's input modes (bracketed paste, keypad
-        // mode, cursor key mode, and any mouse tracking the child
-        // requested).  stop() resets all of these to prevent leaking
-        // into tree mode; state_formatted() only restores visual
-        // state, so we need input_mode_formatted() separately.
-        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
-        // Always enable SGR mouse button reporting so scroll wheel
-        // events trigger scroll mode.  Native text selection still
-        // works by holding Shift (standard terminal behavior, same
-        // as tmux).  Non-scroll mouse events are forwarded to the
-        // child when it has its own mouse tracking.
+    /// Render the current screen state to `out`, diffing against `prev`.
+    /// Also emits forced mouse tracking.  Returns a clone of the current
+    /// screen to use as `prev` next time.
+    pub(crate) fn render_diff(&mut self, out: &mut impl Write, prev: &vt100::Screen) -> vt100::Screen {
+        self.dirty.store(false, Ordering::Relaxed);
+        let screen = self.vte.screen();
+        let diff = screen.state_diff(prev);
+        let _ = out.write_all(&diff);
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
-
-        self.active = true;
+        screen.clone()
     }
 
-    pub(crate) fn stop(&mut self) {
-        if !self.active {
-            return;
-        }
-        self.active = false;
-
-        // Reset input modes so they don't leak into other UI modes
-        // (tree view, etc.).
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let _ = out.write_all(
-            concat!(
-                "\x1b[?1000l", // disable mouse tracking modes
-                "\x1b[?1002l",
-                "\x1b[?1003l",
-                "\x1b[?1006l", // disable SGR mouse encoding
-                "\x1b[?1004l", // disable focus event reporting
-                "\x1b[?2004l", // disable bracketed paste
-                "\x1b[?1l",    // normal cursor keys
-                "\x1b>",       // normal keypad
-                "\x1b[?25h",   // show cursor
-            )
-            .as_bytes(),
-        );
+    /// Full render (no previous state).  Returns a clone of the current
+    /// screen.
+    pub(crate) fn render_full(&mut self, out: &mut impl Write) -> vt100::Screen {
+        self.dirty.store(false, Ordering::Relaxed);
+        let screen = self.vte.screen();
+        let _ = out.write_all(&screen.state_formatted());
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
         let _ = out.flush();
+        screen.clone()
     }
 
     pub(crate) fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
+        self.dirty.store(true, Ordering::Relaxed);
         self.output_buffer.extend_from_slice(data);
         if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
             let keep_from = self.output_buffer.len() - OUTPUT_BUFFER_MAX / 2;
@@ -252,13 +232,8 @@ impl Passthrough {
         self.vte.screen_mut().set_size(rows, cols);
     }
 
-    /// Enter scroll mode: build a temporary VTE from the output buffer,
-    /// stop forwarding live output, disable mouse tracking for native
-    /// text selection, and return the number of scrollback rows available.
-    ///
-    /// Mouse tracking is disabled so the terminal handles click-drag
-    /// selection and system copy shortcuts natively.  Scrolling within
-    /// scroll mode is keyboard-only (j/k, arrows, PgUp/PgDn, g/G).
+    /// Enter scroll mode: build a temporary VTE from the output buffer
+    /// and return the number of scrollback rows available.
     pub(crate) fn enter_scroll_mode(&mut self) -> usize {
         let screen = self.vte.screen();
         let (rows, cols) = screen.size();
@@ -272,37 +247,21 @@ impl Passthrough {
         }
 
         let total = Self::scrollback_of(&mut scroll_vte);
-
-        self.active = false;
         self.scroll_vte = Some(scroll_vte);
-
-        // Disable mouse tracking for native text selection, and hide
-        // the cursor (the user isn't typing, so a blinking cursor is
-        // distracting).
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?25l");
-        let _ = out.flush();
-
         total
     }
 
-    /// Exit scroll mode: discard the temporary VTE, re-render the live
-    /// screen with input modes, and resume live forwarding.
+    /// Exit scroll mode: discard the temporary VTE.  The main loop
+    /// will re-render the live screen on the next frame.
     pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_vte = None;
+        // Force a re-render so the main loop picks up the live screen.
+        self.dirty.store(true, Ordering::Relaxed);
+    }
 
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        // Restore the child's full screen state (including cursor
-        // visibility) and input modes, then re-enable forced mouse
-        // tracking for scroll wheel detection.
-        let _ = out.write_all(&self.vte.screen().state_formatted());
-        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
-        let _ = out.flush();
-
-        self.active = true;
+    /// Whether there is new output since the last render.
+    pub(crate) fn has_new_output(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
     }
 
     /// Whether the child has requested any mouse tracking mode.
@@ -433,20 +392,24 @@ impl SessionHandle for Session {
         let _ = self.child.kill();
     }
 
-    fn start_passthrough(&self) -> Result<()> {
-        self.passthrough
+    fn render_screen(&self, prev: &vt100::Screen) -> Result<vt100::Screen> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        Ok(self
+            .passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .start();
-        Ok(())
+            .render_diff(&mut out, prev))
     }
 
-    fn stop_passthrough(&self) -> Result<()> {
-        self.passthrough
+    fn render_screen_full(&self) -> Result<vt100::Screen> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        Ok(self
+            .passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .stop();
-        Ok(())
+            .render_full(&mut out))
     }
 
     fn enter_scroll_mode(&self) -> Result<usize> {
@@ -527,6 +490,13 @@ impl SessionHandle for Session {
     fn process_id(&self) -> Option<u32> {
         self.child.process_id()
     }
+
+    fn has_new_output(&self) -> bool {
+        self.passthrough
+            .lock()
+            .map(|pt| pt.has_new_output())
+            .unwrap_or(false)
+    }
 }
 
 impl Session {
@@ -592,8 +562,6 @@ impl Session {
 
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
     let mut buf = [0u8; 4096];
-    let stdout = std::io::stdout();
-
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -602,12 +570,6 @@ fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passth
                     break;
                 };
                 pt.process(&buf[..n]);
-
-                if pt.active {
-                    let mut out = stdout.lock();
-                    let _ = out.write_all(&buf[..n]);
-                    let _ = out.flush();
-                }
             }
         }
     }
@@ -750,7 +712,6 @@ mod tests {
 
         pt.exit_scroll_mode();
         assert!(pt.scroll_vte.is_none());
-        assert!(pt.active);
     }
 
     #[test]
