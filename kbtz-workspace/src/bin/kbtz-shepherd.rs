@@ -272,7 +272,9 @@ fn run(
                                 pixel_width: 0,
                                 pixel_height: 0,
                             });
-                            vte.screen_mut().set_size(new_rows, new_cols);
+                            // Resize both screens so the restore sequence and
+                            // subsequent output use the correct dimensions.
+                            resize_both_screens(&mut vte, new_rows, new_cols);
 
                             // Build and send InitialState from structured VTE data.
                             let restore = build_restore_sequence(&mut vte);
@@ -319,7 +321,7 @@ fn run(
                                     pixel_width: 0,
                                     pixel_height: 0,
                                 });
-                                vte.screen_mut().set_size(new_rows, new_cols);
+                                resize_both_screens(&mut vte, new_rows, new_cols);
                             }
                             Message::Shutdown => {
                                 shutdown_requested = true;
@@ -344,6 +346,19 @@ fn run(
             }
         }
     }
+}
+
+/// Resize both the main and alternate screen grids.  The vt100 crate's
+/// `set_size()` only resizes the active screen; a terminal has one
+/// physical size so both grids must match.
+fn resize_both_screens(vte: &mut vt100::Parser, rows: u16, cols: u16) {
+    let was_alt = vte.screen().alternate_screen();
+    if was_alt {
+        vte.process(b"\x1b[?47l"); // expose main grid
+        vte.screen_mut().set_size(rows, cols);
+        vte.process(b"\x1b[?47h"); // restore alt grid
+    }
+    vte.screen_mut().set_size(rows, cols);
 }
 
 fn forward_sigterm(child_pid: Option<u32>) {

@@ -359,13 +359,15 @@ fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     terminal::enable_raw_mode()?;
     // Reset scroll region and clear stale passthrough content so ratatui
     // starts with a clean slate.
+    //
+    // Use CSI H + CSI J (home + erase from cursor to end) instead of
+    // CSI 2 J (erase entire display).  Some terminal emulators (iTerm2,
+    // Terminal.app) save the current screen to their scrollback buffer
+    // when they receive CSI 2 J on the alt screen, causing duplicate
+    // content in the terminal's scrollback.  CSI 0 J does not trigger
+    // this behaviour.
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[r")?;
-    execute!(
-        stdout,
-        terminal::Clear(terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
+    write!(stdout, "\x1b[r\x1b[H\x1b[J")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -591,14 +593,12 @@ fn passthrough_mode(
     }
 
     // Set up passthrough screen: raw mode, scroll region for status bar.
+    // Use CSI H + CSI J instead of CSI 2 J to avoid terminal scrollback
+    // accumulation (see tree_mode comment).
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
-    execute!(
-        stdout,
-        terminal::Clear(terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
+    write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
+    stdout.flush()?;
 
     let result = passthrough_loop(app, kind, running);
 
@@ -950,13 +950,11 @@ fn refresh_passthrough_screen(
     if cols != app.term.cols || rows != app.term.rows {
         app.handle_resize(cols, rows);
     }
+    // Use CSI H + CSI J instead of CSI 2 J to avoid terminal scrollback
+    // accumulation (see tree_mode comment).
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
+    write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
+    stdout.flush()?;
     let prev = if let Some(session) = app.get_session(sid) {
         Some(session.render_screen_full()?)
     } else {
