@@ -1,6 +1,5 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,12 +17,13 @@ pub trait SessionHandle: Send {
     fn is_alive(&mut self) -> bool;
     fn mark_stopping(&mut self);
     fn force_kill(&mut self);
-    /// Render the current VTE screen state to stdout, using `state_diff`
-    /// against `prev` for efficient updates.  Returns a clone of the
-    /// current screen to use as `prev` on the next call.
-    fn render_screen(&self, prev: &vt100::Screen) -> Result<vt100::Screen>;
-    /// Full render from scratch (no previous screen to diff against).
-    fn render_screen_full(&self) -> Result<vt100::Screen>;
+    /// Start passthrough: render the VTE's current screen to stdout
+    /// using explicit cursor positioning, restore input modes, and
+    /// enable raw byte forwarding from the reader thread.
+    fn start_passthrough(&self) -> Result<()>;
+    /// Stop passthrough: disable raw forwarding and reset input modes
+    /// so they don't leak into other UI modes.
+    fn stop_passthrough(&self) -> Result<()>;
     fn enter_scroll_mode(&self) -> Result<usize>;
     fn exit_scroll_mode(&self) -> Result<()>;
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize>;
@@ -32,8 +32,6 @@ pub trait SessionHandle: Send {
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
-    /// Returns true if the session has new output since the last render.
-    fn has_new_output(&self) -> bool;
 }
 
 pub trait SessionSpawner: Send {
@@ -157,20 +155,16 @@ use kbtz_workspace::SCROLLBACK_ROWS;
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
-/// every byte the child writes.  The main thread renders the VTE
-/// screen state to stdout using `state_diff` for efficient updates.
+/// every byte the child writes.  When `active` is true the reader
+/// thread also forwards those raw bytes to stdout — the child controls
+/// its own rendering (including alt screen, cursor positioning, etc).
 ///
-/// Scrollback is handled by the live VTE (with `SCROLLBACK_ROWS`).
-/// Scroll mode accesses the main screen's scrollback by temporarily
-/// toggling DECRST/DECSET 47 (which flips the active-grid flag
-/// without clearing anything), cloning the `Screen`, and switching
-/// back — mirroring tmux's approach of always reading from the main
-/// screen grid.
+/// The VTE is kept up-to-date at all times for scroll mode, which
+/// accesses the main screen's scrollback by temporarily toggling
+/// DECRST/DECSET 47.
 pub struct Passthrough {
+    pub(crate) active: bool,
     vte: vt100::Parser,
-    /// Set by `process()` when new data arrives; cleared by the main
-    /// thread after rendering.
-    dirty: Arc<AtomicBool>,
     /// Cloned snapshot of the main screen, captured on scroll mode entry.
     scroll_screen: Option<vt100::Screen>,
 }
@@ -178,50 +172,66 @@ pub struct Passthrough {
 impl Passthrough {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
+            active: false,
             vte: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
-            dirty: Arc::new(AtomicBool::new(false)),
             scroll_screen: None,
         }
     }
 
-    /// Render the current screen state to `out`, diffing against `prev`.
-    /// Also emits forced mouse tracking.  Returns a clone of the current
-    /// screen to use as `prev` next time.
-    pub(crate) fn render_diff(
-        &mut self,
-        out: &mut impl Write,
-        prev: &vt100::Screen,
-    ) -> vt100::Screen {
-        self.dirty.store(false, Ordering::Relaxed);
-        let screen = self.vte.screen();
-        let diff = screen.state_diff(prev);
-        let _ = out.write_all(&diff);
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
+    /// Switch to passthrough mode.  Render the VTE's current screen
+    /// state using explicit cursor positioning (no `\r\n` that could
+    /// cause scrolling within a scroll region), restore input modes,
+    /// and set `active` for live raw byte forwarding.
+    pub(crate) fn start(&mut self) {
+        debug_assert!(!self.active, "start() called while already active");
+
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        self.render_screen_positioned(&mut out);
         let _ = out.flush();
-        screen.clone()
+
+        self.active = true;
     }
 
-    /// Full render (no previous state).  Returns a clone of the current
-    /// screen.
-    ///
-    /// Renders row by row with explicit cursor positioning (CSI row;1 H)
-    /// instead of using `state_formatted()` which writes with sequential
-    /// `\r\n`.  Sequential newlines can cause scrolling within a scroll
-    /// region, and many terminal emulators save scrolled-off content to
-    /// their scrollback buffer even on the alt screen — leading to
-    /// duplicate content in the terminal's scrollback.  Explicit cursor
-    /// positioning never causes scrolling, matching tmux's approach.
-    pub(crate) fn render_full(&mut self, out: &mut impl Write) -> vt100::Screen {
-        self.dirty.store(false, Ordering::Relaxed);
+    /// Stop passthrough: disable raw forwarding and reset input modes.
+    pub(crate) fn stop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(
+            concat!(
+                "\x1b[m",      // reset all SGR attributes (colors, reverse, bold, etc.)
+                "\x1b[?1000l", // disable mouse tracking modes
+                "\x1b[?1002l",
+                "\x1b[?1003l",
+                "\x1b[?1006l", // disable SGR mouse encoding
+                "\x1b[?1004l", // disable focus event reporting
+                "\x1b[?2004l", // disable bracketed paste
+                "\x1b[?1l",    // normal cursor keys
+                "\x1b>",       // normal keypad
+                "\x1b[?25h",   // show cursor
+            )
+            .as_bytes(),
+        );
+        let _ = out.flush();
+    }
+
+    /// Render the VTE screen to `out` using explicit cursor positioning
+    /// per row (CSI row;1 H + CSI K + row content).  This never causes
+    /// terminal scrolling, unlike `state_formatted()` / `state_diff()`
+    /// which use sequential `\r\n` between rows.
+    fn render_screen_positioned(&self, out: &mut impl Write) {
         let screen = self.vte.screen();
         let (_rows, cols) = screen.size();
-        // Reset attributes, then render each row at an explicit position.
         let _ = write!(out, "\x1b[m");
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
             let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
-        // Restore cursor position and visibility from the VTE state.
         let (cursor_row, cursor_col) = screen.cursor_position();
         let _ = write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
         if screen.hide_cursor() {
@@ -229,16 +239,55 @@ impl Passthrough {
         } else {
             let _ = write!(out, "\x1b[?25h");
         }
-        // Restore child's input modes (bracketed paste, keypad, cursor keys).
         let _ = out.write_all(&screen.input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
-        let _ = out.flush();
-        screen.clone()
     }
 
     pub(crate) fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
-        self.dirty.store(true, Ordering::Relaxed);
+
+        // CSI 3 J (Erase Saved Lines) — clear the scrollback buffer.
+        // The vt100 crate doesn't implement this, so we handle it by
+        // creating a fresh parser and replaying the visible screen state.
+        // This matches tmux's screen_write_clearhistory().
+        if Self::contains_csi_3j(data) {
+            self.clear_scrollback();
+        }
+    }
+
+    /// Check if a byte slice contains the CSI 3 J sequence (\x1b[3J).
+    fn contains_csi_3j(data: &[u8]) -> bool {
+        data.windows(4).any(|w| w == b"\x1b[3J")
+    }
+
+    /// Clear scrollback by creating a fresh VTE and replaying the
+    /// visible screen state.
+    fn clear_scrollback(&mut self) {
+        let (rows, cols) = self.vte.screen().size();
+        let was_alt = self.vte.screen().alternate_screen();
+
+        // Capture current screen state(s).
+        let mut alt_state = None;
+
+        if was_alt {
+            // Save alt screen state, switch to main to capture it too.
+            alt_state = Some(self.vte.screen().state_formatted());
+            self.vte.process(b"\x1b[?47l");
+        }
+        let main_state = self.vte.screen().state_formatted();
+        if was_alt {
+            self.vte.process(b"\x1b[?47h");
+        }
+
+        // Create a fresh VTE with the same dimensions and scrollback capacity.
+        let mut fresh = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        fresh.process(&main_state);
+        if let Some(alt) = alt_state {
+            fresh.process(b"\x1b[?47h");
+            fresh.process(&alt);
+        }
+
+        self.vte = fresh;
     }
 
     pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
@@ -254,6 +303,8 @@ impl Passthrough {
     /// switch back.  DECSET 47 does not clear the alternate grid, so
     /// the child's display is preserved.
     pub(crate) fn enter_scroll_mode(&mut self) -> usize {
+        self.active = false;
+
         let was_alt = self.vte.screen().alternate_screen();
         if was_alt {
             self.vte.process(b"\x1b[?47l"); // expose main grid
@@ -272,16 +323,17 @@ impl Passthrough {
         total
     }
 
-    /// Exit scroll mode: discard the snapshot.  The main loop will
-    /// re-render the live screen on the next frame.
+    /// Exit scroll mode: discard the snapshot, re-render the live
+    /// screen, and resume raw forwarding.
     pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_screen = None;
-        self.dirty.store(true, Ordering::Relaxed);
-    }
 
-    /// Whether there is new output since the last render.
-    pub(crate) fn has_new_output(&self) -> bool {
-        self.dirty.load(Ordering::Relaxed)
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        self.render_screen_positioned(&mut out);
+        let _ = out.flush();
+
+        self.active = true;
     }
 
     /// Whether the child has requested any mouse tracking mode.
@@ -309,10 +361,6 @@ impl Passthrough {
         screen.set_scrollback(clamped);
 
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
-            // Reset attributes before clearing so \x1b[K doesn't inherit
-            // stale SGR state (e.g. reverse video) from the previous row.
-            // rows_formatted() emits each row independently starting from
-            // default attrs, so resetting here keeps the terminal in sync.
             let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
@@ -412,24 +460,20 @@ impl SessionHandle for Session {
         let _ = self.child.kill();
     }
 
-    fn render_screen(&self, prev: &vt100::Screen) -> Result<vt100::Screen> {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        Ok(self
-            .passthrough
+    fn start_passthrough(&self) -> Result<()> {
+        self.passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_diff(&mut out, prev))
+            .start();
+        Ok(())
     }
 
-    fn render_screen_full(&self) -> Result<vt100::Screen> {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        Ok(self
-            .passthrough
+    fn stop_passthrough(&self) -> Result<()> {
+        self.passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_full(&mut out))
+            .stop();
+        Ok(())
     }
 
     fn enter_scroll_mode(&self) -> Result<usize> {
@@ -510,13 +554,6 @@ impl SessionHandle for Session {
     fn process_id(&self) -> Option<u32> {
         self.child.process_id()
     }
-
-    fn has_new_output(&self) -> bool {
-        self.passthrough
-            .lock()
-            .map(|pt| pt.has_new_output())
-            .unwrap_or(false)
-    }
 }
 
 impl Session {
@@ -582,6 +619,8 @@ impl Session {
 
 fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
     let mut buf = [0u8; 4096];
+    let stdout = std::io::stdout();
+
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -590,6 +629,12 @@ fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passth
                     break;
                 };
                 pt.process(&buf[..n]);
+
+                if pt.active {
+                    let mut out = stdout.lock();
+                    let _ = out.write_all(&buf[..n]);
+                    let _ = out.flush();
+                }
             }
         }
     }
@@ -723,6 +768,7 @@ mod tests {
 
         pt.exit_scroll_mode();
         assert!(pt.scroll_screen.is_none());
+        assert!(pt.active);
     }
 
     #[test]
@@ -1032,50 +1078,30 @@ mod tests {
     }
 
     #[test]
-    fn render_full_uses_cursor_positioning() {
-        // Verify render_full doesn't emit sequential newlines.
+    fn render_screen_positioned_uses_cursor_positioning() {
+        // Verify render_screen_positioned doesn't emit sequential newlines.
         let mut pt = Passthrough::new(5, 40);
         pt.process(b"row 1\r\nrow 2\r\nrow 3\r\nrow 4\r\nrow 5");
         let mut buf = Vec::new();
-        pt.render_full(&mut buf);
+        pt.render_screen_positioned(&mut buf);
         let output = String::from_utf8_lossy(&buf);
         assert!(
             !output.contains("\r\n"),
-            "render_full should not contain \\r\\n"
+            "render_screen_positioned should not contain \\r\\n"
         );
-    }
-
-    #[test]
-    fn state_formatted_does_not_contain_csi_2j() {
-        // CSI 2 J (erase entire display) causes some terminal emulators
-        // to save the current screen to scrollback. state_formatted()
-        // must not include it.
-        let mut pt = Passthrough::new(10, 80);
-        for i in 0..15 {
-            pt.process(format!("line {i}\n").as_bytes());
-        }
-        let formatted = pt.vte.screen().state_formatted();
-        let formatted_str = String::from_utf8_lossy(&formatted);
-        assert!(
-            !formatted_str.contains("\x1b[2J"),
-            "state_formatted() should not contain CSI 2 J; got: {formatted_str:?}"
-        );
-    }
-
-    #[test]
-    fn render_full_output_does_not_contain_csi_2j() {
-        // The full render path must not emit CSI 2 J.
-        let mut pt = Passthrough::new(10, 80);
-        for i in 0..15 {
-            pt.process(format!("line {i}\n").as_bytes());
-        }
-        let mut buf = Vec::new();
-        pt.render_full(&mut buf);
-        let output = String::from_utf8_lossy(&buf);
         assert!(
             !output.contains("\x1b[2J"),
-            "render_full should not contain CSI 2 J; got: {output:?}"
+            "render_screen_positioned should not contain CSI 2 J"
         );
+    }
+
+    /// Helper: probe scrollback depth.
+    fn scrollback_depth(pt: &mut Passthrough) -> usize {
+        let screen = pt.vte.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        screen.set_scrollback(0);
+        total
     }
 
     #[test]
@@ -1125,5 +1151,50 @@ mod tests {
         let applied = pt.render_scrollback(&mut buf, total, 40);
         assert_eq!(applied, total);
         assert!(!buf.is_empty());
+    }
+
+    // === CSI 3 J (Erase Saved Lines) tests ===
+
+    /// CSI 3 J should clear the scrollback buffer.
+    /// This is the escape sequence Claude Code sends to clear history,
+    /// which tmux honors but vt100 does not implement.
+    #[test]
+    fn csi_3j_clears_scrollback() {
+        let mut pt = Passthrough::new(10, 80);
+
+        // Accumulate scrollback
+        for i in 0..30 {
+            pt.process(format!("line {i}\r\n").as_bytes());
+        }
+        let depth_before = scrollback_depth(&mut pt);
+        assert!(depth_before > 0, "should have scrollback before CSI 3 J");
+
+        // Send CSI 3 J (Erase Saved Lines)
+        pt.process(b"\x1b[3J");
+
+        let depth_after = scrollback_depth(&mut pt);
+        assert_eq!(
+            depth_after, 0,
+            "CSI 3 J should clear scrollback, but {depth_after} rows remain"
+        );
+    }
+
+    /// CSI 3 J should not affect the visible screen content.
+    #[test]
+    fn csi_3j_preserves_visible_screen() {
+        let mut pt = Passthrough::new(5, 80);
+
+        for i in 0..20 {
+            pt.process(format!("line {i}\r\n").as_bytes());
+        }
+
+        let screen_before = pt.vte.screen().contents();
+        pt.process(b"\x1b[3J");
+        let screen_after = pt.vte.screen().contents();
+
+        assert_eq!(
+            screen_before, screen_after,
+            "CSI 3 J should not change visible screen"
+        );
     }
 }

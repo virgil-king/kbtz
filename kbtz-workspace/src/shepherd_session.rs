@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -102,6 +102,8 @@ impl ShepherdSession {
 }
 
 fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mutex<Passthrough>>) {
+    let stdout = std::io::stdout();
+
     loop {
         match protocol::read_message(&mut reader) {
             Ok(Some(Message::PtyOutput(data))) => {
@@ -109,6 +111,12 @@ fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mu
                     break;
                 };
                 pt.process(&data);
+
+                if pt.active {
+                    let mut out = stdout.lock();
+                    let _ = out.write_all(&data);
+                    let _ = out.flush();
+                }
             }
             Ok(Some(_)) => {}           // Ignore unexpected messages
             Ok(None) | Err(_) => break, // EOF or error
@@ -164,24 +172,20 @@ impl SessionHandle for ShepherdSession {
         }
     }
 
-    fn render_screen(&self, prev: &vt100::Screen) -> Result<vt100::Screen> {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        Ok(self
-            .passthrough
+    fn start_passthrough(&self) -> Result<()> {
+        self.passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_diff(&mut out, prev))
+            .start();
+        Ok(())
     }
 
-    fn render_screen_full(&self) -> Result<vt100::Screen> {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        Ok(self
-            .passthrough
+    fn stop_passthrough(&self) -> Result<()> {
+        self.passthrough
             .lock()
             .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_full(&mut out))
+            .stop();
+        Ok(())
     }
 
     fn enter_scroll_mode(&self) -> Result<usize> {
@@ -267,13 +271,6 @@ impl SessionHandle for ShepherdSession {
 
     fn process_id(&self) -> Option<u32> {
         Some(self.shepherd_pid)
-    }
-
-    fn has_new_output(&self) -> bool {
-        self.passthrough
-            .lock()
-            .map(|pt| pt.has_new_output())
-            .unwrap_or(false)
     }
 }
 

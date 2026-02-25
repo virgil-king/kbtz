@@ -22,23 +22,23 @@ PTY (or shepherd socket)
     ▼
 Reader thread ──► vt100::Parser (Passthrough.vte)
                        │
-                       ├── dirty flag (AtomicBool)
+                       ├── if active: raw bytes → stdout (child controls rendering)
                        │
-                       ▼
-Main thread polls has_new_output()
-    │
-    ├── render_diff(prev): screen.state_diff(prev) → stdout
-    │   Returns new Screen for next diff
-    │
-    └── render_full(): screen.state_formatted() → stdout
-        Used after mode switches (scroll exit, tree→passthrough)
+                       └── VTE always updated (for scroll mode, reconnection)
 ```
 
-The main loop in `passthrough_loop` polls at 16ms (~60fps). On each tick:
-1. Check `has_new_output()` (AtomicBool set by reader thread)
-2. If dirty: `render_screen(prev)` writes `state_diff` to stdout
-3. Track `prev_screen: Option<vt100::Screen>` for efficient diffs
-4. `prev_screen = None` forces a full re-render (used after scroll mode exit)
+The reader thread has two responsibilities:
+1. **Always** feed every byte into the VTE parser (for scroll mode and reconnection)
+2. **When `active`**: also write those raw bytes directly to stdout
+
+The main loop in `passthrough_loop` handles only input, status bar, resize
+detection, and scroll mode. It does NOT render child output — that's the
+reader thread's job via raw byte forwarding.
+
+On mode transitions (entering passthrough, exiting scroll mode, resize/wake),
+`render_screen_positioned()` does a one-shot VTE-to-terminal sync using
+explicit cursor positioning per row (`CSI row;1 H` + `CSI K` + content).
+This never causes terminal scrolling.
 
 ## Alternate Screen Lifecycle
 
@@ -133,7 +133,9 @@ terminal.
    including content from before an alt screen switch
 4. **Proper reflow on resize**: Content should reflow to the new width,
    not show mixed-width artifacts
-5. **Flicker-free rendering**: Use `state_diff` for efficient updates
+5. **Flicker-free rendering**: Raw byte forwarding is inherently flicker-free
+   (the child writes its own escape sequences). Transition renders use cursor
+   positioning, not screen clears.
 6. **Background output tracking**: Sessions accumulate output in their VTE
    even when the user is viewing a different session or tree view
 
@@ -145,14 +147,22 @@ terminal.
 `start_passthrough()` / `stop_passthrough()` toggled whether the reader
 thread wrote to stdout.
 
-**Why it failed**: Every byte the child wrote went to the real terminal's
-scrollback buffer. When viewing a session, its entire history accumulated
-in the terminal's scrollback. Switching sessions left stale scrollback.
-"Scrollback shows many copies of the same content" — the terminal kept
-every screen redraw.
+**What this doc previously claimed**: "Every byte the child wrote went to
+the real terminal's scrollback buffer. Switching sessions left stale
+scrollback."
 
-**Root cause**: The terminal's scrollback is append-only. There's no way
-to prevent it from accumulating output that happens to scroll off screen.
+**Correction**: This failure analysis was wrong for kbtz-workspace's actual
+setup. The workspace enters `EnterAlternateScreen` at startup. The
+terminal's alternate screen has **no scrollback** — content that scrolls
+off the top of a scroll region in alt screen simply disappears. Raw byte
+forwarding within the alt screen does not accumulate terminal scrollback.
+This is exactly how tmux works: tmux panes render within the alt screen,
+and raw PTY output never enters the terminal emulator's scrollback buffer.
+
+The approach's actual limitation was not about terminal scrollback pollution
+but about **our own scroll mode**: with `scrollback=0` on the VTE and a raw
+`output_buffer` for scroll mode reconstruction, resizing caused duplication
+(see approach #2). Raw byte forwarding itself was fine for live rendering.
 
 ### 2. VTE rendering + raw output buffer replay
 
@@ -222,77 +232,93 @@ main screen → live VTE, alt screen → buffer replay.
 **Why it was rejected**: Still two code paths. User wanted one mechanism
 like tmux: "tmux seems to do fine with all of them."
 
-### 7. Live VTE scrollback + DECRST 47 trick (current)
+### 7. VTE-mediated rendering + DECRST 47 trick
 
-**How it works**: Live VTE with `SCROLLBACK_ROWS`. Scroll mode temporarily
-toggles DECRST/DECSET 47 to access the main grid, clones the Screen.
+**How it worked**: Live VTE with `SCROLLBACK_ROWS`. Reader threads only
+feed the VTE (no stdout writes). Main thread renders from VTE state using
+`state_diff(prev)` on a 16ms poll loop. Scroll mode uses the DECRST 47
+trick to access main screen scrollback.
 
-**Why it works**: One mechanism for all apps. DECSET 47 doesn't clear the
-alt screen (unlike DECSET 1049). The escape sequences are processed by the
-in-memory VTE parser, never reaching the real terminal. vt100 handles
-resize reflow natively. No raw byte buffer needed.
+**What worked**: The DECRST 47 trick for scroll mode. One mechanism for all
+apps. DECSET 47 doesn't clear the alt screen (unlike DECSET 1049). vt100
+handles resize reflow natively. No raw byte buffer needed.
 
-**Status**: Implemented, tests passing, awaiting user testing.
+**Why it failed**: The vt100 crate's `state_diff()` and `state_formatted()`
+emit sequential `\r\n` between rows when rendering large screen changes.
+Within a scroll region (`\x1b[1;{rows-1}r`, used to protect the status
+bar), these `\r\n` sequences cause content to scroll within the region.
+Since the workspace is on the terminal's alternate screen, this scrolling
+doesn't pollute terminal scrollback, but it causes **visible duplication
+within the session viewport**: content rendered by `state_diff` scrolls up
+and is immediately re-rendered by the child's next output frame.
+
+The fundamental problem is that `state_diff` is designed for full-screen
+rendering without scroll regions. It assumes it owns the entire terminal
+and uses newlines to move between rows. This is incompatible with a
+terminal multiplexer that uses scroll regions for status bars. tmux avoids
+this by implementing its own cell-by-cell diff with explicit cursor
+positioning — it never emits `\r\n` during rendering.
+
+**Root cause**: Continuous VTE-mediated rendering with `state_diff()` is
+architecturally incompatible with scroll regions.
+
+### 8. Raw forwarding + VTE scrollback + DECRST 47 trick (current)
+
+**How it works**: Combines raw byte forwarding (approach #1) for live
+output with live VTE scrollback + DECRST 47 trick (approach #7) for scroll
+mode. The reader thread does two things: (1) always feeds bytes into the
+VTE parser, and (2) when `active`, also writes those raw bytes directly to
+stdout. The main loop handles only input, status bar, resize, and scroll
+mode — it never renders child output.
+
+On transitions (entering passthrough, exiting scroll mode, resize/wake),
+`render_screen_positioned()` does a one-shot VTE-to-terminal sync using
+explicit cursor positioning per row (`CSI row;1 H` + `CSI K` + content).
+This never emits `\r\n` and is safe within scroll regions.
+
+**Why this is different from approach #1**: Approach #1 had `scrollback=0`
+on the VTE and used a raw `output_buffer` for scroll mode, which caused
+duplication on resize. This approach keeps the live VTE with
+`SCROLLBACK_ROWS` and the DECRST 47 trick from approach #7, giving proper
+scroll mode with structured line data and native reflow.
+
+**Why this is different from approach #7**: Approach #7 rendered ALL child
+output through the VTE using `state_diff()`, which emitted `\r\n` within
+the scroll region causing visible duplication. This approach lets the child
+render its own output via raw forwarding (the child's escape sequences
+handle cursor positioning correctly), and only uses the VTE for transitions
+and scroll mode.
+
+**Key insight**: The workspace is on the terminal's alternate screen
+(entered at startup via `EnterAlternateScreen`). The alt screen has no
+terminal scrollback, so raw byte forwarding cannot pollute it. This is
+exactly how tmux works: panes render raw PTY output within the alt screen.
+
+**CSI 3 J handling**: The vt100 crate does not implement CSI 3 J (Erase
+Saved Lines), which Claude Code sends to clear scrollback during context
+compaction. tmux handles this via `screen_write_clearhistory()`. We
+intercept CSI 3 J in `Passthrough::process()` by creating a fresh VTE
+and replaying only the visible screen state, discarding all scrollback.
+
+**Status**: Implemented, confirmed working.
 
 ## Shepherd Reconnection and Scrollback
 
-### The problem
+The shepherd maintains its own VTE with `SCROLLBACK_ROWS` — it is the
+authoritative scrollback store, like tmux's server. On reconnect, the
+workspace sends a `Resize` message first (size-first handshake), then the
+shepherd uses `build_restore_sequence()` (in `lib.rs`) to build a
+synthetic byte stream from structured VTE data:
 
-The shepherd accumulates a raw byte output buffer of everything the child
-ever wrote. On reconnect, it sends this entire buffer as `InitialState`.
-With `SCROLLBACK_ROWS` enabled on the workspace VTE, replaying this buffer
-causes every intermediate screen redraw to accumulate in scrollback —
-producing thousands of duplicate lines.
+1. Scrollback rows (oldest first), each followed by `\r\n` — these scroll
+   off the top of the receiving VTE into its scrollback buffer.
+2. `state_formatted()` — restores the visible screen (starts with
+   ClearScreen, so scrollback is not affected).
+3. If the child was on the alt screen: DECSET 47 + alt screen
+   `state_formatted()`.
 
-For Claude Code specifically, this is severe: Claude Code redraws its
-viewport dozens of times per second on the main screen. A long session
-produces megabytes of raw output. Replaying it into a VTE with 10,000
-rows of scrollback fills scrollback with intermediate render frames.
-
-### Current fix
-
-Process `InitialState` through a temporary VTE with `scrollback=0` to
-extract only the final screen state (`state_formatted()`), then feed that
-into the real Passthrough (which has `SCROLLBACK_ROWS`). This eliminates
-duplication but loses all pre-reconnection scrollback.
-
-### Trade-off
-
-After reconnection, scroll mode only shows content generated from that
-point forward. Pre-reconnection history is lost. This is similar to
-tmux's client behavior (the server owns the scrollback), except tmux's
-server does maintain structured scrollback and makes it available to
-re-attaching clients.
-
-### Future: shepherd-side scrollback
-
-The shepherd could maintain its own VTE with `SCROLLBACK_ROWS` and send
-structured screen state (not raw bytes) on reconnect. This would:
-
-1. **Preserve scrollback across reconnections** — the shepherd owns the
-   scrollback, like tmux's server
-2. **Reduce reconnection payload** — `state_formatted()` is much smaller
-   than the full raw buffer
-3. **Eliminate the temp VTE workaround** on the workspace side
-
-This requires the shepherd to maintain a VTE parser, which it currently
-does not. The shepherd currently just accumulates raw bytes and forwards
-`PtyOutput` messages. Adding a VTE to the shepherd would make it more
-like a tmux server.
-
-### Alternative: structured scrollback serialization
-
-A more complete solution would serialize the VTE's scrollback grid
-(structured line data) from the shepherd to the workspace. The `vt100`
-crate's `Screen` derives `Clone` but has no serialization support. This
-would require either:
-
-- Adding serde support to `vt100::Screen` (upstream change)
-- A custom serialization format for the grid data
-- Using `rows_formatted()` with scrollback offset to serialize line-by-line
-
-This is significantly more complex but would provide perfect scrollback
-preservation with reflow support.
+This preserves scrollback across reconnections and eliminates the
+mixed-width duplication that plagued raw byte replay.
 
 ## Key vt100 Internals
 

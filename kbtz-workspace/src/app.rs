@@ -728,11 +728,11 @@ mod tests {
         fn force_kill(&mut self) {
             self.alive = false;
         }
-        fn render_screen(&self, _prev: &vt100::Screen) -> Result<vt100::Screen> {
-            Ok(vt100::Parser::new(24, 80, 0).screen().clone())
+        fn start_passthrough(&self) -> Result<()> {
+            Ok(())
         }
-        fn render_screen_full(&self) -> Result<vt100::Screen> {
-            Ok(vt100::Parser::new(24, 80, 0).screen().clone())
+        fn stop_passthrough(&self) -> Result<()> {
+            Ok(())
         }
         fn enter_scroll_mode(&self) -> Result<usize> {
             Ok(0)
@@ -757,9 +757,6 @@ mod tests {
         }
         fn process_id(&self) -> Option<u32> {
             None
-        }
-        fn has_new_output(&self) -> bool {
-            false
         }
     }
 
