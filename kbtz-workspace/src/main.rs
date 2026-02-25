@@ -253,14 +253,17 @@ fn run() -> Result<()> {
     })
     .context("failed to set Ctrl+C handler")?;
 
+    // Enter alternate screen once for the entire session.
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+
     // Main loop
     let result = main_loop(&mut app, &running);
 
     // Graceful shutdown
     app.shutdown();
 
-    // Clear the terminal so the user returns to a clean shell prompt
-    // instead of stale rendering artifacts from zoomed/toplevel mode.
+    // Leave alternate screen and clean up terminal state.
     let mut stdout = io::stdout();
     let _ = write!(
         stdout,
@@ -269,12 +272,7 @@ fn run() -> Result<()> {
             "\x1b[?1004l", // disable focus event reporting
         )
     );
-    let _ = execute!(
-        stdout,
-        crossterm::cursor::Show,
-        terminal::Clear(terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    );
+    let _ = execute!(stdout, crossterm::cursor::Show, LeaveAlternateScreen,);
 
     result
 }
@@ -318,42 +316,10 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
     }
 }
 
-// ── Passthrough screen helpers ────────────────────────────────────────
-
-/// Set up the terminal for passthrough mode: raw mode, scroll region
-/// protecting the last row (for the status bar), and clear screen.
-///
-/// Does NOT enter alternate screen — the child (e.g. Claude Code)
-/// manages its own alternate screen.  Adding a second layer would
-/// prevent shift+pgup/pgdn from reaching the child (the terminal
-/// intercepts them for scrollback, which is empty in alt screen) and
-/// would conflict when the child's alt-screen escapes are forwarded.
-fn enter_passthrough_screen(rows: u16) -> Result<()> {
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
-    Ok(())
-}
-
-/// Tear down passthrough mode: reset scroll region and disable raw mode.
-fn leave_passthrough_screen() -> Result<()> {
-    let mut stdout = io::stdout();
-    write!(stdout, "\x1b[r")?;
-    stdout.flush()?;
-    terminal::disable_raw_mode()?;
-    Ok(())
-}
-
 // ── Stdin helpers ─────────────────────────────────────────────────────
 
-/// Poll stdin with a 100ms timeout. Returns `Some(n)` if `n` bytes were
-/// read (`0` means EOF/error), or `None` on timeout.
+/// Poll stdin with a 16ms (~60 fps) timeout. Returns `Some(n)` if `n`
+/// bytes were read (`0` means EOF/error), or `None` on timeout.
 fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
     let stdin_fd = stdin.as_raw_fd();
     let mut pfd = libc::pollfd {
@@ -361,7 +327,7 @@ fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
         events: libc::POLLIN,
         revents: 0,
     };
-    if unsafe { libc::poll(&mut pfd, 1, 100) } <= 0 {
+    if unsafe { libc::poll(&mut pfd, 1, 16) } <= 0 {
         return None;
     }
     match stdin.read(buf) {
@@ -391,15 +357,23 @@ fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLoc
 
 fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     terminal::enable_raw_mode()?;
+    // Reset scroll region and clear stale passthrough content so ratatui
+    // starts with a clean slate.
+    //
+    // Use CSI H + CSI J (home + erase from cursor to end) instead of
+    // CSI 2 J (erase entire display).  Some terminal emulators (iTerm2,
+    // Terminal.app) save the current screen to their scrollback buffer
+    // when they receive CSI 2 J on the alt screen, causing duplicate
+    // content in the terminal's scrollback.  CSI 0 J does not trigger
+    // this behaviour.
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    write!(stdout, "\x1b[r\x1b[H\x1b[J")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = tree_loop(&mut terminal, app, running);
 
     terminal::disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     result
 }
@@ -618,20 +592,32 @@ fn passthrough_mode(
         app.ensure_toplevel()?;
     }
 
-    enter_passthrough_screen(app.term.rows)?;
+    // Set up passthrough screen: raw mode, scroll region for status bar.
+    // Use CSI H + CSI J instead of CSI 2 J to avoid terminal scrollback
+    // accumulation (see tree_mode comment).
+    terminal::enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
+    stdout.flush()?;
 
-    let sid = kind.session_id();
-    if let Some(session) = app.get_session(sid) {
+    // Start raw byte forwarding: render VTE state to screen and enable
+    // the reader thread to write child output directly to stdout.
+    if let Some(session) = app.get_session(kind.session_id()) {
         session.start_passthrough()?;
     }
 
     let result = passthrough_loop(app, kind, running);
 
-    if let Some(session) = app.get_session(sid) {
-        let _ = session.stop_passthrough();
+    // Stop raw byte forwarding before leaving passthrough mode.
+    if let Some(session) = app.get_session(kind.session_id()) {
+        session.stop_passthrough()?;
     }
 
-    leave_passthrough_screen()?;
+    // Reset scroll region and raw mode.
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[r")?;
+    stdout.flush()?;
+    terminal::disable_raw_mode()?;
     result
 }
 
@@ -658,16 +644,11 @@ fn handle_prefix_command(
             if scroll.active {
                 exit_scroll_mode(app, sid, scroll)?;
             }
-            if let Some(session) = app.get_session(sid) {
-                let _ = session.stop_passthrough();
-            }
             Ok(Some(Action::TopLevel))
         }
         b'n' => {
             let next_task = match kind {
-                SessionKind::Worker { task, .. } => {
-                    app.cycle_session(&Action::NextSession, task)
-                }
+                SessionKind::Worker { task, .. } => app.cycle_session(&Action::NextSession, task),
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .first()
@@ -677,9 +658,6 @@ fn handle_prefix_command(
                 if scroll.active {
                     exit_scroll_mode(app, sid, scroll)?;
                 }
-                if let Some(session) = app.get_session(sid) {
-                    let _ = session.stop_passthrough();
-                }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
                 Ok(None)
@@ -687,9 +665,7 @@ fn handle_prefix_command(
         }
         b'p' => {
             let prev_task = match kind {
-                SessionKind::Worker { task, .. } => {
-                    app.cycle_session(&Action::PrevSession, task)
-                }
+                SessionKind::Worker { task, .. } => app.cycle_session(&Action::PrevSession, task),
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .last()
@@ -698,9 +674,6 @@ fn handle_prefix_command(
             if let Some(prev_task) = prev_task {
                 if scroll.active {
                     exit_scroll_mode(app, sid, scroll)?;
-                }
-                if let Some(session) = app.get_session(sid) {
-                    let _ = session.stop_passthrough();
                 }
                 Ok(Some(Action::ZoomIn(prev_task)))
             } else {
@@ -716,12 +689,15 @@ fn handle_prefix_command(
                 if scroll.active {
                     exit_scroll_mode(app, sid, scroll)?;
                 }
-                if let Some(session) = app.get_session(sid) {
-                    let _ = session.stop_passthrough();
-                }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
-                draw_normal_status_bar(rows, cols, kind, last_status, Some("no sessions need input"));
+                draw_normal_status_bar(
+                    rows,
+                    cols,
+                    kind,
+                    last_status,
+                    Some("no sessions need input"),
+                );
                 Ok(None)
             }
         }
@@ -784,6 +760,11 @@ fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> R
         scroll.total = session.enter_scroll_mode()?;
         scroll.offset = 0;
         scroll.active = true;
+        // Disable mouse tracking so the terminal handles native text selection.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let _ = write!(out, "\x1b[?1000l\x1b[?1006l\x1b[?25h");
+        let _ = out.flush();
         // Render the current viewport (offset 0 = live screen).
         session.render_scrollback(0, app.term.cols)?;
         draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
@@ -962,9 +943,9 @@ fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouse
 
 /// Refresh the terminal after a resize or wake from sleep.
 ///
-/// Exits scroll mode if active, stops passthrough, updates dimensions if the
-/// terminal size changed, re-establishes the scroll region, clears the screen,
-/// and re-renders the session's VTE state.
+/// Exits scroll mode if active, updates dimensions if the terminal size
+/// changed, re-establishes the scroll region, clears the screen, and
+/// re-renders the VTE state with cursor positioning.
 fn refresh_passthrough_screen(
     app: &mut App,
     kind: &SessionKind,
@@ -975,20 +956,18 @@ fn refresh_passthrough_screen(
     if scroll.active {
         exit_scroll_mode(app, sid, scroll)?;
     }
-    if let Some(session) = app.get_session(sid) {
-        let _ = session.stop_passthrough();
-    }
     let (cols, rows) = terminal::size()?;
     if cols != app.term.cols || rows != app.term.rows {
         app.handle_resize(cols, rows);
     }
+    // Stop forwarding, re-establish the scroll region, clear screen,
+    // then re-render and resume forwarding.
+    if let Some(session) = app.get_session(sid) {
+        session.stop_passthrough()?;
+    }
     let mut stdout = io::stdout();
-    write!(stdout, "\x1b[1;{}r", app.term.rows - 1)?;
-    execute!(
-        stdout,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        crossterm::cursor::MoveTo(0, 0)
-    )?;
+    write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
+    stdout.flush()?;
     if let Some(session) = app.get_session(sid) {
         session.start_passthrough()?;
     }
@@ -1106,9 +1085,14 @@ fn passthrough_loop(
                         Some(b) => b,
                         None => return Ok(Action::Quit),
                     };
-                    if let Some(action) =
-                        handle_prefix_command(cmd, app, kind, &mut stdin, &mut scroll, &last_status)?
-                    {
+                    if let Some(action) = handle_prefix_command(
+                        cmd,
+                        app,
+                        kind,
+                        &mut stdin,
+                        &mut scroll,
+                        &last_status,
+                    )? {
                         return Ok(action);
                     }
                     if scroll.active {
@@ -1121,7 +1105,9 @@ fn passthrough_loop(
 
                 match handle_scroll_input(app, sid, &mut scroll, &buf, &mut i, n, rows)? {
                     true => draw_scroll_status_bar(rows, cols, &scroll),
-                    false => draw_normal_status_bar(rows, cols, kind, &last_status, None),
+                    false => {
+                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
+                    }
                 }
                 continue;
             }

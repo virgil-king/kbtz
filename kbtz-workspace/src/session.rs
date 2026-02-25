@@ -17,7 +17,12 @@ pub trait SessionHandle: Send {
     fn is_alive(&mut self) -> bool;
     fn mark_stopping(&mut self);
     fn force_kill(&mut self);
+    /// Start passthrough: render the VTE's current screen to stdout
+    /// using explicit cursor positioning, restore input modes, and
+    /// enable raw byte forwarding from the reader thread.
     fn start_passthrough(&self) -> Result<()>;
+    /// Stop passthrough: disable raw forwarding and reset input modes
+    /// so they don't leak into other UI modes.
     fn stop_passthrough(&self) -> Result<()>;
     fn enter_scroll_mode(&self) -> Result<usize>;
     fn exit_scroll_mode(&self) -> Result<()>;
@@ -145,80 +150,61 @@ pub struct Session {
     pub stopping_since: Option<Instant>,
 }
 
-/// Max scrollback rows retained per session for the scroll-back viewer.
-const SCROLLBACK_ROWS: usize = 10_000;
-
-/// Max raw output we buffer per session for scrollback replay.
-const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
+use kbtz_workspace::SCROLLBACK_ROWS;
 
 /// Shared state between the reader thread and the main thread.
 ///
 /// Holds a virtual terminal emulator (`vt100::Parser`) that receives
 /// every byte the child writes.  When `active` is true the reader
-/// thread also forwards those bytes to stdout.
+/// thread also forwards those raw bytes to stdout — the child controls
+/// its own rendering (including alt screen, cursor positioning, etc).
 ///
-/// A bounded raw output buffer is kept so that scroll mode can
-/// reconstruct the full terminal history (including content that
-/// predates an alternate-screen switch) by replaying it into a
-/// temporary VTE.
+/// The VTE is kept up-to-date at all times for scroll mode, which
+/// accesses the main screen's scrollback by temporarily toggling
+/// DECRST/DECSET 47.
 pub struct Passthrough {
     pub(crate) active: bool,
     vte: vt100::Parser,
-    /// Bounded buffer of raw child output for scrollback reconstruction.
-    output_buffer: Vec<u8>,
-    /// Temporary VTE used during scroll mode, built from `output_buffer`.
-    scroll_vte: Option<vt100::Parser>,
+    /// Cloned snapshot of the main screen, captured on scroll mode entry.
+    scroll_screen: Option<vt100::Screen>,
 }
 
 impl Passthrough {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
             active: false,
-            vte: vt100::Parser::new(rows, cols, 0),
-            output_buffer: Vec::new(),
-            scroll_vte: None,
+            vte: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
+            scroll_screen: None,
         }
     }
 
     /// Switch to passthrough mode.  Render the VTE's current screen
-    /// state plus input modes and set `active` for live forwarding.
-    /// Both happen under the same Mutex guard so no child output is
-    /// lost.
+    /// state using explicit cursor positioning (no `\r\n` that could
+    /// cause scrolling within a scroll region), restore input modes,
+    /// and set `active` for live raw byte forwarding.
     pub(crate) fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(&self.vte.screen().state_formatted());
-        // Restore the child's input modes (bracketed paste, keypad
-        // mode, cursor key mode, and any mouse tracking the child
-        // requested).  stop() resets all of these to prevent leaking
-        // into tree mode; state_formatted() only restores visual
-        // state, so we need input_mode_formatted() separately.
-        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
-        // Always enable SGR mouse button reporting so scroll wheel
-        // events trigger scroll mode.  Native text selection still
-        // works by holding Shift (standard terminal behavior, same
-        // as tmux).  Non-scroll mouse events are forwarded to the
-        // child when it has its own mouse tracking.
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
+        self.render_screen_positioned(&mut out);
         let _ = out.flush();
 
         self.active = true;
     }
 
+    /// Stop passthrough: disable raw forwarding and reset input modes.
     pub(crate) fn stop(&mut self) {
         if !self.active {
             return;
         }
         self.active = false;
 
-        // Reset input modes so they don't leak into other UI modes
-        // (tree view, etc.).
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let _ = out.write_all(
             concat!(
+                "\x1b[m",      // reset all SGR attributes (colors, reverse, bold, etc.)
                 "\x1b[?1000l", // disable mouse tracking modes
                 "\x1b[?1002l",
                 "\x1b[?1003l",
@@ -234,72 +220,118 @@ impl Passthrough {
         let _ = out.flush();
     }
 
+    /// Render the VTE screen to `out` using explicit cursor positioning
+    /// per row (CSI row;1 H + CSI K + row content).  This never causes
+    /// terminal scrolling, unlike `state_formatted()` / `state_diff()`
+    /// which use sequential `\r\n` between rows.
+    fn render_screen_positioned(&self, out: &mut impl Write) {
+        let screen = self.vte.screen();
+        let (_rows, cols) = screen.size();
+        for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
+            // Reset SGR before erasing so \x1b[K doesn't inherit stale
+            // attributes (e.g. reverse video) from the previous row.
+            let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
+            let _ = out.write_all(&row_bytes);
+        }
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let _ = write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
+        if screen.hide_cursor() {
+            let _ = write!(out, "\x1b[?25l");
+        } else {
+            let _ = write!(out, "\x1b[?25h");
+        }
+        let _ = out.write_all(&screen.input_mode_formatted());
+        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
+    }
+
     pub(crate) fn process(&mut self, data: &[u8]) {
         self.vte.process(data);
-        self.output_buffer.extend_from_slice(data);
-        if self.output_buffer.len() > OUTPUT_BUFFER_MAX {
-            let keep_from = self.output_buffer.len() - OUTPUT_BUFFER_MAX / 2;
-            self.output_buffer.drain(..keep_from);
-            // Terminate any escape sequence that was cut mid-stream.
-            // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends
-            // OSC/DCS sequences.
-            self.output_buffer
-                .splice(0..0, b"\x18\x1b\\".iter().copied());
+
+        // CSI 3 J (Erase Saved Lines) — clear the scrollback buffer.
+        // The vt100 crate doesn't implement this, so we handle it by
+        // creating a fresh parser and replaying the visible screen state.
+        // This matches tmux's screen_write_clearhistory().
+        if Self::contains_csi_3j(data) {
+            self.clear_scrollback();
         }
+    }
+
+    /// Check if a byte slice contains the CSI 3 J sequence (\x1b[3J).
+    fn contains_csi_3j(data: &[u8]) -> bool {
+        data.windows(4).any(|w| w == b"\x1b[3J")
+    }
+
+    /// Clear scrollback by creating a fresh VTE and replaying the
+    /// visible screen state.
+    fn clear_scrollback(&mut self) {
+        let (rows, cols) = self.vte.screen().size();
+        let was_alt = self.vte.screen().alternate_screen();
+
+        // Capture current screen state(s).
+        let mut alt_state = None;
+
+        if was_alt {
+            // Save alt screen state, switch to main to capture it too.
+            alt_state = Some(self.vte.screen().state_formatted());
+            self.vte.process(b"\x1b[?47l");
+        }
+        let main_state = self.vte.screen().state_formatted();
+        if was_alt {
+            self.vte.process(b"\x1b[?47h");
+        }
+
+        // Create a fresh VTE with the same dimensions and scrollback capacity.
+        let mut fresh = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        fresh.process(&main_state);
+        if let Some(alt) = alt_state {
+            fresh.process(b"\x1b[?47h");
+            fresh.process(&alt);
+        }
+
+        self.vte = fresh;
     }
 
     pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
-        self.vte.screen_mut().set_size(rows, cols);
+        kbtz_workspace::resize_both_screens(&mut self.vte, rows, cols);
     }
 
-    /// Enter scroll mode: build a temporary VTE from the output buffer,
-    /// stop forwarding live output, disable mouse tracking for native
-    /// text selection, and return the number of scrollback rows available.
+    /// Enter scroll mode: snapshot the main screen (with scrollback)
+    /// from the live VTE and return the number of scrollback rows
+    /// available.
     ///
-    /// Mouse tracking is disabled so the terminal handles click-drag
-    /// selection and system copy shortcuts natively.  Scrolling within
-    /// scroll mode is keyboard-only (j/k, arrows, PgUp/PgDn, g/G).
+    /// If the child is on the alternate screen, we temporarily toggle
+    /// DECRST 47 / DECSET 47 to expose the main grid, clone it, and
+    /// switch back.  DECSET 47 does not clear the alternate grid, so
+    /// the child's display is preserved.
     pub(crate) fn enter_scroll_mode(&mut self) -> usize {
-        let screen = self.vte.screen();
-        let (rows, cols) = screen.size();
-        let mut scroll_vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
-        scroll_vte.process(&self.output_buffer);
+        self.active = false;
 
-        // If the child is on the alternate screen, switch the temp
-        // VTE back to the main screen to access its scrollback.
-        if scroll_vte.screen().alternate_screen() {
-            scroll_vte.process(b"\x1b[?1049l");
+        let was_alt = self.vte.screen().alternate_screen();
+        if was_alt {
+            self.vte.process(b"\x1b[?47l"); // expose main grid
+        }
+        let mut snapshot = self.vte.screen().clone();
+        if was_alt {
+            self.vte.process(b"\x1b[?47h"); // restore alt grid
         }
 
-        let total = Self::scrollback_of(&mut scroll_vte);
+        // Probe scrollback depth.
+        snapshot.set_scrollback(usize::MAX);
+        let total = snapshot.scrollback();
+        snapshot.set_scrollback(0);
 
-        self.active = false;
-        self.scroll_vte = Some(scroll_vte);
-
-        // Disable mouse tracking for native text selection, and hide
-        // the cursor (the user isn't typing, so a blinking cursor is
-        // distracting).
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?25l");
-        let _ = out.flush();
-
+        self.scroll_screen = Some(snapshot);
         total
     }
 
-    /// Exit scroll mode: discard the temporary VTE, re-render the live
-    /// screen with input modes, and resume live forwarding.
+    /// Exit scroll mode: discard the snapshot, re-render the live
+    /// screen, and resume raw forwarding.
     pub(crate) fn exit_scroll_mode(&mut self) {
-        self.scroll_vte = None;
+        self.scroll_screen = None;
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        // Restore the child's full screen state (including cursor
-        // visibility) and input modes, then re-enable forced mouse
-        // tracking for scroll wheel detection.
-        let _ = out.write_all(&self.vte.screen().state_formatted());
-        let _ = out.write_all(&self.vte.screen().input_mode_formatted());
-        let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
+        self.render_screen_positioned(&mut out);
         let _ = out.flush();
 
         self.active = true;
@@ -321,19 +353,15 @@ impl Passthrough {
         offset: usize,
         cols: u16,
     ) -> usize {
-        let svte = match self.scroll_vte.as_mut() {
-            Some(v) => v,
+        let screen = match self.scroll_screen.as_mut() {
+            Some(s) => s,
             None => return 0,
         };
-        let max = Self::scrollback_of(svte);
+        let max = Self::scrollback_depth(screen);
         let clamped = offset.min(max);
-        svte.screen_mut().set_scrollback(clamped);
+        screen.set_scrollback(clamped);
 
-        for (i, row_bytes) in svte.screen().rows_formatted(0, cols).enumerate() {
-            // Reset attributes before clearing so \x1b[K doesn't inherit
-            // stale SGR state (e.g. reverse video) from the previous row.
-            // rows_formatted() emits each row independently starting from
-            // default attrs, so resetting here keeps the terminal in sync.
+        for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
             let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
@@ -345,18 +373,18 @@ impl Passthrough {
 
     /// Total scrollback rows available (not counting the visible screen).
     pub(crate) fn scrollback_available(&mut self) -> usize {
-        match self.scroll_vte.as_mut() {
-            Some(svte) => Self::scrollback_of(svte),
+        match self.scroll_screen.as_mut() {
+            Some(s) => Self::scrollback_depth(s),
             None => 0,
         }
     }
 
-    /// Probe a VTE for its total scrollback depth.
-    fn scrollback_of(vte: &mut vt100::Parser) -> usize {
-        let saved = vte.screen().scrollback();
-        vte.screen_mut().set_scrollback(usize::MAX);
-        let total = vte.screen().scrollback();
-        vte.screen_mut().set_scrollback(saved);
+    /// Probe a Screen for its total scrollback depth.
+    fn scrollback_depth(screen: &mut vt100::Screen) -> usize {
+        let saved = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        screen.set_scrollback(saved);
         total
     }
 }
@@ -731,25 +759,16 @@ mod tests {
     }
 
     #[test]
-    fn output_buffer_trims_with_escape_cancel_prefix() {
-        let mut pt = Passthrough::new(24, 80);
-        let chunk = vec![b'x'; OUTPUT_BUFFER_MAX + 1];
-        pt.process(&chunk);
-        assert!(pt.output_buffer.len() <= OUTPUT_BUFFER_MAX / 2 + 10);
-        assert_eq!(&pt.output_buffer[..3], b"\x18\x1b\\");
-    }
-
-    #[test]
-    fn exit_scroll_mode_discards_scroll_vte() {
+    fn exit_scroll_mode_discards_snapshot() {
         let mut pt = Passthrough::new(4, 80);
         for i in 0..10 {
             pt.process(format!("line {i}\n").as_bytes());
         }
         pt.enter_scroll_mode();
-        assert!(pt.scroll_vte.is_some());
+        assert!(pt.scroll_screen.is_some());
 
         pt.exit_scroll_mode();
-        assert!(pt.scroll_vte.is_none());
+        assert!(pt.scroll_screen.is_none());
         assert!(pt.active);
     }
 
@@ -844,12 +863,12 @@ mod tests {
             pt.process(format!("line {i}\n").as_bytes());
         }
         // Without entering scroll mode, scrollback_available returns 0
-        // because no scroll_vte exists.
+        // because no scroll_screen exists.
         assert_eq!(pt.scrollback_available(), 0);
     }
 
     #[test]
-    fn scroll_mode_reenter_rebuilds_scroll_vte() {
+    fn scroll_mode_reenter_rebuilds_snapshot() {
         let mut pt = Passthrough::new(4, 80);
         for i in 0..10 {
             pt.process(format!("line {i}\n").as_bytes());
@@ -864,7 +883,7 @@ mod tests {
             pt.process(format!("line {i}\n").as_bytes());
         }
 
-        // Re-enter: scroll_vte should be rebuilt with new content.
+        // Re-enter: snapshot should capture new content.
         pt.enter_scroll_mode();
         let total2 = pt.scrollback_available();
         assert!(
@@ -933,6 +952,279 @@ mod tests {
         assert!(
             modes.windows(8).any(|w| w == b"\x1b[?1000h"),
             "expected mouse tracking enable in input_mode_formatted()"
+        );
+    }
+
+    /// Helper: collect all non-empty scrollback lines as strings.
+    fn collect_scrollback(pt: &mut Passthrough) -> Vec<String> {
+        let was_alt = pt.vte.screen().alternate_screen();
+        if was_alt {
+            pt.vte.process(b"\x1b[?47l");
+        }
+        let screen = pt.vte.screen_mut();
+        let cols = screen.size().1;
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        let mut lines = Vec::new();
+        for offset in (1..=total).rev() {
+            screen.set_scrollback(offset);
+            if let Some(row) = screen.rows(0, cols).next() {
+                let text = row.to_string();
+                let trimmed = text.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed);
+                }
+            }
+        }
+        screen.set_scrollback(0);
+        if was_alt {
+            pt.vte.process(b"\x1b[?47h");
+        }
+        lines
+    }
+
+    #[test]
+    fn decrst_decset_47_cycle_preserves_scrollback() {
+        // Verify that the DECRST/DECSET 47 trick doesn't change scrollback.
+        let mut pt = Passthrough::new(5, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+
+        let before = collect_scrollback(&mut pt);
+
+        // Do the DECRST/DECSET 47 cycle (no resize).
+        pt.vte.process(b"\x1b[?47l");
+        pt.vte.process(b"\x1b[?47h");
+
+        let after = collect_scrollback(&mut pt);
+        assert_eq!(
+            before, after,
+            "DECRST/DECSET 47 cycle should not change scrollback"
+        );
+    }
+
+    #[test]
+    fn resize_does_not_duplicate_scrollback() {
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..30 {
+            pt.process(format!("unique line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+        pt.process(b"alt screen content");
+
+        let before = collect_scrollback(&mut pt);
+        assert!(!before.is_empty(), "should have scrollback before resize");
+
+        // Resize (uses our set_size which does DECRST/DECSET 47 trick).
+        pt.set_size(8, 60);
+
+        let after = collect_scrollback(&mut pt);
+
+        // Check no line appears more than once (allowing for reflow
+        // which may split long lines).
+        let before_set: std::collections::HashSet<_> = before.iter().collect();
+
+        // Every line from before should still exist (possibly reflowed).
+        // No NEW unique content should appear.
+        for line in &after {
+            // Lines from reflow are OK (substrings of original lines).
+            let is_original = before_set.contains(line);
+            let is_reflow = before.iter().any(|b| b.contains(line.as_str()));
+            assert!(
+                is_original || is_reflow,
+                "unexpected new line after resize: {line:?}"
+            );
+        }
+
+        // The total number of non-empty lines should not increase
+        // dramatically (reflow can increase count, but not double it
+        // for 80→60 col resize of short lines).
+        assert!(
+            after.len() <= before.len() * 2,
+            "scrollback grew too much: {} before, {} after",
+            before.len(),
+            after.len()
+        );
+    }
+
+    #[test]
+    fn multiple_resizes_do_not_accumulate_duplicates() {
+        let mut pt = Passthrough::new(10, 80);
+        for i in 0..30 {
+            pt.process(format!("unique line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+
+        let initial = collect_scrollback(&mut pt);
+
+        // Resize back and forth 5 times.
+        for _ in 0..5 {
+            pt.set_size(8, 60);
+            pt.set_size(12, 100);
+            pt.set_size(10, 80);
+        }
+
+        let after = collect_scrollback(&mut pt);
+
+        // After resizing back to the original size, the scrollback
+        // should have roughly the same content (not 5x duplicated).
+        assert!(
+            after.len() <= initial.len() + 20,
+            "scrollback grew excessively after multiple resizes: {} initial, {} after",
+            initial.len(),
+            after.len()
+        );
+    }
+
+    #[test]
+    fn render_screen_positioned_uses_cursor_positioning() {
+        // Verify render_screen_positioned doesn't emit sequential newlines.
+        let mut pt = Passthrough::new(5, 40);
+        pt.process(b"row 1\r\nrow 2\r\nrow 3\r\nrow 4\r\nrow 5");
+        let mut buf = Vec::new();
+        pt.render_screen_positioned(&mut buf);
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            !output.contains("\r\n"),
+            "render_screen_positioned should not contain \\r\\n"
+        );
+        assert!(
+            !output.contains("\x1b[2J"),
+            "render_screen_positioned should not contain CSI 2 J"
+        );
+    }
+
+    #[test]
+    fn render_screen_positioned_resets_attrs_before_each_row() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write a line with reverse video.  When rendering, the reverse
+        // video must NOT leak into \x1b[K of the following rows.
+        pt.process(b"\x1b[7mreversed\x1b[0m\r\n");
+        pt.process(b"normal line 1\r\n");
+        pt.process(b"normal line 2\r\n");
+        pt.process(b"normal line 3");
+
+        let mut buf = Vec::new();
+        pt.render_screen_positioned(&mut buf);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Every \x1b[K must be preceded by \x1b[0m so the erase uses
+        // default attributes, not stale attributes from a previous row.
+        let el_positions: Vec<usize> = rendered.match_indices("\x1b[K").map(|(p, _)| p).collect();
+        assert!(!el_positions.is_empty(), "expected at least one \\x1b[K");
+        let mut prev_end = 0;
+        for &pos in &el_positions {
+            let segment = &rendered[prev_end..pos];
+            assert!(
+                segment.contains("\x1b[0m"),
+                "no \\x1b[0m reset before \\x1b[K at byte {pos}; segment: {segment:?}"
+            );
+            prev_end = pos + 3;
+        }
+    }
+
+    /// Helper: probe scrollback depth.
+    fn scrollback_depth(pt: &mut Passthrough) -> usize {
+        let screen = pt.vte.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        screen.set_scrollback(0);
+        total
+    }
+
+    #[test]
+    fn set_size_resizes_both_screens() {
+        let mut pt = Passthrough::new(10, 80);
+        // Write content on main screen, then enter alt screen.
+        for i in 0..20 {
+            pt.process(format!("main line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+        pt.process(b"alt content");
+
+        // Resize to a different width.
+        pt.set_size(8, 40);
+
+        // The alt screen should be at the new size.
+        assert_eq!(pt.vte.screen().size(), (8, 40));
+
+        // Check main screen size via DECRST 47 trick.
+        pt.vte.process(b"\x1b[?47l"); // expose main grid
+        assert_eq!(
+            pt.vte.screen().size(),
+            (8, 40),
+            "main screen should also be resized"
+        );
+        pt.vte.process(b"\x1b[?47h"); // restore alt grid
+    }
+
+    #[test]
+    fn scroll_mode_after_resize_uses_correct_dimensions() {
+        let mut pt = Passthrough::new(10, 80);
+        // Write content on main screen, then enter alt screen.
+        for i in 0..20 {
+            pt.process(format!("main line {i}\n").as_bytes());
+        }
+        pt.process(b"\x1b[?1049h"); // enter alt screen
+
+        // Resize (should resize both screens).
+        pt.set_size(8, 40);
+
+        // Enter scroll mode — should see main screen at the new size.
+        let total = pt.enter_scroll_mode();
+        assert!(total > 0, "expected scrollback after resize");
+
+        // Render scrollback — should work without issues at new width.
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, total, 40);
+        assert_eq!(applied, total);
+        assert!(!buf.is_empty());
+    }
+
+    // === CSI 3 J (Erase Saved Lines) tests ===
+
+    /// CSI 3 J should clear the scrollback buffer.
+    /// This is the escape sequence Claude Code sends to clear history,
+    /// which tmux honors but vt100 does not implement.
+    #[test]
+    fn csi_3j_clears_scrollback() {
+        let mut pt = Passthrough::new(10, 80);
+
+        // Accumulate scrollback
+        for i in 0..30 {
+            pt.process(format!("line {i}\r\n").as_bytes());
+        }
+        let depth_before = scrollback_depth(&mut pt);
+        assert!(depth_before > 0, "should have scrollback before CSI 3 J");
+
+        // Send CSI 3 J (Erase Saved Lines)
+        pt.process(b"\x1b[3J");
+
+        let depth_after = scrollback_depth(&mut pt);
+        assert_eq!(
+            depth_after, 0,
+            "CSI 3 J should clear scrollback, but {depth_after} rows remain"
+        );
+    }
+
+    /// CSI 3 J should not affect the visible screen content.
+    #[test]
+    fn csi_3j_preserves_visible_screen() {
+        let mut pt = Passthrough::new(5, 80);
+
+        for i in 0..20 {
+            pt.process(format!("line {i}\r\n").as_bytes());
+        }
+
+        let screen_before = pt.vte.screen().contents();
+        pt.process(b"\x1b[3J");
+        let screen_after = pt.vte.screen().contents();
+
+        assert_eq!(
+            screen_before, screen_after,
+            "CSI 3 J should not change visible screen"
         );
     }
 }

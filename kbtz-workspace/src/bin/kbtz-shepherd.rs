@@ -7,9 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use kbtz_workspace::protocol::{self, Message};
-
-/// Max raw output we buffer for scrollback replay (same as Passthrough in session.rs).
-const OUTPUT_BUFFER_MAX: usize = 16 * 1024 * 1024;
+use kbtz_workspace::{build_restore_sequence, resize_both_screens, SCROLLBACK_ROWS};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -146,9 +144,9 @@ fn run(
     listener.set_nonblocking(true)?;
     let listener_fd = listener.as_raw_fd();
 
-    // 6. VTE parser + output buffer.
-    let mut vte = vt100::Parser::new(rows, cols, 0);
-    let mut output_buffer: Vec<u8> = Vec::new();
+    // 6. VTE parser with scrollback — this is the authoritative scrollback
+    // store, like tmux's server-side pane history.  No raw byte buffer.
+    let mut vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
 
     let mut client: Option<UnixStream> = None;
     let mut shutdown_requested = false;
@@ -171,7 +169,7 @@ fn run(
                     let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
                     libc::fcntl(pty_master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
                 }
-                drain_pty(&mut pty_reader, &mut vte, &mut output_buffer, &mut client);
+                drain_pty(&mut pty_reader, &mut vte, &mut client);
                 cleanup(socket_path, pid_file);
                 return Ok(());
             }
@@ -233,7 +231,6 @@ fn run(
                 Ok(n) => {
                     let data = &read_buf[..n];
                     vte.process(data);
-                    append_output_buffer(&mut output_buffer, data);
 
                     if let Some(ref mut cs) = client {
                         if protocol::write_message(cs, &Message::PtyOutput(data.to_vec())).is_err()
@@ -256,21 +253,45 @@ fn run(
                     // Close existing client if any.
                     client = None;
 
-                    // Send initial state to the new client.
                     let mut new_client = stream;
-                    if protocol::write_message(
-                        &mut new_client,
-                        &Message::InitialState(output_buffer.clone()),
-                    )
-                    .is_err()
-                    {
-                        // Failed to send initial state; drop connection.
-                    } else {
-                        // Set a read timeout so a misbehaving client sending a
-                        // partial frame can't stall the main loop indefinitely.
-                        let _ =
-                            new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-                        client = Some(new_client);
+                    // Set a read timeout so a misbehaving client sending a
+                    // partial frame can't stall the main loop indefinitely.
+                    let _ = new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+                    // Size-first handshake: read Resize from the workspace
+                    // so we can build InitialState at the correct dimensions.
+                    match protocol::read_message(&mut new_client) {
+                        Ok(Some(Message::Resize {
+                            rows: new_rows,
+                            cols: new_cols,
+                        })) => {
+                            // Resize VTE and PTY to match the workspace's terminal.
+                            let _ = pair.master.resize(PtySize {
+                                rows: new_rows,
+                                cols: new_cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                            // Resize both screens so the restore sequence and
+                            // subsequent output use the correct dimensions.
+                            resize_both_screens(&mut vte, new_rows, new_cols);
+
+                            // Build and send InitialState from structured VTE data.
+                            let restore = build_restore_sequence(&mut vte);
+                            if protocol::write_message(
+                                &mut new_client,
+                                &Message::InitialState(restore),
+                            )
+                            .is_err()
+                            {
+                                // Failed to send; drop connection.
+                            } else {
+                                client = Some(new_client);
+                            }
+                        }
+                        _ => {
+                            // Client didn't send Resize first — drop it.
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -300,7 +321,7 @@ fn run(
                                     pixel_width: 0,
                                     pixel_height: 0,
                                 });
-                                vte.screen_mut().set_size(new_rows, new_cols);
+                                resize_both_screens(&mut vte, new_rows, new_cols);
                             }
                             Message::Shutdown => {
                                 shutdown_requested = true;
@@ -327,17 +348,6 @@ fn run(
     }
 }
 
-fn append_output_buffer(buffer: &mut Vec<u8>, data: &[u8]) {
-    buffer.extend_from_slice(data);
-    if buffer.len() > OUTPUT_BUFFER_MAX {
-        let keep_from = buffer.len() - OUTPUT_BUFFER_MAX / 2;
-        buffer.drain(..keep_from);
-        // Terminate any escape sequence that was cut mid-stream.
-        // CAN (0x18) aborts CSI sequences; ST (\x1b\\) ends OSC/DCS sequences.
-        buffer.splice(0..0, b"\x18\x1b\\".iter().copied());
-    }
-}
-
 fn forward_sigterm(child_pid: Option<u32>) {
     if let Some(pid) = child_pid {
         unsafe {
@@ -349,7 +359,6 @@ fn forward_sigterm(child_pid: Option<u32>) {
 fn drain_pty(
     reader: &mut Box<dyn Read + Send>,
     vte: &mut vt100::Parser,
-    output_buffer: &mut Vec<u8>,
     client: &mut Option<UnixStream>,
 ) {
     let mut buf = [0u8; 8192];
@@ -359,7 +368,6 @@ fn drain_pty(
             Ok(n) => {
                 let data = &buf[..n];
                 vte.process(data);
-                append_output_buffer(output_buffer, data);
 
                 if let Some(ref mut cs) = client {
                     if protocol::write_message(cs, &Message::PtyOutput(data.to_vec())).is_err() {
