@@ -227,9 +227,10 @@ impl Passthrough {
     fn render_screen_positioned(&self, out: &mut impl Write) {
         let screen = self.vte.screen();
         let (_rows, cols) = screen.size();
-        let _ = write!(out, "\x1b[m");
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
-            let _ = write!(out, "\x1b[{};1H\x1b[K", i + 1);
+            // Reset SGR before erasing so \x1b[K doesn't inherit stale
+            // attributes (e.g. reverse video) from the previous row.
+            let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
         let (cursor_row, cursor_col) = screen.cursor_position();
@@ -1093,6 +1094,35 @@ mod tests {
             !output.contains("\x1b[2J"),
             "render_screen_positioned should not contain CSI 2 J"
         );
+    }
+
+    #[test]
+    fn render_screen_positioned_resets_attrs_before_each_row() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write a line with reverse video.  When rendering, the reverse
+        // video must NOT leak into \x1b[K of the following rows.
+        pt.process(b"\x1b[7mreversed\x1b[0m\r\n");
+        pt.process(b"normal line 1\r\n");
+        pt.process(b"normal line 2\r\n");
+        pt.process(b"normal line 3");
+
+        let mut buf = Vec::new();
+        pt.render_screen_positioned(&mut buf);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Every \x1b[K must be preceded by \x1b[0m so the erase uses
+        // default attributes, not stale attributes from a previous row.
+        let el_positions: Vec<usize> = rendered.match_indices("\x1b[K").map(|(p, _)| p).collect();
+        assert!(!el_positions.is_empty(), "expected at least one \\x1b[K");
+        let mut prev_end = 0;
+        for &pos in &el_positions {
+            let segment = &rendered[prev_end..pos];
+            assert!(
+                segment.contains("\x1b[0m"),
+                "no \\x1b[0m reset before \\x1b[K at byte {pos}; segment: {segment:?}"
+            );
+            prev_end = pos + 3;
+        }
     }
 
     /// Helper: probe scrollback depth.
