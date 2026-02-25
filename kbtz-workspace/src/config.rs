@@ -19,6 +19,7 @@ pub struct WorkspaceConfig {
     pub manual: Option<bool>,
     pub prefer: Option<String>,
     pub backend: Option<String>,
+    pub persistent_sessions: Option<bool>,
 }
 
 /// The `command` field in agent config: either a plain string or an array

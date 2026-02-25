@@ -108,6 +108,10 @@ struct Cli {
     /// Disable automatic session spawning; use 's' in tree mode to spawn manually
     #[arg(long)]
     manual: bool,
+
+    /// Enable persistent sessions (shepherd-based); sessions survive workspace restart
+    #[arg(long)]
+    persistent_sessions: bool,
 }
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
@@ -214,6 +218,7 @@ fn run() -> Result<()> {
         .backend
         .or(ws.backend)
         .unwrap_or_else(|| "claude".into());
+    let persistent_sessions = cli.persistent_sessions || ws.persistent_sessions.unwrap_or(false);
 
     let agent_config = config.agent.get(&backend_name);
     let command_override = cli
@@ -240,6 +245,7 @@ fn run() -> Result<()> {
         prefer,
         backend,
         app::TermSize { rows, cols },
+        persistent_sessions,
     )?;
 
     // Initial session spawning

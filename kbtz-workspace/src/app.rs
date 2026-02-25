@@ -50,6 +50,7 @@ pub struct App {
     pub prefer: Option<String>,
     pub backend: Box<dyn Backend>,
     pub spawner: Box<dyn SessionSpawner>,
+    pub persistent_sessions: bool,
 
     // Top-level task management session (not tied to any task)
     pub toplevel: Option<Box<dyn SessionHandle>>,
@@ -84,6 +85,7 @@ fn is_db_busy(e: &anyhow::Error) -> bool {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: String,
         status_dir: PathBuf,
@@ -92,6 +94,7 @@ impl App {
         prefer: Option<String>,
         backend: Box<dyn Backend>,
         term: TermSize,
+        persistent_sessions: bool,
     ) -> Result<Self> {
         let conn = kbtz::db::open(&db_path).context("failed to open kbtz database")?;
         kbtz::db::init(&conn).context("failed to initialize kbtz database")?;
@@ -102,6 +105,13 @@ impl App {
         // the workspace, while still failing fast on genuine lock problems.
         conn.execute_batch("PRAGMA busy_timeout = 60000;")
             .context("failed to set workspace busy_timeout")?;
+        let spawner: Box<dyn SessionSpawner> = if persistent_sessions {
+            Box::new(ShepherdSpawner {
+                status_dir: status_dir.clone(),
+            })
+        } else {
+            Box::new(PtySpawner)
+        };
         let mut app = App {
             db_path,
             conn,
@@ -113,7 +123,8 @@ impl App {
             manual,
             prefer,
             backend,
-            spawner: Box::new(ShepherdSpawner { status_dir }),
+            spawner,
+            persistent_sessions,
             toplevel: None,
             term,
             tree: TreeView {
@@ -125,7 +136,9 @@ impl App {
             },
         };
         app.refresh_tree()?;
-        app.reconnect_sessions()?;
+        if persistent_sessions {
+            app.reconnect_sessions()?;
+        }
         app.spawn_toplevel()?;
         Ok(app)
     }
@@ -620,19 +633,23 @@ impl App {
         }
     }
 
-    /// Detach from worker sessions and kill the toplevel session.
+    /// Shut down all sessions.
     ///
-    /// Worker sessions persist via their shepherd processes and will be
-    /// reconnected on next startup. Task claims are left intact because
-    /// the shepherds are still running. Only the toplevel session (ephemeral,
-    /// no task claim) is killed. Status files are cleaned up, but .sock,
-    /// .pid, and .lock files are preserved — they belong to the shepherds.
+    /// With persistent sessions, worker sessions survive via their shepherd
+    /// processes and task claims are left intact.  Without persistent sessions,
+    /// workers are killed and task claims are released.
     pub fn shutdown(&mut self) {
-        // Drop all worker sessions (disconnects from sockets).
-        // This does NOT kill the shepherds — they persist.
-        // Don't release task claims — shepherds are still running.
-        for (_, _session) in self.sessions.drain() {}
-        self.task_to_session.clear();
+        if self.persistent_sessions {
+            // Persistent mode: detach from sockets, leave shepherds running.
+            for (_, _session) in self.sessions.drain() {}
+            self.task_to_session.clear();
+        } else {
+            // Non-persistent mode: kill workers and release claims.
+            let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
+            for session_id in session_ids {
+                self.remove_session(&session_id);
+            }
+        }
 
         // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
@@ -653,14 +670,20 @@ impl App {
         }
         self.toplevel = None;
 
-        // Clean up status files only (not .sock, .pid, or .lock — those belong to shepherds).
+        // Clean up status files.  In persistent mode, preserve .sock/.pid/.lock
+        // files that belong to shepherds.  Otherwise, clean everything except the
+        // workspace lock.
         if let Ok(entries) = std::fs::read_dir(&self.status_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str());
-                if ext != Some("sock") && ext != Some("pid") && ext != Some("lock") {
-                    let _ = std::fs::remove_file(path);
+                if ext == Some("lock") {
+                    continue;
                 }
+                if self.persistent_sessions && (ext == Some("sock") || ext == Some("pid")) {
+                    continue;
+                }
+                let _ = std::fs::remove_file(path);
             }
         }
     }
@@ -806,6 +829,7 @@ mod tests {
             prefer: None,
             backend: Box::new(StubBackend),
             spawner: Box::new(StubSpawner),
+            persistent_sessions: false,
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView {
