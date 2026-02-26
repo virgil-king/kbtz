@@ -463,6 +463,12 @@ impl App {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     let alive = unsafe { libc::kill(pid, 0) } == 0;
                     if !alive {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EPERM) {
+                            kbtz::debug_log::log(&format!(
+                                "reconnect_sessions: kill({pid}, 0) returned EPERM"
+                            ));
+                        }
                         // Shepherd died — clean up stale files
                         let _ = std::fs::remove_file(&path);
                         let _ = std::fs::remove_file(&pid_path);
