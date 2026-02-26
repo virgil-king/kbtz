@@ -11,14 +11,12 @@ use kbtz_workspace::{build_restore_sequence, resize_both_screens, SCROLLBACK_ROW
 
 /// Non-blocking client connection with message buffering.
 ///
-/// The previous implementation used blocking `read_exact()` with a 5-second
-/// timeout, which caused false disconnects on macOS: spurious `poll()` wakeups
-/// (e.g. after sleep/wake) triggered a blocking read that timed out, and the
-/// timeout error was treated as a client disconnect. This dropped the socket
-/// and caused the workspace's reader thread to see EOF, breaking session
-/// persistence.
+/// Uses non-blocking reads with an internal buffer to avoid false disconnects.
+/// Blocking reads with timeouts are unsuitable here because `poll()` can return
+/// spurious readiness (e.g. after macOS sleep/wake cycles), and a subsequent
+/// blocking read that times out would be misinterpreted as a client disconnect,
+/// dropping the socket and breaking session persistence.
 ///
-/// This implementation uses non-blocking reads with an internal buffer.
 /// Partial messages are accumulated across poll iterations, and only true
 /// EOF (read returning 0) or real I/O errors cause a disconnect.
 struct ClientConn {
