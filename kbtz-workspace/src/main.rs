@@ -1028,14 +1028,18 @@ fn passthrough_loop(
         }
 
         // Detect dead reader thread while child is still alive.  This
-        // means the PTY reader exited prematurely (the session will appear
-        // frozen because output is no longer forwarded).
+        // means the PTY reader exited prematurely (the session is frozen
+        // because output is no longer forwarded).  Kill the session so
+        // the lifecycle tick can spawn a fresh one for the task.
         if let Some(session) = app.get_session(sid) {
             if !session.reader_alive() {
                 kbtz::debug_log::log(&format!(
                     "passthrough_loop({sid}): reader thread died while child is alive — \
-                     session is frozen, returning to tree"
+                     killing frozen session"
                 ));
+                if let Some(session) = app.get_session_mut(sid) {
+                    session.force_kill();
+                }
                 return Ok(Action::ReturnToTree);
             }
         }
