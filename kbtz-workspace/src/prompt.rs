@@ -245,6 +245,10 @@ Use the `kbtz` CLI to manipulate tasks:
 
 ## Task creation guidelines
 
+The workspace automatically creates sessions for all open tasks. **Never use
+`--claim` or `kbtz claim`** — just create tasks as open and the workspace will
+assign them to sessions automatically.
+
 Keep task descriptions to one sentence — they display in a single-line list
 view. Put detailed context in a `-n` note so the task and its context are
 created atomically:
