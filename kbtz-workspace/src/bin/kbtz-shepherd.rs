@@ -305,7 +305,10 @@ fn run(
                     vte.process(data);
 
                     if let Some(ref mut cc) = client {
-                        if cc.write_message(&Message::PtyOutput(data.to_vec())).is_err() {
+                        if cc
+                            .write_message(&Message::PtyOutput(data.to_vec()))
+                            .is_err()
+                        {
                             client = None;
                         }
                     }
@@ -329,8 +332,8 @@ fn run(
                     // that must complete before entering the non-blocking
                     // main loop. 5 seconds is generous for a local socket.
                     let mut handshake_stream = stream;
-                    let _ = handshake_stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ =
+                        handshake_stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
                     match protocol::read_message(&mut handshake_stream) {
                         Ok(Some(Message::Resize {
@@ -356,9 +359,8 @@ fn run(
                                 // Failed to send; drop connection.
                             } else {
                                 // Handshake complete — switch to non-blocking.
-                                match ClientConn::new(handshake_stream) {
-                                    Ok(cc) => client = Some(cc),
-                                    Err(_) => {} // failed to set non-blocking; drop
+                                if let Ok(cc) = ClientConn::new(handshake_stream) {
+                                    client = Some(cc);
                                 }
                             }
                         }
@@ -451,7 +453,10 @@ fn drain_pty(
                 vte.process(data);
 
                 if let Some(ref mut cc) = client {
-                    if cc.write_message(&Message::PtyOutput(data.to_vec())).is_err() {
+                    if cc
+                        .write_message(&Message::PtyOutput(data.to_vec()))
+                        .is_err()
+                    {
                         *client = None;
                     }
                 }

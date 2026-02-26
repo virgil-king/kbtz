@@ -465,8 +465,7 @@ impl App {
                     let ret = unsafe { libc::kill(pid, 0) };
                     let alive = ret == 0
                         || (ret == -1
-                            && std::io::Error::last_os_error().raw_os_error()
-                                == Some(libc::EPERM));
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
                     if !alive {
                         // Shepherd died — clean up stale files
                         let _ = std::fs::remove_file(&path);
