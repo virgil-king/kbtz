@@ -1056,7 +1056,16 @@ mod tests {
     fn release_orphaned_tasks_ignores_non_ws_assignees() {
         let (app, _dir) = test_app();
         // Task claimed by an external agent, not a workspace session.
-        ops::add_task(&app.conn, "external", None, "desc", None, Some("agent-1"), false).unwrap();
+        ops::add_task(
+            &app.conn,
+            "external",
+            None,
+            "desc",
+            None,
+            Some("agent-1"),
+            false,
+        )
+        .unwrap();
 
         app.release_orphaned_tasks().unwrap();
 
