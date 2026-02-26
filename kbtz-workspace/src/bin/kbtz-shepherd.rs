@@ -439,6 +439,172 @@ fn forward_sigterm(child_pid: Option<u32>) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── try_parse tests ──────────────────────────────────────────────
+
+    /// Helper: create a ClientConn with a dummy socket (only used for
+    /// try_parse which operates on the internal buffer, not the socket).
+    fn conn_with_buf(buf: Vec<u8>) -> ClientConn {
+        let (s, _) = UnixStream::pair().unwrap();
+        ClientConn { stream: s, buf }
+    }
+
+    #[test]
+    fn try_parse_empty_buffer() {
+        let mut cc = conn_with_buf(vec![]);
+        assert!(cc.try_parse().is_none());
+    }
+
+    #[test]
+    fn try_parse_incomplete_length_prefix() {
+        let mut cc = conn_with_buf(vec![0, 0]);
+        assert!(cc.try_parse().is_none());
+        // Buffer is not consumed.
+        assert_eq!(cc.buf.len(), 2);
+    }
+
+    #[test]
+    fn try_parse_zero_length_frame_is_error() {
+        let mut cc = conn_with_buf(vec![0, 0, 0, 0]);
+        assert!(matches!(cc.try_parse(), Some(Err(()))));
+    }
+
+    #[test]
+    fn try_parse_incomplete_body() {
+        // Length says 10 bytes, but only 2 bytes of body present.
+        let mut cc = conn_with_buf(vec![0, 0, 0, 10, 0x01, 0x02]);
+        assert!(cc.try_parse().is_none());
+        // Buffer not consumed — waiting for more data.
+        assert_eq!(cc.buf.len(), 6);
+    }
+
+    #[test]
+    fn try_parse_complete_message() {
+        let msg = Message::PtyInput(b"hello".to_vec());
+        let encoded = protocol::encode(&msg);
+        let mut cc = conn_with_buf(encoded);
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+        assert!(cc.buf.is_empty());
+    }
+
+    #[test]
+    fn try_parse_two_messages_back_to_back() {
+        let msg1 = Message::PtyInput(b"one".to_vec());
+        let msg2 = Message::Resize { rows: 24, cols: 80 };
+        let mut buf = protocol::encode(&msg1);
+        buf.extend_from_slice(&protocol::encode(&msg2));
+        let mut cc = conn_with_buf(buf);
+
+        let parsed1 = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed1, msg1);
+
+        let parsed2 = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed2, msg2);
+
+        assert!(cc.try_parse().is_none());
+        assert!(cc.buf.is_empty());
+    }
+
+    #[test]
+    fn try_parse_message_plus_partial() {
+        let msg = Message::Shutdown;
+        let mut buf = protocol::encode(&msg);
+        // Append a partial second message (just the length prefix).
+        buf.extend_from_slice(&[0, 0, 0, 5]);
+        let mut cc = conn_with_buf(buf);
+
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, Message::Shutdown);
+
+        // Second parse returns None — incomplete.
+        assert!(cc.try_parse().is_none());
+        assert_eq!(cc.buf.len(), 4);
+    }
+
+    // ── fill_buf + try_parse integration tests ───────────────────────
+
+    #[test]
+    fn fill_buf_reads_and_parses() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+
+        // Write a complete message to the server side.
+        let msg = Message::PtyInput(b"test data".to_vec());
+        protocol::write_message(&mut server, &msg).unwrap();
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(alive);
+
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn fill_buf_eof_when_sender_closes() {
+        let (client, server) = UnixStream::pair().unwrap();
+        drop(server); // close the write side
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(!alive);
+    }
+
+    #[test]
+    fn fill_buf_no_data_returns_alive() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+        // No data written — non-blocking read should return WouldBlock.
+        let alive = cc.fill_buf();
+        assert!(alive);
+        assert!(cc.try_parse().is_none());
+    }
+
+    #[test]
+    fn write_message_roundtrip() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+
+        let msg = Message::PtyOutput(b"output".to_vec());
+        cc.write_message(&msg).unwrap();
+
+        let mut reader = std::io::BufReader::new(server);
+        let received = protocol::read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(received, msg);
+    }
+
+    #[test]
+    fn partial_message_across_two_fills() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let msg = Message::PtyInput(b"split".to_vec());
+        let encoded = protocol::encode(&msg);
+
+        // Write only the first 3 bytes (partial length prefix).
+        server.write_all(&encoded[..3]).unwrap();
+        server.flush().unwrap();
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(alive);
+        assert!(cc.try_parse().is_none()); // not enough data yet
+
+        // Write the rest.
+        server.write_all(&encoded[3..]).unwrap();
+        server.flush().unwrap();
+
+        // Small delay to let the kernel deliver the data.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let alive = cc.fill_buf();
+        assert!(alive);
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+    }
+}
+
 fn drain_pty(
     reader: &mut Box<dyn Read + Send>,
     vte: &mut vt100::Parser,
