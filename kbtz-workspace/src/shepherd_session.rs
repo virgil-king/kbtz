@@ -101,6 +101,8 @@ impl ShepherdSession {
     }
 }
 
+// Note: EINTR is handled internally by `read_exact` (which `protocol::read_message`
+// uses), so unlike the PTY reader thread we don't need explicit EINTR retry here.
 fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mutex<Passthrough>>) {
     let stdout = std::io::stdout();
 
@@ -271,6 +273,13 @@ impl SessionHandle for ShepherdSession {
 
     fn process_id(&self) -> Option<u32> {
         Some(self.shepherd_pid)
+    }
+
+    fn reader_alive(&self) -> bool {
+        // Shepherd sessions use a Unix socket protocol reader.  Liveness is
+        // tracked via is_alive() (process + socket existence), so the reader
+        // thread state is not independently monitored here.
+        true
     }
 }
 

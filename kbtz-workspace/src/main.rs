@@ -325,7 +325,7 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
 // ── Stdin helpers ─────────────────────────────────────────────────────
 
 /// Poll stdin with a 16ms (~60 fps) timeout. Returns `Some(n)` if `n`
-/// bytes were read (`0` means EOF/error), or `None` on timeout.
+/// bytes were read (`0` means EOF/error), or `None` on timeout/EINTR.
 fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
     let stdin_fd = stdin.as_raw_fd();
     let mut pfd = libc::pollfd {
@@ -333,18 +333,24 @@ fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
         events: libc::POLLIN,
         revents: 0,
     };
+    // EINTR on poll() is benign — the caller loops, so we'll retry
+    // on the next iteration.
     if unsafe { libc::poll(&mut pfd, 1, 16) } <= 0 {
         return None;
     }
     match stdin.read(buf) {
         Ok(n) if n > 0 => Some(n),
-        _ => Some(0),
+        Ok(_) => Some(0),
+        // EINTR during read after poll reported data ready — treat as
+        // timeout so the caller loops and retries.
+        Err(e) if e.raw_os_error() == Some(libc::EINTR) => None,
+        Err(_) => Some(0),
     }
 }
 
 /// Read the command byte after a PREFIX_KEY, either from the remaining
 /// buffer or by reading one more byte from stdin. Returns `None` on
-/// EOF/error.
+/// EOF only. Retries on EINTR (signal interruption).
 fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
     if *i < n {
         let b = buf[*i];
@@ -352,9 +358,13 @@ fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLoc
         Some(b)
     } else {
         let mut cmd_buf = [0u8; 1];
-        match stdin.read(&mut cmd_buf) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(cmd_buf[0]),
+        loop {
+            match stdin.read(&mut cmd_buf) {
+                Ok(0) => return None,
+                Ok(_) => return Some(cmd_buf[0]),
+                Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+                Err(_) => return None,
+            }
         }
     }
 }
@@ -1024,8 +1034,26 @@ fn passthrough_loop(
         }
 
         // Check session liveness (is_alive needs &mut).
-        if app.get_session_mut(sid).is_none_or(|s| !s.is_alive()) {
+        let session_ref = app.get_session_mut(sid);
+        if session_ref.is_none_or(|s| !s.is_alive()) {
             return Ok(Action::ReturnToTree);
+        }
+
+        // Detect dead reader thread while child is still alive.  This
+        // means the PTY reader exited prematurely (the session is frozen
+        // because output is no longer forwarded).  Kill the session so
+        // the lifecycle tick can spawn a fresh one for the task.
+        if let Some(session) = app.get_session(sid) {
+            if !session.reader_alive() {
+                kbtz::debug_log::log(&format!(
+                    "passthrough_loop({sid}): reader thread died while child is alive — \
+                     killing frozen session"
+                ));
+                if let Some(session) = app.get_session_mut(sid) {
+                    session.force_kill();
+                }
+                return Ok(Action::ReturnToTree);
+            }
         }
 
         watchers.poll(app)?;

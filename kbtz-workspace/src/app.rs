@@ -196,6 +196,17 @@ impl App {
             .map(|(session_id, session)| {
                 let phase = if !session.is_alive() {
                     SessionPhase::Exited
+                } else if !session.reader_alive() {
+                    // Reader thread died while child is still alive.
+                    // The session is frozen (no output forwarding).
+                    // Kill the child so the lifecycle can reap and
+                    // respawn a fresh session for this task.
+                    kbtz::debug_log::log(&format!(
+                        "snapshot({session_id}): reader thread dead, child alive — \
+                         killing frozen session"
+                    ));
+                    session.force_kill();
+                    SessionPhase::Exited
                 } else if let Some(since) = session.stopping_since() {
                     SessionPhase::Stopping { since }
                 } else {
@@ -814,6 +825,9 @@ mod tests {
         }
         fn process_id(&self) -> Option<u32> {
             None
+        }
+        fn reader_alive(&self) -> bool {
+            true
         }
     }
 
