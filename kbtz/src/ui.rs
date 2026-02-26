@@ -17,6 +17,7 @@ pub struct TreeRow {
     pub name: String,
     pub status: String,
     pub description: String,
+    pub assignee: Option<String>,
     pub depth: usize,
     pub has_children: bool,
     pub is_last_at_depth: Vec<bool>,
@@ -82,6 +83,7 @@ fn flatten_node(
         name: task.name.clone(),
         status: task.status.clone(),
         description: task.description.clone(),
+        assignee: task.assignee.clone(),
         depth,
         has_children,
         is_last_at_depth: is_last_at_depth.clone(),
@@ -185,6 +187,19 @@ mod tests {
         }
     }
 
+    fn make_row(name: &str, status: &str, assignee: Option<&str>) -> TreeRow {
+        TreeRow {
+            name: name.into(),
+            status: status.into(),
+            description: String::new(),
+            assignee: assignee.map(|s| s.into()),
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }
+    }
+
     // ── icon_for_status ──
 
     #[test]
@@ -202,29 +217,14 @@ mod tests {
 
     #[test]
     fn icon_for_task_uses_blocked_when_blockers_exist() {
-        let row = TreeRow {
-            name: "t".into(),
-            status: "open".into(),
-            description: String::new(),
-            depth: 0,
-            has_children: false,
-            is_last_at_depth: vec![true],
-            blocked_by: vec!["other".into()],
-        };
+        let mut row = make_row("t", "open", None);
+        row.blocked_by = vec!["other".into()];
         assert_eq!(icon_for_task(&row), icon_for_status("blocked"));
     }
 
     #[test]
     fn icon_for_task_uses_status_when_no_blockers() {
-        let row = TreeRow {
-            name: "t".into(),
-            status: "active".into(),
-            description: String::new(),
-            depth: 0,
-            has_children: false,
-            is_last_at_depth: vec![true],
-            blocked_by: vec![],
-        };
+        let row = make_row("t", "active", None);
         assert_eq!(icon_for_task(&row), icon_for_status("active"));
     }
 
@@ -232,58 +232,32 @@ mod tests {
 
     #[test]
     fn tree_prefix_root_is_empty() {
-        let row = TreeRow {
-            name: "root".into(),
-            status: "open".into(),
-            description: String::new(),
-            depth: 0,
-            has_children: false,
-            is_last_at_depth: vec![true],
-            blocked_by: vec![],
-        };
+        let row = make_row("root", "open", None);
         assert_eq!(tree_prefix(&row), "");
     }
 
     #[test]
     fn tree_prefix_last_child() {
-        let row = TreeRow {
-            name: "child".into(),
-            status: "open".into(),
-            description: String::new(),
-            depth: 1,
-            has_children: false,
-            is_last_at_depth: vec![false, true],
-            blocked_by: vec![],
-        };
+        let mut row = make_row("child", "open", None);
+        row.depth = 1;
+        row.is_last_at_depth = vec![false, true];
         assert_eq!(tree_prefix(&row), "└── ");
     }
 
     #[test]
     fn tree_prefix_middle_child() {
-        let row = TreeRow {
-            name: "child".into(),
-            status: "open".into(),
-            description: String::new(),
-            depth: 1,
-            has_children: false,
-            is_last_at_depth: vec![false, false],
-            blocked_by: vec![],
-        };
+        let mut row = make_row("child", "open", None);
+        row.depth = 1;
+        row.is_last_at_depth = vec![false, false];
         assert_eq!(tree_prefix(&row), "├── ");
     }
 
     #[test]
     fn tree_prefix_nested_depth_2() {
         // Parent is not last, grandchild is last
-        let row = TreeRow {
-            name: "gc".into(),
-            status: "open".into(),
-            description: String::new(),
-            depth: 2,
-            has_children: false,
-            is_last_at_depth: vec![false, false, true],
-            blocked_by: vec![],
-        };
+        let mut row = make_row("gc", "open", None);
+        row.depth = 2;
+        row.is_last_at_depth = vec![false, false, true];
         assert_eq!(tree_prefix(&row), "│   └── ");
     }
 

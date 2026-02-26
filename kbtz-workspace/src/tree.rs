@@ -44,9 +44,8 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
                 "  "
             };
 
-            // Session indicator (robot + session status) when a session
-            // exists, task status icon otherwise.  Left-aligned so a
-            // single icon sits in the same column as the robot emoji.
+            // Session indicator: 🤖 for workspace sessions, 👽 for
+            // externally-claimed tasks, status icon otherwise.
             let (bot, icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name)
             {
                 if let Some(session) = app.sessions.get(sid) {
@@ -54,6 +53,16 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
                         "\u{1f916}",
                         format!("{} ", session.status().indicator()),
                         format!(" {}", sid),
+                    )
+                } else {
+                    ("", format!("{}  ", ui::icon_for_task(row)), String::new())
+                }
+            } else if row.status == "active" {
+                if let Some(ref assignee) = row.assignee {
+                    (
+                        "\u{1f47d}",
+                        format!("{}  ", ui::icon_for_task(row)),
+                        format!(" {}", assignee),
                     )
                 } else {
                     ("", format!("{}  ", ui::icon_for_task(row)), String::new())
@@ -231,7 +240,7 @@ pub fn render_help(frame: &mut Frame) {
     frame.render_widget(Paragraph::new(help_text), inner);
 }
 
-pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str) {
+pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str, message: &str) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
     let height = 5.min(term.height.saturating_sub(2));
@@ -250,7 +259,7 @@ pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str) {
         Line::from(vec![
             Span::raw("Task "),
             Span::styled(task_name, Style::default().bold()),
-            Span::raw(" has an active session."),
+            Span::raw(format!(" {message}")),
         ]),
         Line::raw(""),
         Line::from(vec![
