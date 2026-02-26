@@ -458,15 +458,16 @@ impl App {
             let pid_path = path.with_extension("pid");
 
             // Verify the shepherd process is still alive before attempting to connect.
-            // EPERM means the process exists but we can't signal it — treat as alive
-            // (same logic as ShepherdSession::is_alive).
             if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    let ret = unsafe { libc::kill(pid, 0) };
-                    let alive = ret == 0
-                        || (ret == -1
-                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+                    let alive = unsafe { libc::kill(pid, 0) } == 0;
                     if !alive {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EPERM) {
+                            kbtz::debug_log::log(&format!(
+                                "reconnect_sessions: kill({pid}, 0) returned EPERM"
+                            ));
+                        }
                         // Shepherd died — clean up stale files
                         let _ = std::fs::remove_file(&path);
                         let _ = std::fs::remove_file(&pid_path);
