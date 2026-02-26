@@ -139,6 +139,7 @@ impl App {
         if persistent_sessions {
             app.reconnect_sessions()?;
         }
+        app.release_orphaned_tasks()?;
         app.spawn_toplevel()?;
         Ok(app)
     }
@@ -513,6 +514,33 @@ impl App {
                     let _ = std::fs::remove_file(&pid_path);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Release tasks that are "active" with a workspace assignee (ws/*)
+    /// but have no corresponding in-memory session.
+    ///
+    /// This handles orphaned tasks left behind by a crashed workspace or
+    /// failed session reconnections.  Releasing them to "open" allows
+    /// the next tick() to re-claim and spawn sessions for them.
+    fn release_orphaned_tasks(&self) -> Result<()> {
+        let tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
+        for task in &tasks {
+            if task.status != "active" {
+                continue;
+            }
+            let Some(ref assignee) = task.assignee else {
+                continue;
+            };
+            if !assignee.starts_with("ws/") {
+                continue;
+            }
+            if self.task_to_session.contains_key(&task.name) {
+                continue;
+            }
+            // Task is "active" with a workspace assignee but no session — orphaned.
+            let _ = ops::release_task(&self.conn, &task.name, assignee);
         }
         Ok(())
     }
@@ -990,5 +1018,50 @@ mod tests {
     fn cycle_after_single_entry_no_current() {
         let ids = vec!["ws/1"];
         assert_eq!(cycle_after(&ids, None), 0);
+    }
+
+    #[test]
+    fn release_orphaned_tasks_releases_stale_ws_claims() {
+        let (app, _dir) = test_app();
+        // Create a task and claim it as if a previous workspace session owned it.
+        ops::add_task(&app.conn, "orphan", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "orphan", "ws/99").unwrap();
+
+        // No session exists in app.task_to_session — this is the orphan case.
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "orphan").unwrap();
+        assert_eq!(task.status, "open");
+        assert!(task.assignee.is_none());
+    }
+
+    #[test]
+    fn release_orphaned_tasks_preserves_live_sessions() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "live", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "live", "ws/1").unwrap();
+
+        // Simulate a live session by adding to task_to_session.
+        app.task_to_session
+            .insert("live".to_string(), "ws/1".to_string());
+
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "live").unwrap();
+        assert_eq!(task.status, "active");
+        assert_eq!(task.assignee.as_deref(), Some("ws/1"));
+    }
+
+    #[test]
+    fn release_orphaned_tasks_ignores_non_ws_assignees() {
+        let (app, _dir) = test_app();
+        // Task claimed by an external agent, not a workspace session.
+        ops::add_task(&app.conn, "external", None, "desc", None, Some("agent-1"), false).unwrap();
+
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "external").unwrap();
+        assert_eq!(task.status, "active");
+        assert_eq!(task.assignee.as_deref(), Some("agent-1"));
     }
 }
