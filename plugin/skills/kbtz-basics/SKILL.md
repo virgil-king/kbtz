@@ -43,6 +43,18 @@ kbtz claim my-task $KBTZ_SESSION_ID
 kbtz release my-task $KBTZ_SESSION_ID
 ```
 
+## Workspace sessions
+
+When running inside `kbtz-workspace`, the workspace automatically creates
+sessions for all open tasks. **Do not use `--claim` or `kbtz claim` when
+creating tasks inside a workspace** — the workspace will claim and assign
+sessions to new tasks automatically. Using `--claim` bypasses the workspace's
+session management and creates ghost tasks that appear active without a
+workspace session.
+
+Only use `--claim` / `kbtz claim` outside of a workspace (e.g. standalone
+CLI usage).
+
 ## Common Patterns
 
 ### Creating tasks
@@ -55,7 +67,7 @@ atomically:
 kbtz add parent-task "Top-level description." -n "Detailed context, requirements, and acceptance criteria."
 ```
 
-Use `-c $KBTZ_SESSION_ID` to create and claim in one step:
+Outside a workspace, use `-c $KBTZ_SESSION_ID` to create and claim in one step:
 
 ```bash
 kbtz add my-subtask "Short description." -p parent -c $KBTZ_SESSION_ID -n "Detailed context for the subtask."

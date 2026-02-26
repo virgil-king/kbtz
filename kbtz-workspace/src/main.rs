@@ -391,6 +391,16 @@ enum TreeMode {
     ConfirmPause(String),
 }
 
+/// Build the confirmation message for an active task based on whether the
+/// workspace owns the session.
+fn active_task_message(app: &App, name: &str) -> String {
+    if app.task_to_session.contains_key(name) {
+        "has an active session.".into()
+    } else {
+        "is assigned to a non-workspace session.".into()
+    }
+}
+
 fn tree_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -413,10 +423,12 @@ fn tree_loop(
             match &mode {
                 TreeMode::Help => tree::render_help(frame),
                 TreeMode::ConfirmDone(name) => {
-                    tree::render_confirm(frame, "Done", name);
+                    let msg = active_task_message(app, name);
+                    tree::render_confirm(frame, "Done", name, &msg);
                 }
                 TreeMode::ConfirmPause(name) => {
-                    tree::render_confirm(frame, "Pause", name);
+                    let msg = active_task_message(app, name);
+                    tree::render_confirm(frame, "Pause", name, &msg);
                 }
                 TreeMode::Normal => {}
             }
