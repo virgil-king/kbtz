@@ -10,6 +10,14 @@ sid=$(jq -r '.session_id // empty' 2>/dev/null) || true
 
 state="${1:?Usage: pane-title.sh <idle|active|needs_input>}"
 
+# Don't let Stop (idle) overwrite needs_input — see workspace-status.sh for
+# the full explanation of the AskUserQuestion event ordering.
+if [ "$state" = "idle" ] && [ -n "${KBTZ_WORKSPACE_DIR:-}" ] && [ -n "${KBTZ_SESSION_ID:-}" ]; then
+  filename="${KBTZ_SESSION_ID//\//-}"
+  current=$(cat "${KBTZ_WORKSPACE_DIR}/${filename}" 2>/dev/null) || true
+  [ "$current" = "needs_input" ] && exit 0
+fi
+
 case "$state" in
   idle)        emoji="🟡" ;;
   active)      emoji="🟢" ;;
