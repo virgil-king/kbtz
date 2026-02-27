@@ -20,6 +20,7 @@ pub struct WorkspaceConfig {
     pub prefer: Option<String>,
     pub backend: Option<String>,
     pub persistent_sessions: Option<bool>,
+    pub workspace_dir: Option<String>,
 }
 
 /// The `command` field in agent config: either a plain string or an array
@@ -114,6 +115,7 @@ concurrency = 3
 manual = true
 prefer = "frontend"
 backend = "claude"
+workspace_dir = "/tmp/my-workspace"
 
 [agent.claude]
 command = "/usr/local/bin/claude"
@@ -131,6 +133,10 @@ args = ["--model", "gemini-2.5-pro"]
         assert_eq!(config.workspace.manual, Some(true));
         assert_eq!(config.workspace.prefer.as_deref(), Some("frontend"));
         assert_eq!(config.workspace.backend.as_deref(), Some("claude"));
+        assert_eq!(
+            config.workspace.workspace_dir.as_deref(),
+            Some("/tmp/my-workspace")
+        );
 
         let claude = config.agent.get("claude").unwrap();
         assert_eq!(claude.binary(), Some("/usr/local/bin/claude"));
