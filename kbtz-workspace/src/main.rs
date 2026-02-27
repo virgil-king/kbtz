@@ -419,7 +419,6 @@ fn tree_loop(
     // Catch any DB changes that happened during zoomed mode.
     app.refresh_tree()?;
     app.tree_dirty = false;
-    app.tick()?;
 
     let watchers = Watchers::new(app)?;
     let mut mode = TreeMode::Normal;

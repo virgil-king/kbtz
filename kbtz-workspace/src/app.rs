@@ -282,10 +282,24 @@ impl App {
 
     /// Run one lifecycle tick: snapshot the world, compute actions, execute them.
     /// Returns a debug description of notable events (kills, exits).
+    ///
+    /// Uses a non-blocking busy_timeout so that write lock contention from
+    /// concurrent agent sessions never stalls the UI thread.  If a write
+    /// can't be acquired immediately, the tick is skipped and retried next
+    /// time — the existing `is_db_busy` error handling in `spawn_up_to`
+    /// and `remove_session` already handles this gracefully.
     pub fn tick(&mut self) -> Result<Option<String>> {
         let world = self.snapshot();
         let actions = lifecycle::tick(&world);
-        self.execute_actions(actions)
+        if actions.is_empty() {
+            return Ok(None);
+        }
+        self.conn
+            .execute_batch("PRAGMA busy_timeout = 0;")
+            .context("failed to set non-blocking busy_timeout")?;
+        let result = self.execute_actions(actions);
+        let _ = self.conn.execute_batch("PRAGMA busy_timeout = 60000;");
+        result
     }
 
     /// Spawn sessions for claimable tasks, up to `count` new sessions.
