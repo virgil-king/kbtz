@@ -56,6 +56,7 @@ CONFIG FILE:
         [workspace]
         concurrency = 3
         backend = \"claude\"
+        workspace_dir = \"/tmp/my-workspace\"
 
         [agent.claude]
         command = \"/usr/local/bin/claude\"
@@ -112,6 +113,10 @@ struct Cli {
     /// Enable persistent sessions (shepherd-based); sessions survive workspace restart
     #[arg(long)]
     persistent_sessions: bool,
+
+    /// Workspace status directory [default: ~/.kbtz/workspace]
+    #[arg(long, env = "KBTZ_WORKSPACE_DIR")]
+    workspace_dir: Option<String>,
 }
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
@@ -173,8 +178,12 @@ fn run() -> Result<()> {
         std::fs::create_dir_all(parent).context("failed to create database directory")?;
     }
 
+    // Merge: CLI > config > defaults
+    let ws = config.workspace;
+
     // Status directory for session state files
-    let status_dir = PathBuf::from(std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
+    // Priority: CLI/env (--workspace-dir / $KBTZ_WORKSPACE_DIR) > config > default
+    let status_dir = PathBuf::from(cli.workspace_dir.or(ws.workspace_dir).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         format!("{home}/.kbtz/workspace")
     }));
@@ -209,8 +218,6 @@ fn run() -> Result<()> {
     let _ = write!(io::stdout(), "\x1b[?1004l");
     let _ = io::stdout().flush();
 
-    // Merge: CLI > config > defaults
-    let ws = config.workspace;
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
     let manual = cli.manual || ws.manual.unwrap_or(false);
     let prefer = cli.prefer.or(ws.prefer);
