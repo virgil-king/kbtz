@@ -57,6 +57,7 @@ pub struct App {
 
     pub term: TermSize,
     pub tree: TreeView,
+    pub tree_dirty: bool,
 }
 
 pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
@@ -134,6 +135,7 @@ impl App {
                 collapsed: HashSet::new(),
                 error: None,
             },
+            tree_dirty: false,
         };
         app.refresh_tree()?;
         if persistent_sessions {
@@ -887,6 +889,7 @@ mod tests {
                 collapsed: HashSet::new(),
                 error: None,
             },
+            tree_dirty: false,
         };
         (app, status_dir)
     }

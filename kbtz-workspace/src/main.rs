@@ -141,8 +141,8 @@ impl Watchers {
         let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
         if db_event {
             kbtz::watch::drain_events(&self.db_rx);
-            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
-            app.refresh_tree()?;
+            kbtz::debug_log::log("watchers.poll: db event -> tree_dirty");
+            app.tree_dirty = true;
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
             kbtz::watch::drain_events(&self.status_rx);
@@ -418,6 +418,7 @@ fn tree_loop(
 ) -> Result<Action> {
     // Catch any DB changes that happened during zoomed mode.
     app.refresh_tree()?;
+    app.tree_dirty = false;
     app.tick()?;
 
     let watchers = Watchers::new(app)?;
@@ -474,6 +475,7 @@ fn tree_loop(
                                 app.tree.error = Some(e.to_string());
                             }
                             app.refresh_tree()?;
+                            app.tree_dirty = false;
                             kbtz::debug_log::log("confirm done: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
@@ -487,6 +489,7 @@ fn tree_loop(
                                 app.tree.error = Some(e.to_string());
                             }
                             app.refresh_tree()?;
+                            app.tree_dirty = false;
                             kbtz::debug_log::log("confirm pause: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
@@ -510,6 +513,7 @@ fn tree_loop(
                     KeyCode::Char(' ') => {
                         app.toggle_collapse();
                         app.refresh_tree()?;
+                        app.tree_dirty = false;
                     }
                     KeyCode::Enter => {
                         if let Some(name) = app.selected_name() {
@@ -537,7 +541,10 @@ fn tree_loop(
                                 }
                             };
                             match result {
-                                Ok(()) => app.refresh_tree()?,
+                                Ok(()) => {
+                                    app.refresh_tree()?;
+                                    app.tree_dirty = false;
+                                }
                                 Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
@@ -555,7 +562,10 @@ fn tree_loop(
                                     continue;
                                 }
                                 _ => match kbtz::ops::mark_done(&app.conn, &name) {
-                                    Ok(()) => app.refresh_tree()?,
+                                    Ok(()) => {
+                                        app.refresh_tree()?;
+                                        app.tree_dirty = false;
+                                    }
                                     Err(e) => app.tree.error = Some(e.to_string()),
                                 },
                             }
@@ -565,7 +575,10 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             match kbtz::ops::force_unassign_task(&app.conn, &name) {
-                                Ok(()) => app.refresh_tree()?,
+                                Ok(()) => {
+                                    app.refresh_tree()?;
+                                    app.tree_dirty = false;
+                                }
                                 Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
@@ -603,6 +616,10 @@ fn tree_loop(
         }
 
         watchers.poll(app)?;
+        if app.tree_dirty {
+            app.refresh_tree()?;
+            app.tree_dirty = false;
+        }
         if let Some(desc) = app.tick()? {
             kbtz::debug_log::log(&format!("tick: {desc}"));
         }
