@@ -183,14 +183,10 @@ fn run() -> Result<()> {
 
     // Status directory for session state files
     // Priority: CLI/env (--workspace-dir / $KBTZ_WORKSPACE_DIR) > config > default
-    let status_dir = PathBuf::from(
-        cli.workspace_dir
-            .or(ws.workspace_dir)
-            .unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                format!("{home}/.kbtz/workspace")
-            }),
-    );
+    let status_dir = PathBuf::from(cli.workspace_dir.or(ws.workspace_dir).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.kbtz/workspace")
+    }));
     std::fs::create_dir_all(&status_dir).context("failed to create status directory")?;
 
     // Acquire exclusive lock on the status directory to prevent concurrent instances.
