@@ -175,7 +175,7 @@ Uses WAL mode and `busy_timeout = 5000ms` for safe concurrent access from multip
 | Command | Description |
 |---------|-------------|
 | `kbtz add <name> <desc> [-p parent] [-n note] [-c assignee]` | Create a task |
-| `kbtz done <name>` | Mark complete |
+| `kbtz done <name>` | Mark complete (requires user approval first) |
 | `kbtz reopen <name>` | Reopen a completed task |
 | `kbtz pause <name>` | Pause a task (remove from active work and default listing) |
 | `kbtz unpause <name>` | Unpause a paused task (return to open) |

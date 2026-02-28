@@ -17,18 +17,16 @@ a specific task. Follow these rules exactly.
 
 ## Completing your task
 
+**Never call `kbtz done` without explicit user approval.** Every task
+requires the user to review the work and confirm completion before it
+can be marked done.
+
 Before starting work, read your task's description and notes (`kbtz show`)
-and look for a **closure condition** that specifies what
-must happen before the task is done. For example:
+and look for a **closure condition** that specifies what must happen before
+the task is done. All closure conditions require user approval — follow
+the appropriate path below depending on whether the repository has a remote.
 
-- **"Close when changes are committed to branch X"** — commit to
-  the specified branch and then run `kbtz done`.
-
-If no closure condition is specified, the default is to create a PR,
-ensure CI passes, and display the diff. Then wait for the user to
-review — they will either request changes or ask you to merge the PR.
-
-### Default closure (no explicit closure condition)
+### Repo with remote (PR path)
 
 1. Add a note with the PR URL:
    ```
@@ -56,6 +54,19 @@ review — they will either request changes or ask you to merge the PR.
    git worktree remove /path/to/worktree
    git branch -d <feature-branch>
    ```
+
+### Repo without remote (branch merge path)
+
+1. Work in a worktree on a feature branch.
+2. Display the diff so the user can review it:
+   ```
+   git diff main..HEAD
+   ```
+3. Stop and wait for user input. The user will review the diff and
+   either request changes or ask you to merge. If they request changes,
+   make the edits, commit, and repeat from step 2. If they ask you to
+   merge, merge the branch to main, clean up the worktree and feature
+   branch, and run `kbtz done`.
 
 ## Decomposing into subtasks
 
@@ -194,17 +205,19 @@ are easy to find from the task:
 
 1. Only work on your assigned task ($KBTZ_TASK). Do not claim or modify
    other tasks.
-2. Always create blocking relationships BEFORE releasing your task.
-3. Never call `kbtz release` unless you are decomposing into subtasks.
+2. **Never call `kbtz done` without explicit user approval.** Always
+   stop and wait for the user to review your work and confirm completion.
+3. Always create blocking relationships BEFORE releasing your task.
+4. Never call `kbtz release` unless you are decomposing into subtasks.
    If you are done, use `kbtz done` instead.
-4. Use `kbtz note` to leave context for future agents working on this
+5. Use `kbtz note` to leave context for future agents working on this
    task or its parent.
-5. Only a-z, A-Z, 0-9, _, - are allowed in task names.
-6. If you resume a previously-started task, check subtask
+6. Only a-z, A-Z, 0-9, _, - are allowed in task names.
+7. If you resume a previously-started task, check subtask
    status first with `kbtz show` before starting work.
-7. Always note branch names and PR URLs on your task (see "Tracking
+8. Always note branch names and PR URLs on your task (see "Tracking
    branches and PRs" above).
-8. Do not work on tasks you create. The workspace spawns a dedicated
+9. Do not work on tasks you create. The workspace spawns a dedicated
    agent for each new task. Write clear descriptions, closure conditions,
    and notes so the spawned agent can complete the work independently.
 "#;
@@ -234,7 +247,7 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz add <name> "<description>" [-p parent] [-n note]` — create a task
 - `kbtz show <name>` — show task details and notes
 - `kbtz note <name> "<text>"` — add a note to a task
-- `kbtz done <name>` — mark a task done
+- `kbtz done <name>` — mark a task done (requires user approval first)
 - `kbtz pause <name>` — pause a task
 - `kbtz unpause <name>` — unpause a task
 - `kbtz block <blocker> <blocked>` — make <blocked> wait on <blocker>
