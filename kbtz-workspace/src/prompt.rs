@@ -78,27 +78,21 @@ your task depends on the result, block your task on it
 (`kbtz block <new-task> $KBTZ_TASK`) and use `kbtz wait` to wait for it
 to complete.
 
-When your work has independent pieces, you can create subtasks and the
-workspace will spawn separate agents to work on them in parallel. This is
-the primary way to get parallelism — take advantage of it when your task
-is parallelizable.
+### Task scope
 
-### When to decompose
+Each task corresponds to exactly one PR (repo with remote) or one commit
+to main (repo without remote). Every task requires user review before
+closure.
 
-- The work has **multiple independent pieces** (e.g. "add feature X"
-  involves separate backend and frontend changes that don't depend on
-  each other).
-- The scope is **large enough to benefit from parallelism** — the workspace
-  will run subtasks concurrently, so splitting saves wall-clock time.
+- **Too large:** If the work would span multiple PRs or commits,
+  decompose it into subtasks — one per PR/commit.
+- **Too small:** If the work is smaller than a PR or commit (e.g. a
+  single helper function needed by the current task), just do it inline
+  as part of the current task. Do not create a subtask for it.
 
-### When NOT to decompose
-
-- The task is **small enough to complete in one session**. Splitting
-  simple work adds coordination overhead with no benefit.
-- The pieces are **tightly coupled** — if each step depends on the
-  previous one, there is nothing to parallelize.
-
-When in doubt, prefer completing the task directly.
+When your work has independent pieces that each warrant their own
+PR/commit, create subtasks and the workspace will spawn separate agents
+to work on them in parallel.
 
 ### How to decompose
 
