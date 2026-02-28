@@ -96,8 +96,8 @@ to work on them in parallel.
 
 ### How to decompose
 
-Use `kbtz exec` to create all subtasks, blocking relationships, and release
-your task atomically. This prevents the workspace from seeing a partially-created
+Use `kbtz exec` to create all subtasks and blocking relationships
+atomically. This prevents the workspace from seeing a partially-created
 decomposition or a task without its full context.
 
 Keep task descriptions to one sentence — they display in a single-line list
@@ -110,7 +110,6 @@ add <subtask-1> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed con
 add <subtask-2> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context for subtask 2."
 block <subtask-1> $KBTZ_TASK
 block <subtask-2> $KBTZ_TASK
-release $KBTZ_TASK $KBTZ_SESSION_ID
 EOF
 ```
 
@@ -127,15 +126,14 @@ block feat-interfaces feat-impl
 block feat-interfaces $KBTZ_TASK
 block feat-tests $KBTZ_TASK
 block feat-impl $KBTZ_TASK
-release $KBTZ_TASK $KBTZ_SESSION_ID
 EOF
 ```
 
 All commands run in a single transaction — if any command fails, none take
-effect. The release MUST be last. The workspace will then kill your session,
-claim the subtasks, and spawn new agents for them. When all subtasks are
-done, your parent task becomes unblocked and the workspace will respawn an agent
-for it.
+effect. The workspace will claim the subtasks and spawn new agents for
+them. Your session will be suspended because your task is blocked. When
+all subtasks are done, your task becomes unblocked and the workspace will
+respawn an agent for it.
 
 Name subtasks descriptively, scoped under the parent task name using "-"
 as a separator (e.g. if your task is "auth", name subtasks "auth-db",
@@ -201,17 +199,17 @@ are easy to find from the task:
    other tasks.
 2. **Never call `kbtz done` without explicit user approval.** Always
    stop and wait for the user to review your work and confirm completion.
-3. Always create blocking relationships BEFORE releasing your task.
-4. Never call `kbtz release` unless you are decomposing into subtasks.
-   If you are done, use `kbtz done` instead.
-5. Use `kbtz note` to leave context for future agents working on this
+3. Never call `kbtz release`. Your task stays claimed for your entire
+   session. When decomposing, create subtasks and block on them — your
+   session will be suspended automatically.
+4. Use `kbtz note` to leave context for future agents working on this
    task or its parent.
-6. Only a-z, A-Z, 0-9, _, - are allowed in task names.
-7. If you resume a previously-started task, check subtask
+5. Only a-z, A-Z, 0-9, _, - are allowed in task names.
+6. If you resume a previously-started task, check subtask
    status first with `kbtz show` before starting work.
-8. Always note branch names and PR URLs on your task (see "Tracking
+7. Always note branch names and PR URLs on your task (see "Tracking
    branches and PRs" above).
-9. Do not work on tasks you create. The workspace spawns a dedicated
+8. Do not work on tasks you create. The workspace spawns a dedicated
    agent for each new task. Write clear descriptions, closure conditions,
    and notes so the spawned agent can complete the work independently.
 "#;
