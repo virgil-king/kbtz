@@ -9,7 +9,7 @@
     {
       "name": "kbtz-tools",
       "description": "Plugin for the kbtz task tracker: command reference and hooks",
-      "version": "1.0.0",
+      "version": "1.3.0",
       "author": {
         "name": "virgil"
       },
