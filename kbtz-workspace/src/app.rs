@@ -57,6 +57,7 @@ pub struct App {
 
     pub term: TermSize,
     pub tree: TreeView,
+    pub tree_dirty: bool,
 }
 
 pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
@@ -134,11 +135,13 @@ impl App {
                 collapsed: HashSet::new(),
                 error: None,
             },
+            tree_dirty: false,
         };
         app.refresh_tree()?;
         if persistent_sessions {
             app.reconnect_sessions()?;
         }
+        app.release_orphaned_tasks()?;
         app.spawn_toplevel()?;
         Ok(app)
     }
@@ -194,6 +197,17 @@ impl App {
             .iter_mut()
             .map(|(session_id, session)| {
                 let phase = if !session.is_alive() {
+                    SessionPhase::Exited
+                } else if !session.reader_alive() {
+                    // Reader thread died while child is still alive.
+                    // The session is frozen (no output forwarding).
+                    // Kill the child so the lifecycle can reap and
+                    // respawn a fresh session for this task.
+                    kbtz::debug_log::log(&format!(
+                        "snapshot({session_id}): reader thread dead, child alive — \
+                         killing frozen session"
+                    ));
+                    session.force_kill();
                     SessionPhase::Exited
                 } else if let Some(since) = session.stopping_since() {
                     SessionPhase::Stopping { since }
@@ -268,10 +282,24 @@ impl App {
 
     /// Run one lifecycle tick: snapshot the world, compute actions, execute them.
     /// Returns a debug description of notable events (kills, exits).
+    ///
+    /// Uses a non-blocking busy_timeout so that write lock contention from
+    /// concurrent agent sessions never stalls the UI thread.  If a write
+    /// can't be acquired immediately, the tick is skipped and retried next
+    /// time — the existing `is_db_busy` error handling in `spawn_up_to`
+    /// and `remove_session` already handles this gracefully.
     pub fn tick(&mut self) -> Result<Option<String>> {
         let world = self.snapshot();
         let actions = lifecycle::tick(&world);
-        self.execute_actions(actions)
+        if actions.is_empty() {
+            return Ok(None);
+        }
+        self.conn
+            .execute_batch("PRAGMA busy_timeout = 0;")
+            .context("failed to set non-blocking busy_timeout")?;
+        let result = self.execute_actions(actions);
+        let _ = self.conn.execute_batch("PRAGMA busy_timeout = 60000;");
+        result
     }
 
     /// Spawn sessions for claimable tasks, up to `count` new sessions.
@@ -462,6 +490,12 @@ impl App {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     let alive = unsafe { libc::kill(pid, 0) } == 0;
                     if !alive {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EPERM) {
+                            kbtz::debug_log::log(&format!(
+                                "reconnect_sessions: kill({pid}, 0) returned EPERM"
+                            ));
+                        }
                         // Shepherd died — clean up stale files
                         let _ = std::fs::remove_file(&path);
                         let _ = std::fs::remove_file(&pid_path);
@@ -513,6 +547,33 @@ impl App {
                     let _ = std::fs::remove_file(&pid_path);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Release tasks that are "active" with a workspace assignee (ws/*)
+    /// but have no corresponding in-memory session.
+    ///
+    /// This handles orphaned tasks left behind by a crashed workspace or
+    /// failed session reconnections.  Releasing them to "open" allows
+    /// the next tick() to re-claim and spawn sessions for them.
+    fn release_orphaned_tasks(&self) -> Result<()> {
+        let tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
+        for task in &tasks {
+            if task.status != "active" {
+                continue;
+            }
+            let Some(ref assignee) = task.assignee else {
+                continue;
+            };
+            if !assignee.starts_with("ws/") {
+                continue;
+            }
+            if self.task_to_session.contains_key(&task.name) {
+                continue;
+            }
+            // Task is "active" with a workspace assignee but no session — orphaned.
+            let _ = ops::release_task(&self.conn, &task.name, assignee);
         }
         Ok(())
     }
@@ -781,6 +842,9 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+        fn reader_alive(&self) -> bool {
+            true
+        }
     }
 
     struct StubBackend;
@@ -839,6 +903,7 @@ mod tests {
                 collapsed: HashSet::new(),
                 error: None,
             },
+            tree_dirty: false,
         };
         (app, status_dir)
     }
@@ -990,5 +1055,59 @@ mod tests {
     fn cycle_after_single_entry_no_current() {
         let ids = vec!["ws/1"];
         assert_eq!(cycle_after(&ids, None), 0);
+    }
+
+    #[test]
+    fn release_orphaned_tasks_releases_stale_ws_claims() {
+        let (app, _dir) = test_app();
+        // Create a task and claim it as if a previous workspace session owned it.
+        ops::add_task(&app.conn, "orphan", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "orphan", "ws/99").unwrap();
+
+        // No session exists in app.task_to_session — this is the orphan case.
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "orphan").unwrap();
+        assert_eq!(task.status, "open");
+        assert!(task.assignee.is_none());
+    }
+
+    #[test]
+    fn release_orphaned_tasks_preserves_live_sessions() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "live", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "live", "ws/1").unwrap();
+
+        // Simulate a live session by adding to task_to_session.
+        app.task_to_session
+            .insert("live".to_string(), "ws/1".to_string());
+
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "live").unwrap();
+        assert_eq!(task.status, "active");
+        assert_eq!(task.assignee.as_deref(), Some("ws/1"));
+    }
+
+    #[test]
+    fn release_orphaned_tasks_ignores_non_ws_assignees() {
+        let (app, _dir) = test_app();
+        // Task claimed by an external agent, not a workspace session.
+        ops::add_task(
+            &app.conn,
+            "external",
+            None,
+            "desc",
+            None,
+            Some("agent-1"),
+            false,
+        )
+        .unwrap();
+
+        app.release_orphaned_tasks().unwrap();
+
+        let task = ops::get_task(&app.conn, "external").unwrap();
+        assert_eq!(task.status, "active");
+        assert_eq!(task.assignee.as_deref(), Some("agent-1"));
     }
 }

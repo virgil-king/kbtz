@@ -56,6 +56,7 @@ CONFIG FILE:
         [workspace]
         concurrency = 3
         backend = \"claude\"
+        workspace_dir = \"/tmp/my-workspace\"
 
         [agent.claude]
         command = \"/usr/local/bin/claude\"
@@ -112,6 +113,10 @@ struct Cli {
     /// Enable persistent sessions (shepherd-based); sessions survive workspace restart
     #[arg(long)]
     persistent_sessions: bool,
+
+    /// Workspace status directory [default: ~/.kbtz/workspace]
+    #[arg(long, env = "KBTZ_WORKSPACE_DIR")]
+    workspace_dir: Option<String>,
 }
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
@@ -141,8 +146,8 @@ impl Watchers {
         let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
         if db_event {
             kbtz::watch::drain_events(&self.db_rx);
-            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
-            app.refresh_tree()?;
+            kbtz::debug_log::log("watchers.poll: db event -> tree_dirty");
+            app.tree_dirty = true;
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
             kbtz::watch::drain_events(&self.status_rx);
@@ -173,8 +178,12 @@ fn run() -> Result<()> {
         std::fs::create_dir_all(parent).context("failed to create database directory")?;
     }
 
+    // Merge: CLI > config > defaults
+    let ws = config.workspace;
+
     // Status directory for session state files
-    let status_dir = PathBuf::from(std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
+    // Priority: CLI/env (--workspace-dir / $KBTZ_WORKSPACE_DIR) > config > default
+    let status_dir = PathBuf::from(cli.workspace_dir.or(ws.workspace_dir).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         format!("{home}/.kbtz/workspace")
     }));
@@ -209,8 +218,6 @@ fn run() -> Result<()> {
     let _ = write!(io::stdout(), "\x1b[?1004l");
     let _ = io::stdout().flush();
 
-    // Merge: CLI > config > defaults
-    let ws = config.workspace;
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
     let manual = cli.manual || ws.manual.unwrap_or(false);
     let prefer = cli.prefer.or(ws.prefer);
@@ -325,7 +332,7 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
 // ── Stdin helpers ─────────────────────────────────────────────────────
 
 /// Poll stdin with a 16ms (~60 fps) timeout. Returns `Some(n)` if `n`
-/// bytes were read (`0` means EOF/error), or `None` on timeout.
+/// bytes were read (`0` means EOF/error), or `None` on timeout/EINTR.
 fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
     let stdin_fd = stdin.as_raw_fd();
     let mut pfd = libc::pollfd {
@@ -333,18 +340,24 @@ fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
         events: libc::POLLIN,
         revents: 0,
     };
+    // EINTR on poll() is benign — the caller loops, so we'll retry
+    // on the next iteration.
     if unsafe { libc::poll(&mut pfd, 1, 16) } <= 0 {
         return None;
     }
     match stdin.read(buf) {
         Ok(n) if n > 0 => Some(n),
-        _ => Some(0),
+        Ok(_) => Some(0),
+        // EINTR during read after poll reported data ready — treat as
+        // timeout so the caller loops and retries.
+        Err(e) if e.raw_os_error() == Some(libc::EINTR) => None,
+        Err(_) => Some(0),
     }
 }
 
 /// Read the command byte after a PREFIX_KEY, either from the remaining
 /// buffer or by reading one more byte from stdin. Returns `None` on
-/// EOF/error.
+/// EOF only. Retries on EINTR (signal interruption).
 fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
     if *i < n {
         let b = buf[*i];
@@ -352,9 +365,13 @@ fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLoc
         Some(b)
     } else {
         let mut cmd_buf = [0u8; 1];
-        match stdin.read(&mut cmd_buf) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(cmd_buf[0]),
+        loop {
+            match stdin.read(&mut cmd_buf) {
+                Ok(0) => return None,
+                Ok(_) => return Some(cmd_buf[0]),
+                Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+                Err(_) => return None,
+            }
         }
     }
 }
@@ -391,6 +408,16 @@ enum TreeMode {
     ConfirmPause(String),
 }
 
+/// Build the confirmation message for an active task based on whether the
+/// workspace owns the session.
+fn active_task_message(app: &App, name: &str) -> String {
+    if app.task_to_session.contains_key(name) {
+        "has an active session.".into()
+    } else {
+        "is assigned to a non-workspace session.".into()
+    }
+}
+
 fn tree_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -398,7 +425,7 @@ fn tree_loop(
 ) -> Result<Action> {
     // Catch any DB changes that happened during zoomed mode.
     app.refresh_tree()?;
-    app.tick()?;
+    app.tree_dirty = false;
 
     let watchers = Watchers::new(app)?;
     let mut mode = TreeMode::Normal;
@@ -413,10 +440,12 @@ fn tree_loop(
             match &mode {
                 TreeMode::Help => tree::render_help(frame),
                 TreeMode::ConfirmDone(name) => {
-                    tree::render_confirm(frame, "Done", name);
+                    let msg = active_task_message(app, name);
+                    tree::render_confirm(frame, "Done", name, &msg);
                 }
                 TreeMode::ConfirmPause(name) => {
-                    tree::render_confirm(frame, "Pause", name);
+                    let msg = active_task_message(app, name);
+                    tree::render_confirm(frame, "Pause", name, &msg);
                 }
                 TreeMode::Normal => {}
             }
@@ -452,6 +481,7 @@ fn tree_loop(
                                 app.tree.error = Some(e.to_string());
                             }
                             app.refresh_tree()?;
+                            app.tree_dirty = false;
                             kbtz::debug_log::log("confirm done: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
@@ -465,6 +495,7 @@ fn tree_loop(
                                 app.tree.error = Some(e.to_string());
                             }
                             app.refresh_tree()?;
+                            app.tree_dirty = false;
                             kbtz::debug_log::log("confirm pause: refresh_tree complete");
                         }
                         mode = TreeMode::Normal;
@@ -488,6 +519,7 @@ fn tree_loop(
                     KeyCode::Char(' ') => {
                         app.toggle_collapse();
                         app.refresh_tree()?;
+                        app.tree_dirty = false;
                     }
                     KeyCode::Enter => {
                         if let Some(name) = app.selected_name() {
@@ -515,7 +547,10 @@ fn tree_loop(
                                 }
                             };
                             match result {
-                                Ok(()) => app.refresh_tree()?,
+                                Ok(()) => {
+                                    app.refresh_tree()?;
+                                    app.tree_dirty = false;
+                                }
                                 Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
@@ -533,7 +568,10 @@ fn tree_loop(
                                     continue;
                                 }
                                 _ => match kbtz::ops::mark_done(&app.conn, &name) {
-                                    Ok(()) => app.refresh_tree()?,
+                                    Ok(()) => {
+                                        app.refresh_tree()?;
+                                        app.tree_dirty = false;
+                                    }
                                     Err(e) => app.tree.error = Some(e.to_string()),
                                 },
                             }
@@ -543,7 +581,10 @@ fn tree_loop(
                         if let Some(name) = app.selected_name() {
                             let name = name.to_string();
                             match kbtz::ops::force_unassign_task(&app.conn, &name) {
-                                Ok(()) => app.refresh_tree()?,
+                                Ok(()) => {
+                                    app.refresh_tree()?;
+                                    app.tree_dirty = false;
+                                }
                                 Err(e) => app.tree.error = Some(e.to_string()),
                             }
                         }
@@ -581,6 +622,10 @@ fn tree_loop(
         }
 
         watchers.poll(app)?;
+        if app.tree_dirty {
+            app.refresh_tree()?;
+            app.tree_dirty = false;
+        }
         if let Some(desc) = app.tick()? {
             kbtz::debug_log::log(&format!("tick: {desc}"));
         }
@@ -1012,8 +1057,26 @@ fn passthrough_loop(
         }
 
         // Check session liveness (is_alive needs &mut).
-        if app.get_session_mut(sid).is_none_or(|s| !s.is_alive()) {
+        let session_ref = app.get_session_mut(sid);
+        if session_ref.is_none_or(|s| !s.is_alive()) {
             return Ok(Action::ReturnToTree);
+        }
+
+        // Detect dead reader thread while child is still alive.  This
+        // means the PTY reader exited prematurely (the session is frozen
+        // because output is no longer forwarded).  Kill the session so
+        // the lifecycle tick can spawn a fresh one for the task.
+        if let Some(session) = app.get_session(sid) {
+            if !session.reader_alive() {
+                kbtz::debug_log::log(&format!(
+                    "passthrough_loop({sid}): reader thread died while child is alive — \
+                     killing frozen session"
+                ));
+                if let Some(session) = app.get_session_mut(sid) {
+                    session.force_kill();
+                }
+                return Ok(Action::ReturnToTree);
+            }
         }
 
         watchers.poll(app)?;

@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,9 @@ pub trait SessionHandle: Send {
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
     fn process_id(&self) -> Option<u32>;
+    /// Returns true if the reader thread is still running.  A dead reader
+    /// with a live child means the session is frozen (no output forwarding).
+    fn reader_alive(&self) -> bool;
 }
 
 pub trait SessionSpawner: Send {
@@ -148,6 +152,10 @@ pub struct Session {
     pub session_id: String,
     /// Set when exit has been requested and we are waiting for the process to stop.
     pub stopping_since: Option<Instant>,
+    /// Set to false by the reader thread when it exits.  Allows the main
+    /// thread to detect a dead reader (e.g. due to a premature EOF on the
+    /// PTY) while the child process is still running.
+    pub reader_alive: Arc<AtomicBool>,
 }
 
 use kbtz_workspace::SCROLLBACK_ROWS;
@@ -555,6 +563,10 @@ impl SessionHandle for Session {
     fn process_id(&self) -> Option<u32> {
         self.child.process_id()
     }
+
+    fn reader_alive(&self) -> bool {
+        self.reader_alive.load(Ordering::Acquire)
+    }
 }
 
 impl Session {
@@ -593,12 +605,15 @@ impl Session {
         drop(pair.slave);
 
         let passthrough = Arc::new(Mutex::new(Passthrough::new(pty_rows, cols)));
+        let reader_alive = Arc::new(AtomicBool::new(true));
         let reader = pair
             .master
             .try_clone_reader()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let pt = Arc::clone(&passthrough);
-        std::thread::spawn(move || reader_thread(reader, pt));
+        let ra = Arc::clone(&reader_alive);
+        let reader_sid = session_id.to_string();
+        std::thread::spawn(move || reader_thread(reader, pt, ra, reader_sid));
 
         let writer = pair
             .master
@@ -614,19 +629,51 @@ impl Session {
             task_name: task_name.to_string(),
             session_id: session_id.to_string(),
             stopping_since: None,
+            reader_alive,
         })
     }
 }
 
-fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passthrough>>) {
+fn reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    passthrough: Arc<Mutex<Passthrough>>,
+    alive_flag: Arc<AtomicBool>,
+    session_id: String,
+) {
     let mut buf = [0u8; 4096];
     let stdout = std::io::stdout();
 
+    let exit_reason;
     loop {
         match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                exit_reason = "EOF";
+                break;
+            }
+            Err(e) => {
+                // EINTR means a signal was delivered (SIGCHLD, SIGWINCH,
+                // etc.) during the blocking read.  This is common on macOS
+                // where these signals are not automatically restarted.
+                // Retry instead of exiting.
+                if e.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                // EIO from the PTY layer is mapped to Ok(0) by
+                // portable_pty, but other error paths might surface it
+                // directly.  Treat as EOF.
+                if e.raw_os_error() == Some(libc::EIO) {
+                    exit_reason = "EIO";
+                    break;
+                }
+                exit_reason = "error";
+                kbtz::debug_log::log(&format!(
+                    "reader_thread({session_id}): exiting on error: {e}"
+                ));
+                break;
+            }
             Ok(n) => {
                 let Ok(mut pt) = passthrough.lock() else {
+                    exit_reason = "mutex poisoned";
                     break;
                 };
                 pt.process(&buf[..n]);
@@ -639,6 +686,11 @@ fn reader_thread(mut reader: Box<dyn Read + Send>, passthrough: Arc<Mutex<Passth
             }
         }
     }
+
+    alive_flag.store(false, Ordering::Release);
+    kbtz::debug_log::log(&format!(
+        "reader_thread({session_id}): exited ({exit_reason})"
+    ));
 }
 
 #[cfg(test)]

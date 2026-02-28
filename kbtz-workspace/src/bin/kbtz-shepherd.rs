@@ -9,6 +9,76 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use kbtz_workspace::protocol::{self, Message};
 use kbtz_workspace::{build_restore_sequence, resize_both_screens, SCROLLBACK_ROWS};
 
+/// Non-blocking client connection with message buffering.
+///
+/// Uses non-blocking reads with an internal buffer to avoid false disconnects.
+/// Blocking reads with timeouts are unsuitable here because `poll()` can return
+/// spurious readiness (e.g. after macOS sleep/wake cycles), and a subsequent
+/// blocking read that times out would be misinterpreted as a client disconnect,
+/// dropping the socket and breaking session persistence.
+///
+/// Partial messages are accumulated across poll iterations, and only true
+/// EOF (read returning 0) or real I/O errors cause a disconnect.
+struct ClientConn {
+    stream: UnixStream,
+    buf: Vec<u8>,
+}
+
+impl ClientConn {
+    fn new(stream: UnixStream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        stream.set_read_timeout(None)?;
+        Ok(Self {
+            stream,
+            buf: Vec::new(),
+        })
+    }
+
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.stream.as_raw_fd()
+    }
+
+    /// Read available data from the socket into the internal buffer.
+    /// Returns `false` on EOF or real error (client gone), `true` otherwise.
+    fn fill_buf(&mut self) -> bool {
+        let mut tmp = [0u8; 8192];
+        loop {
+            match self.stream.read(&mut tmp) {
+                Ok(0) => return false,
+                Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return true,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Try to parse one complete message from the buffer.
+    fn try_parse(&mut self) -> Option<Result<Message, ()>> {
+        if self.buf.len() < 4 {
+            return None;
+        }
+        let length =
+            u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        if length == 0 {
+            return Some(Err(())); // invalid frame
+        }
+        if self.buf.len() < 4 + length {
+            return None; // incomplete frame, need more data
+        }
+        let frame = self.buf[4..4 + length].to_vec();
+        self.buf.drain(..4 + length);
+        match protocol::decode(&frame) {
+            Ok(msg) => Some(Ok(msg)),
+            Err(_) => Some(Err(())),
+        }
+    }
+
+    fn write_message(&mut self, msg: &Message) -> anyhow::Result<()> {
+        protocol::write_message(&mut self.stream, msg)
+    }
+}
+
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn sigterm_handler(_sig: libc::c_int) {
@@ -148,7 +218,7 @@ fn run(
     // store, like tmux's server-side pane history.  No raw byte buffer.
     let mut vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
 
-    let mut client: Option<UnixStream> = None;
+    let mut client: Option<ClientConn> = None;
     let mut shutdown_requested = false;
     let mut read_buf = [0u8; 8192];
 
@@ -199,9 +269,9 @@ fn run(
         });
 
         // Index 2 (optional): client socket
-        let client_poll_idx = if let Some(ref cs) = client {
+        let client_poll_idx = if let Some(ref cc) = client {
             pollfds.push(libc::pollfd {
-                fd: cs.as_raw_fd(),
+                fd: cc.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -232,8 +302,10 @@ fn run(
                     let data = &read_buf[..n];
                     vte.process(data);
 
-                    if let Some(ref mut cs) = client {
-                        if protocol::write_message(cs, &Message::PtyOutput(data.to_vec())).is_err()
+                    if let Some(ref mut cc) = client {
+                        if cc
+                            .write_message(&Message::PtyOutput(data.to_vec()))
+                            .is_err()
                         {
                             client = None;
                         }
@@ -253,14 +325,15 @@ fn run(
                     // Close existing client if any.
                     client = None;
 
-                    let mut new_client = stream;
-                    // Set a read timeout so a misbehaving client sending a
-                    // partial frame can't stall the main loop indefinitely.
-                    let _ = new_client.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    // Use a blocking read timeout for the handshake only.
+                    // The handshake is a single Resize→InitialState exchange
+                    // that must complete before entering the non-blocking
+                    // main loop. 5 seconds is generous for a local socket.
+                    let mut handshake_stream = stream;
+                    let _ =
+                        handshake_stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
-                    // Size-first handshake: read Resize from the workspace
-                    // so we can build InitialState at the correct dimensions.
-                    match protocol::read_message(&mut new_client) {
+                    match protocol::read_message(&mut handshake_stream) {
                         Ok(Some(Message::Resize {
                             rows: new_rows,
                             cols: new_cols,
@@ -272,21 +345,21 @@ fn run(
                                 pixel_width: 0,
                                 pixel_height: 0,
                             });
-                            // Resize both screens so the restore sequence and
-                            // subsequent output use the correct dimensions.
                             resize_both_screens(&mut vte, new_rows, new_cols);
 
-                            // Build and send InitialState from structured VTE data.
                             let restore = build_restore_sequence(&mut vte);
                             if protocol::write_message(
-                                &mut new_client,
+                                &mut handshake_stream,
                                 &Message::InitialState(restore),
                             )
                             .is_err()
                             {
                                 // Failed to send; drop connection.
                             } else {
-                                client = Some(new_client);
+                                // Handshake complete — switch to non-blocking.
+                                if let Ok(cc) = ClientConn::new(handshake_stream) {
+                                    client = Some(cc);
+                                }
                             }
                         }
                         _ => {
@@ -299,44 +372,52 @@ fn run(
             }
         }
 
-        // Handle client read.
+        // Handle client read (non-blocking with buffering).
         if let Some(idx) = client_poll_idx {
             if pollfds[idx].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 let mut disconnect = false;
 
-                if let Some(ref mut cs) = client {
-                    match protocol::read_message(cs) {
-                        Ok(Some(msg)) => match msg {
-                            Message::PtyInput(data) => {
-                                let _ = pty_writer.write_all(&data);
-                                let _ = pty_writer.flush();
-                            }
-                            Message::Resize {
-                                rows: new_rows,
-                                cols: new_cols,
-                            } => {
-                                let _ = pair.master.resize(PtySize {
+                if let Some(ref mut cc) = client {
+                    let alive = cc.fill_buf();
+
+                    // Process all complete messages in the buffer.
+                    loop {
+                        match cc.try_parse() {
+                            Some(Ok(msg)) => match msg {
+                                Message::PtyInput(data) => {
+                                    let _ = pty_writer.write_all(&data);
+                                    let _ = pty_writer.flush();
+                                }
+                                Message::Resize {
                                     rows: new_rows,
                                     cols: new_cols,
-                                    pixel_width: 0,
-                                    pixel_height: 0,
-                                });
-                                resize_both_screens(&mut vte, new_rows, new_cols);
+                                } => {
+                                    let _ = pair.master.resize(PtySize {
+                                        rows: new_rows,
+                                        cols: new_cols,
+                                        pixel_width: 0,
+                                        pixel_height: 0,
+                                    });
+                                    resize_both_screens(&mut vte, new_rows, new_cols);
+                                }
+                                Message::Shutdown => {
+                                    shutdown_requested = true;
+                                    forward_sigterm(child_pid);
+                                }
+                                _ => {}
+                            },
+                            Some(Err(())) => {
+                                // Corrupt frame — disconnect.
+                                disconnect = true;
+                                break;
                             }
-                            Message::Shutdown => {
-                                shutdown_requested = true;
-                                forward_sigterm(child_pid);
-                            }
-                            _ => {} // Ignore unexpected messages from client.
-                        },
-                        Ok(None) => {
-                            // Clean EOF -- client disconnected.
-                            disconnect = true;
+                            None => break, // no complete message yet
                         }
-                        Err(_) => {
-                            // Read error -- client disconnected.
-                            disconnect = true;
-                        }
+                    }
+
+                    if !alive && !disconnect {
+                        // EOF or real I/O error — client is gone.
+                        disconnect = true;
                     }
                 }
 
@@ -356,10 +437,176 @@ fn forward_sigterm(child_pid: Option<u32>) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── try_parse tests ──────────────────────────────────────────────
+
+    /// Helper: create a ClientConn with a dummy socket (only used for
+    /// try_parse which operates on the internal buffer, not the socket).
+    fn conn_with_buf(buf: Vec<u8>) -> ClientConn {
+        let (s, _) = UnixStream::pair().unwrap();
+        ClientConn { stream: s, buf }
+    }
+
+    #[test]
+    fn try_parse_empty_buffer() {
+        let mut cc = conn_with_buf(vec![]);
+        assert!(cc.try_parse().is_none());
+    }
+
+    #[test]
+    fn try_parse_incomplete_length_prefix() {
+        let mut cc = conn_with_buf(vec![0, 0]);
+        assert!(cc.try_parse().is_none());
+        // Buffer is not consumed.
+        assert_eq!(cc.buf.len(), 2);
+    }
+
+    #[test]
+    fn try_parse_zero_length_frame_is_error() {
+        let mut cc = conn_with_buf(vec![0, 0, 0, 0]);
+        assert!(matches!(cc.try_parse(), Some(Err(()))));
+    }
+
+    #[test]
+    fn try_parse_incomplete_body() {
+        // Length says 10 bytes, but only 2 bytes of body present.
+        let mut cc = conn_with_buf(vec![0, 0, 0, 10, 0x01, 0x02]);
+        assert!(cc.try_parse().is_none());
+        // Buffer not consumed — waiting for more data.
+        assert_eq!(cc.buf.len(), 6);
+    }
+
+    #[test]
+    fn try_parse_complete_message() {
+        let msg = Message::PtyInput(b"hello".to_vec());
+        let encoded = protocol::encode(&msg);
+        let mut cc = conn_with_buf(encoded);
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+        assert!(cc.buf.is_empty());
+    }
+
+    #[test]
+    fn try_parse_two_messages_back_to_back() {
+        let msg1 = Message::PtyInput(b"one".to_vec());
+        let msg2 = Message::Resize { rows: 24, cols: 80 };
+        let mut buf = protocol::encode(&msg1);
+        buf.extend_from_slice(&protocol::encode(&msg2));
+        let mut cc = conn_with_buf(buf);
+
+        let parsed1 = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed1, msg1);
+
+        let parsed2 = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed2, msg2);
+
+        assert!(cc.try_parse().is_none());
+        assert!(cc.buf.is_empty());
+    }
+
+    #[test]
+    fn try_parse_message_plus_partial() {
+        let msg = Message::Shutdown;
+        let mut buf = protocol::encode(&msg);
+        // Append a partial second message (just the length prefix).
+        buf.extend_from_slice(&[0, 0, 0, 5]);
+        let mut cc = conn_with_buf(buf);
+
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, Message::Shutdown);
+
+        // Second parse returns None — incomplete.
+        assert!(cc.try_parse().is_none());
+        assert_eq!(cc.buf.len(), 4);
+    }
+
+    // ── fill_buf + try_parse integration tests ───────────────────────
+
+    #[test]
+    fn fill_buf_reads_and_parses() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+
+        // Write a complete message to the server side.
+        let msg = Message::PtyInput(b"test data".to_vec());
+        protocol::write_message(&mut server, &msg).unwrap();
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(alive);
+
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn fill_buf_eof_when_sender_closes() {
+        let (client, server) = UnixStream::pair().unwrap();
+        drop(server); // close the write side
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(!alive);
+    }
+
+    #[test]
+    fn fill_buf_no_data_returns_alive() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+        // No data written — non-blocking read should return WouldBlock.
+        let alive = cc.fill_buf();
+        assert!(alive);
+        assert!(cc.try_parse().is_none());
+    }
+
+    #[test]
+    fn write_message_roundtrip() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+
+        let msg = Message::PtyOutput(b"output".to_vec());
+        cc.write_message(&msg).unwrap();
+
+        let mut reader = std::io::BufReader::new(server);
+        let received = protocol::read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(received, msg);
+    }
+
+    #[test]
+    fn partial_message_across_two_fills() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let msg = Message::PtyInput(b"split".to_vec());
+        let encoded = protocol::encode(&msg);
+
+        // Write only the first 3 bytes (partial length prefix).
+        server.write_all(&encoded[..3]).unwrap();
+        server.flush().unwrap();
+
+        let mut cc = ClientConn::new(client).unwrap();
+        let alive = cc.fill_buf();
+        assert!(alive);
+        assert!(cc.try_parse().is_none()); // not enough data yet
+
+        // Write the rest.
+        server.write_all(&encoded[3..]).unwrap();
+        server.flush().unwrap();
+
+        // Small delay to let the kernel deliver the data.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let alive = cc.fill_buf();
+        assert!(alive);
+        let parsed = cc.try_parse().unwrap().unwrap();
+        assert_eq!(parsed, msg);
+    }
+}
+
 fn drain_pty(
     reader: &mut Box<dyn Read + Send>,
     vte: &mut vt100::Parser,
-    client: &mut Option<UnixStream>,
+    client: &mut Option<ClientConn>,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -369,8 +616,11 @@ fn drain_pty(
                 let data = &buf[..n];
                 vte.process(data);
 
-                if let Some(ref mut cs) = client {
-                    if protocol::write_message(cs, &Message::PtyOutput(data.to_vec())).is_err() {
+                if let Some(ref mut cc) = client {
+                    if cc
+                        .write_message(&Message::PtyOutput(data.to_vec()))
+                        .is_err()
+                    {
                         *client = None;
                     }
                 }

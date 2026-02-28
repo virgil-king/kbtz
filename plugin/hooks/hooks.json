@@ -38,6 +38,7 @@
     ],
     "Notification": [
       {
+        "matcher": "elicitation_dialog",
         "hooks": [
           {
             "type": "command",
@@ -45,11 +46,29 @@
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input"
+          }
+        ]
+      },
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input"
           },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input"
+          }
+        ]
+      },
+      {
+        "matcher": "elicitation_dialog|permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/notify.sh"
           }
         ]
       }
@@ -78,6 +97,20 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle --force"
           }
         ]
       }
