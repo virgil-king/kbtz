@@ -40,8 +40,19 @@ Use `$KBTZ_SESSION_ID` as your assignee in all kbtz commands. This environment v
 
 ```bash
 kbtz claim my-task $KBTZ_SESSION_ID
-kbtz release my-task $KBTZ_SESSION_ID
 ```
+
+## Never Release Your Own Task
+
+**Do not use `kbtz release` on your own task.** Releasing makes the task unclaimed, which causes the workspace to spawn a new session for it — duplicating work and losing your context.
+
+Instead, clean up your session first (add notes capturing progress, remove temp resources, clean up worktrees), then use one of these:
+
+- **Done?** → `kbtz done <name>`
+- **Blocked or stuck?** → Ask the user for guidance
+- **Waiting on child tasks?** → `kbtz wait` to block until the database changes, then check children's status
+
+`done` ends your current session. Always add notes before calling it so a future session has the context it needs. `kbtz wait` does not end the session — use it when you have active subtasks to monitor.
 
 ## Common Patterns
 
