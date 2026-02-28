@@ -17,18 +17,16 @@ a specific task. Follow these rules exactly.
 
 ## Completing your task
 
+**Never call `kbtz done` without explicit user approval.** Every task
+requires the user to review the work and confirm completion before it
+can be marked done.
+
 Before starting work, read your task's description and notes (`kbtz show`)
-and look for a **closure condition** that specifies what
-must happen before the task is done. For example:
+and look for a **closure condition** that specifies what must happen before
+the task is done. All closure conditions require user approval — follow
+the appropriate path below depending on whether the repository has a remote.
 
-- **"Close when changes are committed to branch X"** — commit to
-  the specified branch and then run `kbtz done`.
-
-If no closure condition is specified, the default is to create a PR,
-ensure CI passes, and display the diff. Then wait for the user to
-review — they will either request changes or ask you to merge the PR.
-
-### Default closure (no explicit closure condition)
+### Repo with remote (PR path)
 
 1. Add a note with the PR URL:
    ```
@@ -57,6 +55,19 @@ review — they will either request changes or ask you to merge the PR.
    git branch -d <feature-branch>
    ```
 
+### Repo without remote (branch merge path)
+
+1. Work in a worktree on a feature branch.
+2. Display the diff so the user can review it:
+   ```
+   git diff main..HEAD
+   ```
+3. Stop and wait for user input. The user will review the diff and
+   either request changes or ask you to merge. If they request changes,
+   make the edits, commit, and repeat from step 2. If they ask you to
+   merge, merge the branch to main, clean up the worktree and feature
+   branch, and run `kbtz done`.
+
 ## Decomposing into subtasks
 
 The workspace automatically assigns agents to new tasks. **Do not work on
@@ -67,32 +78,26 @@ your task depends on the result, block your task on it
 (`kbtz block <new-task> $KBTZ_TASK`) and use `kbtz wait` to wait for it
 to complete.
 
-When your work has independent pieces, you can create subtasks and the
-workspace will spawn separate agents to work on them in parallel. This is
-the primary way to get parallelism — take advantage of it when your task
-is parallelizable.
+### Task scope
 
-### When to decompose
+Each task corresponds to exactly one PR (repo with remote) or one commit
+to main (repo without remote). Every task requires user review before
+closure.
 
-- The work has **multiple independent pieces** (e.g. "add feature X"
-  involves separate backend and frontend changes that don't depend on
-  each other).
-- The scope is **large enough to benefit from parallelism** — the workspace
-  will run subtasks concurrently, so splitting saves wall-clock time.
+- **Too large:** If the work would span multiple PRs or commits,
+  decompose it into subtasks — one per PR/commit.
+- **Too small:** If the work is smaller than a PR or commit (e.g. a
+  single helper function needed by the current task), just do it inline
+  as part of the current task. Do not create a subtask for it.
 
-### When NOT to decompose
-
-- The task is **small enough to complete in one session**. Splitting
-  simple work adds coordination overhead with no benefit.
-- The pieces are **tightly coupled** — if each step depends on the
-  previous one, there is nothing to parallelize.
-
-When in doubt, prefer completing the task directly.
+When your work has independent pieces that each warrant their own
+PR/commit, create subtasks and the workspace will spawn separate agents
+to work on them in parallel.
 
 ### How to decompose
 
-Use `kbtz exec` to create all subtasks, blocking relationships, and release
-your task atomically. This prevents the workspace from seeing a partially-created
+Use `kbtz exec` to create all subtasks and blocking relationships
+atomically. This prevents the workspace from seeing a partially-created
 decomposition or a task without its full context.
 
 Keep task descriptions to one sentence — they display in a single-line list
@@ -105,7 +110,6 @@ add <subtask-1> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed con
 add <subtask-2> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context for subtask 2."
 block <subtask-1> $KBTZ_TASK
 block <subtask-2> $KBTZ_TASK
-release $KBTZ_TASK $KBTZ_SESSION_ID
 EOF
 ```
 
@@ -122,15 +126,14 @@ block feat-interfaces feat-impl
 block feat-interfaces $KBTZ_TASK
 block feat-tests $KBTZ_TASK
 block feat-impl $KBTZ_TASK
-release $KBTZ_TASK $KBTZ_SESSION_ID
 EOF
 ```
 
 All commands run in a single transaction — if any command fails, none take
-effect. The release MUST be last. The workspace will then kill your session,
-claim the subtasks, and spawn new agents for them. When all subtasks are
-done, your parent task becomes unblocked and the workspace will respawn an agent
-for it.
+effect. The workspace will claim the subtasks and spawn new agents for
+them. Your session will be suspended because your task is blocked. When
+all subtasks are done, your task becomes unblocked and the workspace will
+respawn an agent for it.
 
 Name subtasks descriptively, scoped under the parent task name using "-"
 as a separator (e.g. if your task is "auth", name subtasks "auth-db",
@@ -194,9 +197,11 @@ are easy to find from the task:
 
 1. Only work on your assigned task ($KBTZ_TASK). Do not claim or modify
    other tasks.
-2. Always create blocking relationships BEFORE releasing your task.
-3. Never call `kbtz release` unless you are decomposing into subtasks.
-   If you are done, use `kbtz done` instead.
+2. **Never call `kbtz done` without explicit user approval.** Always
+   stop and wait for the user to review your work and confirm completion.
+3. Never call `kbtz release`. Your task stays claimed for your entire
+   session. When decomposing, create subtasks and block on them — your
+   session will be suspended automatically.
 4. Use `kbtz note` to leave context for future agents working on this
    task or its parent.
 5. Only a-z, A-Z, 0-9, _, - are allowed in task names.
@@ -234,7 +239,7 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz add <name> "<description>" [-p parent] [-n note]` — create a task
 - `kbtz show <name>` — show task details and notes
 - `kbtz note <name> "<text>"` — add a note to a task
-- `kbtz done <name>` — mark a task done
+- `kbtz done <name>` — mark a task done (requires user approval first)
 - `kbtz pause <name>` — pause a task
 - `kbtz unpause <name>` — unpause a task
 - `kbtz block <blocker> <blocked>` — make <blocked> wait on <blocker>

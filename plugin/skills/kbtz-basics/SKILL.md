@@ -14,7 +14,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
 | `kbtz steal <name> <assignee>` | Atomically transfer task ownership (requires user approval) |
 | `kbtz release <name> <assignee>` | Release a claimed task |
-| `kbtz done <name>` | Mark task complete |
+| `kbtz done <name>` | Mark task complete (requires user approval first) |
 | `kbtz reopen <name>` | Reopen a completed task |
 | `kbtz pause <name>` | Pause a task (remove from active work and default listing) |
 | `kbtz unpause <name>` | Unpause a paused task (return to open) |
@@ -101,12 +101,16 @@ kbtz add deferred-task "Not ready yet" --paused
 
 ### Specifying closure conditions
 
-When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. Without a closure condition, the default is to create a PR, wait for CI to pass, and display the diff. The agent then waits for the user to review and either request changes or ask it to merge.
+When creating a task, clearly state the **closure condition** — what must happen before the task is considered done — in the description or an initial note. **Agents must never call `kbtz done` without explicit user approval.** There are two closure paths depending on the repository:
+
+- **Repo with remote:** Create a PR, wait for CI to pass, and display the diff. Wait for the user to review. The user will either request changes or ask you to merge. Only call `kbtz done` after the user approves and the PR is merged.
+- **Repo without remote:** Work in a worktree, then present the branch diff to the user. Wait for the user to review. The user will either request changes or ask you to merge to main. Only call `kbtz done` after the user approves and the branch is merged.
 
 Examples:
 
 ```bash
-kbtz add update-deps "Update outdated dependencies" -n "Close when changes are committed to branch update-deps"
+kbtz add update-deps "Update outdated dependencies" -n "Close after user approves and PR is merged."
+kbtz add fix-parser "Fix CSV parser edge case" -n "Close after user approves and branch is merged to main."
 ```
 
 ### Adding progress notes
