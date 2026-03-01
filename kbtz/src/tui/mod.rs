@@ -75,14 +75,14 @@ fn run_loop(
                         KeyAction::AddNote => {
                             if let Some(task_name) = app.selected_name() {
                                 let task_name = task_name.to_string();
-                                app.error = None;
+                                app.tree.error = None;
                                 match editor::open_editor(terminal, "") {
                                     Ok(content) => {
                                         let content = content.trim_end();
                                         if !content.is_empty() {
                                             if let Err(e) = ops::add_note(conn, &task_name, content)
                                             {
-                                                app.error = Some(e.to_string());
+                                                app.tree.error = Some(e.to_string());
                                             } else {
                                                 app.show_notes = true;
                                                 app.load_notes(conn)?;
@@ -90,59 +90,37 @@ fn run_loop(
                                         }
                                     }
                                     Err(e) => {
-                                        app.error = Some(e.to_string());
+                                        app.tree.error = Some(e.to_string());
                                     }
                                 }
                             }
                         }
-                        KeyAction::TogglePause => {
-                            if let Some(task_name) = app.selected_name() {
-                                let task_name = task_name.to_string();
-                                let status = app.rows[app.cursor].status.as_str();
-                                let result = match status {
-                                    "paused" => ops::unpause_task(conn, &task_name),
-                                    "open" => ops::pause_task(conn, &task_name),
-                                    _ => {
-                                        app.error = Some(format!("cannot pause {status} task"));
-                                        Ok(())
-                                    }
-                                };
-                                if let Err(e) = result {
-                                    app.error = Some(e.to_string());
-                                } else {
-                                    app.refresh(conn, root)?;
-                                }
+                        KeyAction::Pause(name) => {
+                            if let Err(e) = ops::pause_task(conn, &name) {
+                                app.tree.error = Some(e.to_string());
+                            } else {
+                                app.refresh(conn, root)?;
                             }
                         }
-                        KeyAction::MarkDone => {
-                            if let Some(task_name) = app.selected_name() {
-                                let task_name = task_name.to_string();
-                                let status = app.rows[app.cursor].status.as_str();
-                                match status {
-                                    "done" => {
-                                        app.error = Some("task is already done".into());
-                                    }
-                                    "active" => {
-                                        app.error = Some("cannot close active task".into());
-                                    }
-                                    _ => {
-                                        if let Err(e) = ops::mark_done(conn, &task_name) {
-                                            app.error = Some(e.to_string());
-                                        } else {
-                                            app.refresh(conn, root)?;
-                                        }
-                                    }
-                                }
+                        KeyAction::Unpause(name) => {
+                            if let Err(e) = ops::unpause_task(conn, &name) {
+                                app.tree.error = Some(e.to_string());
+                            } else {
+                                app.refresh(conn, root)?;
                             }
                         }
-                        KeyAction::ForceUnassign => {
-                            if let Some(task_name) = app.selected_name() {
-                                let task_name = task_name.to_string();
-                                if let Err(e) = ops::force_unassign_task(conn, &task_name) {
-                                    app.error = Some(e.to_string());
-                                } else {
-                                    app.refresh(conn, root)?;
-                                }
+                        KeyAction::MarkDone(name) => {
+                            if let Err(e) = ops::mark_done(conn, &name) {
+                                app.tree.error = Some(e.to_string());
+                            } else {
+                                app.refresh(conn, root)?;
+                            }
+                        }
+                        KeyAction::ForceUnassign(name) => {
+                            if let Err(e) = ops::force_unassign_task(conn, &name) {
+                                app.tree.error = Some(e.to_string());
+                            } else {
+                                app.refresh(conn, root)?;
                             }
                         }
                         KeyAction::Refresh => {

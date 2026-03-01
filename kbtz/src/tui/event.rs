@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{AddField, App, Mode};
+use super::app::{AddField, App};
+use crate::ui::TreeKeyAction;
 
 /// Result of handling a key press.
 pub enum KeyAction {
@@ -9,58 +10,44 @@ pub enum KeyAction {
     Refresh,
     OpenEditor,
     AddNote,
-    TogglePause,
-    MarkDone,
-    ForceUnassign,
+    Pause(String),
+    Unpause(String),
+    MarkDone(String),
+    ForceUnassign(String),
     Continue,
 }
 
 /// Handle a key press. Returns an action indicating what the event loop should do.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
-    match app.mode {
-        Mode::Normal => handle_normal(app, key),
-        Mode::AddTask => handle_add(app, key),
-        Mode::Help => handle_help(app, key),
+    if app.add_form.is_some() {
+        return handle_add(app, key);
     }
-}
 
-fn handle_normal(app: &mut App, key: KeyEvent) -> KeyAction {
-    app.error = None;
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => KeyAction::Quit,
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.move_down();
-            KeyAction::Continue
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.move_up();
-            KeyAction::Continue
-        }
-        KeyCode::Char(' ') => {
-            app.toggle_collapse();
-            KeyAction::Refresh
-        }
-        KeyCode::Enter | KeyCode::Char('n') => {
-            app.toggle_notes();
-            KeyAction::Continue
-        }
-        KeyCode::Char('a') => {
-            app.enter_add_mode(true);
-            KeyAction::Continue
-        }
-        KeyCode::Char('A') => {
-            app.enter_add_mode(false);
-            KeyAction::Continue
-        }
-        KeyCode::Char('N') => KeyAction::AddNote,
-        KeyCode::Char('p') => KeyAction::TogglePause,
-        KeyCode::Char('d') => KeyAction::MarkDone,
-        KeyCode::Char('U') => KeyAction::ForceUnassign,
-        KeyCode::Char('?') => {
-            app.toggle_help();
-            KeyAction::Continue
-        }
-        _ => KeyAction::Continue,
+    match app.tree.handle_key(key) {
+        TreeKeyAction::Quit => KeyAction::Quit,
+        TreeKeyAction::Refresh => KeyAction::Refresh,
+        TreeKeyAction::Pause(n) => KeyAction::Pause(n),
+        TreeKeyAction::Unpause(n) => KeyAction::Unpause(n),
+        TreeKeyAction::MarkDone(n) => KeyAction::MarkDone(n),
+        TreeKeyAction::ForceUnassign(n) => KeyAction::ForceUnassign(n),
+        TreeKeyAction::Continue => KeyAction::Continue,
+        TreeKeyAction::Unhandled => match key.code {
+            KeyCode::Esc => KeyAction::Quit,
+            KeyCode::Enter | KeyCode::Char('n') => {
+                app.toggle_notes();
+                KeyAction::Continue
+            }
+            KeyCode::Char('a') => {
+                app.enter_add_mode(true);
+                KeyAction::Continue
+            }
+            KeyCode::Char('A') => {
+                app.enter_add_mode(false);
+                KeyAction::Continue
+            }
+            KeyCode::Char('N') => KeyAction::AddNote,
+            _ => KeyAction::Continue,
+        },
     }
 }
 
@@ -106,16 +93,6 @@ fn handle_add(app: &mut App, key: KeyEvent) -> KeyAction {
                 form.focused_buf_mut().push(c);
                 form.error = None;
             }
-            KeyAction::Continue
-        }
-        _ => KeyAction::Continue,
-    }
-}
-
-fn handle_help(app: &mut App, key: KeyEvent) -> KeyAction {
-    match key.code {
-        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-            app.toggle_help();
             KeyAction::Continue
         }
         _ => KeyAction::Continue,

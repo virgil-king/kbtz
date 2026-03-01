@@ -1,10 +1,10 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, Paragraph, Wrap};
 
-use super::app::{AddField, App, Mode};
+use super::app::{AddField, App};
 use crate::ui;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_notes {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -13,18 +13,23 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_tree(frame, app, chunks[0]);
         render_notes(frame, app, chunks[1]);
     } else {
-        render_tree(frame, app, frame.area());
+        let area = frame.area();
+        render_tree(frame, app, area);
     }
 
-    match app.mode {
-        Mode::AddTask => render_add_dialog(frame, app),
-        Mode::Help => render_help(frame),
-        Mode::Normal => {}
+    match &app.tree.mode {
+        ui::TreeMode::ConfirmDone(name) => ui::render_confirm(frame, "Done", name),
+        ui::TreeMode::ConfirmPause(name) => ui::render_confirm(frame, "Pause", name),
+        ui::TreeMode::Help => render_help(frame),
+        ui::TreeMode::Normal => {}
+    }
+    if app.add_form.is_some() {
+        render_add_dialog(frame, app);
     }
 }
 
-fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
-    let (tree_area, error_area) = if app.error.is_some() {
+fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
+    let (tree_area, error_area) = if app.tree.error.is_some() {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -34,72 +39,20 @@ fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
         (area, None)
     };
 
-    if let (Some(err), Some(err_area)) = (&app.error, error_area) {
+    if let (Some(err), Some(err_area)) = (&app.tree.error, error_area) {
         frame.render_widget(
             Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
             err_area,
         );
     }
 
-    let area = tree_area;
-    let items: Vec<ListItem> = app
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let prefix = ui::tree_prefix(row);
-
-            // Collapse indicator for nodes with children
-            let collapse_indicator = if row.has_children {
-                if app.collapsed.contains(&row.name) {
-                    "> "
-                } else {
-                    "v "
-                }
-            } else {
-                "  "
-            };
-
-            let icon = ui::icon_for_task(row);
-            let style = if !row.blocked_by.is_empty() {
-                ui::status_style("blocked")
-            } else {
-                ui::status_style(&row.status)
-            };
-
-            let blocked_info = if row.blocked_by.is_empty() {
-                String::new()
-            } else {
-                format!(" [blocked by: {}]", row.blocked_by.join(", "))
-            };
-
-            let desc = if row.description.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", row.description)
-            };
-
-            let line = Line::from(vec![
-                Span::raw(prefix),
-                Span::raw(collapse_indicator),
-                Span::styled(icon, style),
-                Span::styled(row.name.clone(), Style::default().bold()),
-                Span::styled(blocked_info, Style::default().fg(Color::Red)),
-                Span::raw(desc),
-            ]);
-
-            let item = ListItem::new(line);
-            if i == app.cursor {
-                item.style(Style::default().bg(Color::DarkGray))
-            } else {
-                item
-            }
-        })
-        .collect();
-
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks "));
-
-    frame.render_widget(list, area);
+    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, |_| {
+        ui::RowDecoration::default()
+    });
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Tasks "))
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    frame.render_stateful_widget(list, tree_area, &mut app.tree.list_state);
 }
 
 fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
@@ -123,10 +76,6 @@ fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    ui::centered_rect(width, height, area)
 }
 
 fn render_field(
@@ -163,7 +112,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
     let width = 60.min(term.width.saturating_sub(4));
     let content_rows: u16 = 8 + u16::from(form.error.is_some()); // parent + 3*(label+input) + hint
     let height = (content_rows + 2).min(term.height.saturating_sub(2)); // +2 for borders
-    let area = centered_rect(width, height, term);
+    let area = ui::centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
 
@@ -254,7 +203,7 @@ fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
     let height = 21.min(term.height.saturating_sub(2));
-    let area = centered_rect(width, height, term);
+    let area = ui::centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
 
