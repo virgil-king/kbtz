@@ -64,7 +64,16 @@ pub fn spawn_window(
     args: &[String],
 ) -> Result<String> {
     let mut cmd = Command::new("tmux");
-    cmd.args(["new-window", "-P", "-F", "#{window_id}", "-t", session, "-n", name]);
+    cmd.args([
+        "new-window",
+        "-P",
+        "-F",
+        "#{window_id}",
+        "-t",
+        session,
+        "-n",
+        name,
+    ]);
     for (key, val) in env {
         cmd.args(["-e", &format!("{key}={val}")]);
     }
