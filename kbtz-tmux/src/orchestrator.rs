@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,6 +13,26 @@ use kbtz_workspace::prompt::AGENT_PROMPT;
 
 use kbtz_tmux::lifecycle::{self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot};
 use kbtz_tmux::tmux;
+
+/// Send a signal to a process, logging unexpected errors.
+/// ESRCH (process already exited) is silently ignored.
+fn send_signal(pid: u32, signal: libc::c_int) {
+    let pid_i32 = match i32::try_from(pid) {
+        Ok(p) => p,
+        Err(_) => {
+            warn!("PID {pid} out of i32 range, skipping signal");
+            return;
+        }
+    };
+    let rc = unsafe { libc::kill(pid_i32, signal) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        // ESRCH = process already exited, expected during shutdown races.
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            warn!("kill({pid}, {signal}) failed: {err}");
+        }
+    }
+}
 
 struct TrackedWindow {
     window_id: String,
@@ -80,9 +100,11 @@ impl Orchestrator {
     }
 
     /// Batch-fetch task statuses for all tracked windows in a single SQL query.
-    fn batch_task_statuses(&self) -> HashMap<String, TaskSnapshot> {
+    /// Returns Err on SQL failure so the caller can skip the tick rather than
+    /// misinterpreting missing data as "all tasks deleted" and reaping everything.
+    fn batch_task_statuses(&self) -> Result<HashMap<String, TaskSnapshot>> {
         if self.windows.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
         let names: Vec<&str> = self
             .windows
@@ -93,39 +115,40 @@ impl Orchestrator {
         let sql = format!(
             "SELECT name, status, assignee FROM tasks WHERE name IN ({placeholders})"
         );
-        let mut stmt = match self.conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("Failed to prepare batch query: {e}");
-                return HashMap::new();
-            }
-        };
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .context("failed to prepare batch task query")?;
         let params: Vec<&dyn rusqlite::types::ToSql> = names
             .iter()
             .map(|n| n as &dyn rusqlite::types::ToSql)
             .collect();
-        let rows = match stmt.query_map(params.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Failed to execute batch query: {e}");
-                return HashMap::new();
-            }
-        };
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .context("failed to execute batch task query")?;
         let mut map = HashMap::new();
         for (name, status, assignee) in rows.flatten() {
             map.insert(name, TaskSnapshot { status, assignee });
         }
-        map
+        Ok(map)
     }
 
-    fn snapshot_world(&self) -> WorldSnapshot {
-        let task_statuses = self.batch_task_statuses();
+    /// Build a world snapshot. Returns None if the batch query fails (caller
+    /// should skip the tick).
+    fn snapshot_world(&self) -> Option<WorldSnapshot> {
+        let task_statuses = match self.batch_task_statuses() {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Skipping tick: {e}");
+                return None;
+            }
+        };
         let windows: Vec<WindowSnapshot> = self
             .windows
             .values()
@@ -141,11 +164,11 @@ impl Orchestrator {
             })
             .collect();
 
-        WorldSnapshot {
+        Some(WorldSnapshot {
             windows,
             max_concurrency: self.max_concurrent,
             now: Instant::now(),
-        }
+        })
     }
 
     fn apply_action(&mut self, action: &Action) {
@@ -157,7 +180,7 @@ impl Orchestrator {
                         session_id, tw.task_name
                     );
                     if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                        send_signal(pid, libc::SIGTERM);
                     }
                     tw.phase = WindowPhase::Stopping {
                         since: Instant::now(),
@@ -168,7 +191,7 @@ impl Orchestrator {
                 if let Some(tw) = self.windows.get(session_id) {
                     info!("Force-killing {} (task={})", session_id, tw.task_name);
                     if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                        send_signal(pid, libc::SIGKILL);
                     }
                 }
             }
@@ -249,8 +272,16 @@ impl Orchestrator {
                 }
             };
 
-        let _ = tmux::set_window_option(&window_id, "@kbtz_task", &task_name);
-        let _ = tmux::set_window_option(&window_id, "@kbtz_sid", &session_id);
+        // Tag window for crash recovery. If tagging fails, the window is
+        // invisible to reconcile — kill it and release the claim.
+        if let Err(e) = tmux::set_window_option(&window_id, "@kbtz_task", &task_name)
+            .and_then(|()| tmux::set_window_option(&window_id, "@kbtz_sid", &session_id))
+        {
+            error!("Failed to tag window {window_id} for {task_name}: {e}");
+            let _ = tmux::kill_window(&window_id);
+            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+            return Err(e);
+        }
 
         self.windows.insert(
             session_id.clone(),
@@ -265,18 +296,21 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Check which tracked windows are still alive in tmux.
+    /// Calls list_window_ids once and does set lookups instead of O(N) tmux calls.
     fn detect_dead_windows(&mut self) {
+        let alive: HashSet<String> = tmux::list_window_ids(&self.session)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         for tw in self.windows.values_mut() {
-            if matches!(tw.phase, WindowPhase::Running) {
-                if let Ok(alive) = tmux::window_alive(&self.session, &tw.window_id) {
-                    if !alive {
-                        info!(
-                            "Window gone for {} (task={})",
-                            tw.session_id, tw.task_name
-                        );
-                        tw.phase = WindowPhase::Gone;
-                    }
-                }
+            if matches!(tw.phase, WindowPhase::Running) && !alive.contains(&tw.window_id) {
+                info!(
+                    "Window gone for {} (task={})",
+                    tw.session_id, tw.task_name
+                );
+                tw.phase = WindowPhase::Gone;
             }
         }
     }
@@ -320,6 +354,10 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Run the main loop. Fully event-driven:
+    /// - DB changes wake instantly (via watch_db inotify)
+    /// - Pane exits wake instantly (via tmux hook -> sentinel file -> watch_dir inotify)
+    /// - Fallback poll interval catches edge cases where hooks fail
     pub fn run(&mut self) -> Result<()> {
         self.reconcile()?;
 
@@ -350,11 +388,13 @@ impl Orchestrator {
         while self.running.load(Ordering::SeqCst) {
             self.detect_dead_windows();
 
-            let world = self.snapshot_world();
-            let actions = lifecycle::tick(&world);
-
-            for action in &actions {
-                self.apply_action(action);
+            // snapshot_world returns None if the batch query fails (transient
+            // DB error). In that case, skip this tick and wait for the next event.
+            if let Some(world) = self.snapshot_world() {
+                let actions = lifecycle::tick(&world);
+                for action in &actions {
+                    self.apply_action(action);
+                }
             }
 
             watch::drain_events(&unified_rx);
@@ -373,7 +413,7 @@ impl Orchestrator {
         for sid in &sids {
             if let Some(tw) = self.windows.get(sid) {
                 if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                    send_signal(pid, libc::SIGTERM);
                 }
                 let _ = ops::release_task(&self.conn, &tw.task_name, &tw.session_id);
             }
@@ -384,7 +424,7 @@ impl Orchestrator {
         for sid in &sids {
             if let Some(tw) = self.windows.remove(sid) {
                 if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    send_signal(pid, libc::SIGKILL);
                 }
                 let _ = tmux::kill_window(&tw.window_id);
             }
