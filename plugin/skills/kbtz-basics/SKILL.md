@@ -93,6 +93,39 @@ block child-one child-two
 BATCH
 ```
 
+### Quoting in `kbtz exec`
+
+`kbtz exec` uses its own quoting rules — not POSIX shell quoting.
+
+**Double quotes** delimit strings. Inside double quotes, `\"` produces a
+literal `"` and `\\` produces a literal `\`. All other characters
+(including newlines) are literal.
+
+**Single quotes and apostrophes** are ordinary characters — they do NOT
+start quoted strings. `it's` and `don't` work without escaping.
+
+**Heredocs** (`<<DELIMITER`) work like shell heredocs and are the best
+way to include multi-line or complex text:
+
+```
+add my-task "Description" -n <<NOTE
+Any content here — quotes, apostrophes, special characters.
+No escaping needed inside a heredoc body.
+NOTE
+```
+
+**Multiline double-quoted strings** are supported — a quoted string can
+span multiple lines:
+
+```
+add my-task "Description" -n "First line
+second line
+third line"
+```
+
+**Recommendation:** For note content with any special characters, prefer
+heredocs over double-quoted strings. Heredocs require no escaping at all.
+
 Use `--paused` to create a task that shouldn't be worked on yet:
 
 ```bash
