@@ -1,3 +1,4 @@
+mod lifecycle;
 mod tmux;
 
 use anyhow::Result;
