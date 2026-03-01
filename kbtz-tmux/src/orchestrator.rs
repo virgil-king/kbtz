@@ -11,8 +11,8 @@ use kbtz::{db, ops, watch};
 use kbtz_workspace::config::Config;
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
-use crate::lifecycle::{self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot};
-use crate::tmux;
+use kbtz_tmux::lifecycle::{self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot};
+use kbtz_tmux::tmux;
 
 struct TrackedWindow {
     window_id: String,

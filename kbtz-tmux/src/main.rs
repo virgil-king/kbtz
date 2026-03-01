@@ -1,6 +1,4 @@
-mod lifecycle;
 mod orchestrator;
-mod tmux;
 
 use std::fs::{self, OpenOptions};
 use std::io;
