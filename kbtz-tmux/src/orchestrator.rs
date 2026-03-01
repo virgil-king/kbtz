@@ -11,7 +11,9 @@ use kbtz::{db, ops, watch};
 use kbtz_workspace::config::Config;
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
-use kbtz_tmux::lifecycle::{self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot};
+use kbtz_tmux::lifecycle::{
+    self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot,
+};
 use kbtz_tmux::tmux;
 
 /// Send a signal to a process, logging unexpected errors.
@@ -112,9 +114,8 @@ impl Orchestrator {
             .map(|tw| tw.task_name.as_str())
             .collect();
         let placeholders: String = names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT name, status, assignee FROM tasks WHERE name IN ({placeholders})"
-        );
+        let sql =
+            format!("SELECT name, status, assignee FROM tasks WHERE name IN ({placeholders})");
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -176,10 +177,7 @@ impl Orchestrator {
         match action {
             Action::RequestExit { session_id } => {
                 if let Some(tw) = self.windows.get_mut(session_id) {
-                    info!(
-                        "Requesting exit for {} (task={})",
-                        session_id, tw.task_name
-                    );
+                    info!("Requesting exit for {} (task={})", session_id, tw.task_name);
                     if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
                         send_signal(pid, libc::SIGTERM);
                     }
@@ -200,9 +198,7 @@ impl Orchestrator {
                 if let Some(tw) = self.windows.remove(session_id) {
                     info!("Removing {} (task={})", session_id, tw.task_name);
                     let _ = tmux::kill_window(&tw.window_id);
-                    if let Err(e) =
-                        ops::release_task(&self.conn, &tw.task_name, &tw.session_id)
-                    {
+                    if let Err(e) = ops::release_task(&self.conn, &tw.task_name, &tw.session_id) {
                         warn!("Failed to release {}: {e}", tw.task_name);
                     }
                 }
@@ -222,20 +218,14 @@ impl Orchestrator {
         let slot = self.next_free_slot();
         let session_id = format!("ws/{slot}");
 
-        let task_name =
-            ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())?
-                .context("no tasks available")?;
+        let task_name = ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())?
+            .context("no tasks available")?;
 
         let task = ops::get_task(&self.conn, &task_name)?;
 
         info!("Spawning {task_name} (slot {slot})");
 
-        let backend_name = self
-            .config
-            .workspace
-            .backend
-            .as_deref()
-            .unwrap_or("claude");
+        let backend_name = self.config.workspace.backend.as_deref().unwrap_or("claude");
         let agent_cfg = self.config.agent.get(backend_name);
         let command = agent_cfg
             .and_then(|a| a.binary())
@@ -263,15 +253,14 @@ impl Orchestrator {
         env.insert("KBTZ_SESSION_ID".into(), session_id.clone());
         env.insert("KBTZ_WORKSPACE_DIR".into(), self.workspace_dir.clone());
 
-        let window_id =
-            match tmux::spawn_window(&self.session, &task_name, &env, &command, &args) {
-                Ok(wid) => wid,
-                Err(e) => {
-                    error!("Failed to spawn window for {task_name}: {e}");
-                    let _ = ops::release_task(&self.conn, &task_name, &session_id);
-                    return Err(e);
-                }
-            };
+        let window_id = match tmux::spawn_window(&self.session, &task_name, &env, &command, &args) {
+            Ok(wid) => wid,
+            Err(e) => {
+                error!("Failed to spawn window for {task_name}: {e}");
+                let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                return Err(e);
+            }
+        };
 
         // Tag window for crash recovery. If tagging fails, the window is
         // invisible to reconcile — kill it and release the claim.
@@ -307,10 +296,7 @@ impl Orchestrator {
 
         for tw in self.windows.values_mut() {
             if matches!(tw.phase, WindowPhase::Running) && !alive.contains(&tw.window_id) {
-                info!(
-                    "Window gone for {} (task={})",
-                    tw.session_id, tw.task_name
-                );
+                info!("Window gone for {} (task={})", tw.session_id, tw.task_name);
                 tw.phase = WindowPhase::Gone;
             }
         }
