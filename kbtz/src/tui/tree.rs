@@ -18,8 +18,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     match &app.tree.mode {
-        ui::TreeMode::ConfirmDone(name) => ui::render_confirm(frame, "Done", name),
-        ui::TreeMode::ConfirmPause(name) => ui::render_confirm(frame, "Pause", name),
+        ui::TreeMode::ConfirmDone(name) => {
+            ui::render_confirm(frame, "Done", name, "has an active session.")
+        }
+        ui::TreeMode::ConfirmPause(name) => {
+            ui::render_confirm(frame, "Pause", name, "has an active session.")
+        }
         ui::TreeMode::Help => render_help(frame),
         ui::TreeMode::Normal => {}
     }

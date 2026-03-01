@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
 
 use crate::app::App;
 use kbtz::ui;
@@ -27,77 +27,41 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .tree
-        .rows
-        .iter()
-        .map(|row| {
-            let prefix = ui::tree_prefix(row);
-
-            let collapse_indicator = if row.has_children {
-                if app.tree.collapsed.contains(&row.name) {
-                    "> "
-                } else {
-                    "v "
-                }
-            } else {
-                "  "
-            };
-
-            // Session indicator: 🤖 for workspace sessions, 👽 for
-            // externally-claimed tasks, status icon otherwise.
-            let (bot, icon, session_suffix) = if let Some(sid) = app.task_to_session.get(&row.name)
-            {
-                if let Some(session) = app.sessions.get(sid) {
-                    (
-                        "\u{1f916}",
-                        format!("{} ", session.status().indicator()),
-                        format!(" {}", sid),
-                    )
-                } else {
-                    ("", format!("{}  ", ui::icon_for_task(row)), String::new())
-                }
-            } else if row.status == "active" {
-                if let Some(ref assignee) = row.assignee {
-                    (
-                        "\u{1f47d}",
-                        format!("{}  ", ui::icon_for_task(row)),
-                        format!(" {}", assignee),
-                    )
-                } else {
-                    ("", format!("{}  ", ui::icon_for_task(row)), String::new())
-                }
-            } else {
-                ("", format!("{}  ", ui::icon_for_task(row)), String::new())
-            };
-            let style = ui::status_style(&row.status);
-
-            let blocked_info = if row.blocked_by.is_empty() {
-                String::new()
-            } else {
-                format!(" [blocked by: {}]", row.blocked_by.join(", "))
-            };
-
-            let desc = if row.description.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", row.description)
-            };
-
-            let line = Line::from(vec![
-                Span::raw(prefix),
-                Span::raw(collapse_indicator),
-                Span::raw(bot),
-                Span::styled(icon, style),
-                Span::styled(row.name.clone(), Style::default().bold()),
-                Span::styled(session_suffix, Style::default().fg(Color::Cyan)),
-                Span::styled(blocked_info, Style::default().fg(Color::Red)),
-                Span::raw(desc),
-            ]);
-
-            ListItem::new(line)
-        })
-        .collect();
+    let task_to_session = &app.task_to_session;
+    let sessions = &app.sessions;
+    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, |row| {
+        // Workspace session: 🤖 + status indicator + session ID
+        if let Some(sid) = task_to_session.get(&row.name) {
+            if let Some(session) = sessions.get(sid) {
+                return ui::RowDecoration {
+                    icon_override: Some((
+                        format!("\u{1f916}{} ", session.status().indicator()),
+                        ui::status_style(&row.status),
+                    )),
+                    after_name: vec![Span::styled(
+                        format!(" {sid}"),
+                        Style::default().fg(Color::Cyan),
+                    )],
+                };
+            }
+        }
+        // Externally-claimed active task: 👽 + assignee name
+        if row.status == "active" {
+            if let Some(ref assignee) = row.assignee {
+                return ui::RowDecoration {
+                    icon_override: Some((
+                        format!("\u{1f47d}{}  ", ui::icon_for_task(row)),
+                        ui::status_style(&row.status),
+                    )),
+                    after_name: vec![Span::styled(
+                        format!(" {assignee}"),
+                        Style::default().fg(Color::Cyan),
+                    )],
+                };
+            }
+        }
+        ui::RowDecoration::default()
+    });
 
     let active = app.sessions.len();
     let title = if app.manual {
@@ -238,37 +202,4 @@ pub fn render_help(frame: &mut Frame) {
     ];
 
     frame.render_widget(Paragraph::new(help_text), inner);
-}
-
-pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str, message: &str) {
-    let term = frame.area();
-    let width = 50.min(term.width.saturating_sub(4));
-    let height = 5.min(term.height.saturating_sub(2));
-    let area = ui::centered_rect(width, height, term);
-    frame.render_widget(Clear, area);
-
-    let title = format!(" {action} ");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let text = vec![
-        Line::from(vec![
-            Span::raw("Task "),
-            Span::styled(task_name, Style::default().bold()),
-            Span::raw(format!(" {message}")),
-        ]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::raw("Proceed? "),
-            Span::styled("y", Style::default().fg(Color::Green).bold()),
-            Span::raw("/"),
-            Span::styled("n", Style::default().fg(Color::Red).bold()),
-        ]),
-    ];
-
-    frame.render_widget(Paragraph::new(text), inner);
 }

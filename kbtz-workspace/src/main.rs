@@ -401,13 +401,6 @@ fn tree_mode(app: &mut App, running: &Arc<AtomicBool>) -> Result<Action> {
     result
 }
 
-enum TreeMode {
-    Normal,
-    Help,
-    ConfirmDone(String),
-    ConfirmPause(String),
-}
-
 /// Build the confirmation message for an active task based on whether the
 /// workspace owns the session.
 fn active_task_message(app: &App, name: &str) -> String {
@@ -423,12 +416,13 @@ fn tree_loop(
     app: &mut App,
     running: &Arc<AtomicBool>,
 ) -> Result<Action> {
+    use kbtz::ui::TreeKeyAction;
+
     // Catch any DB changes that happened during zoomed mode.
     app.refresh_tree()?;
     app.tree_dirty = false;
 
     let watchers = Watchers::new(app)?;
-    let mut mode = TreeMode::Normal;
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -437,17 +431,17 @@ fn tree_loop(
 
         terminal.draw(|frame| {
             tree::render(frame, app);
-            match &mode {
-                TreeMode::Help => tree::render_help(frame),
-                TreeMode::ConfirmDone(name) => {
+            match &app.tree.mode {
+                kbtz::ui::TreeMode::Help => tree::render_help(frame),
+                kbtz::ui::TreeMode::ConfirmDone(name) => {
                     let msg = active_task_message(app, name);
-                    tree::render_confirm(frame, "Done", name, &msg);
+                    kbtz::ui::render_confirm(frame, "Done", name, &msg);
                 }
-                TreeMode::ConfirmPause(name) => {
+                kbtz::ui::TreeMode::ConfirmPause(name) => {
                     let msg = active_task_message(app, name);
-                    tree::render_confirm(frame, "Pause", name, &msg);
+                    kbtz::ui::render_confirm(frame, "Pause", name, &msg);
                 }
-                TreeMode::Normal => {}
+                kbtz::ui::TreeMode::Normal => {}
             }
         })?;
 
@@ -462,161 +456,72 @@ fn tree_loop(
                     continue;
                 }
 
-                if matches!(mode, TreeMode::Help) {
-                    match key.code {
-                        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-                            mode = TreeMode::Normal;
+                match app.tree.handle_key(key) {
+                    TreeKeyAction::Quit => return Ok(Action::Quit),
+                    TreeKeyAction::Refresh => app.refresh_tree()?,
+                    TreeKeyAction::Pause(name) => match kbtz::ops::pause_task(&app.conn, &name) {
+                        Ok(()) => app.refresh_tree()?,
+                        Err(e) => app.tree.error = Some(e.to_string()),
+                    },
+                    TreeKeyAction::Unpause(name) => {
+                        match kbtz::ops::unpause_task(&app.conn, &name) {
+                            Ok(()) => app.refresh_tree()?,
+                            Err(e) => app.tree.error = Some(e.to_string()),
+                        }
+                    }
+                    TreeKeyAction::MarkDone(name) => {
+                        kbtz::debug_log::log(&format!("mark done: {name}"));
+                        match kbtz::ops::mark_done(&app.conn, &name) {
+                            Ok(()) => {
+                                app.refresh_tree()?;
+                                kbtz::debug_log::log("mark done: refresh_tree complete");
+                            }
+                            Err(e) => app.tree.error = Some(e.to_string()),
+                        }
+                    }
+                    TreeKeyAction::ForceUnassign(name) => {
+                        match kbtz::ops::force_unassign_task(&app.conn, &name) {
+                            Ok(()) => app.refresh_tree()?,
+                            Err(e) => app.tree.error = Some(e.to_string()),
+                        }
+                    }
+                    TreeKeyAction::Unhandled => match key.code {
+                        KeyCode::Enter => {
+                            if let Some(name) = app.tree.selected_name() {
+                                if app.task_to_session.contains_key(name) {
+                                    return Ok(Action::ZoomIn(name.to_string()));
+                                } else {
+                                    app.tree.error = Some("no active session for this task".into());
+                                }
+                            }
+                        }
+                        KeyCode::Char('s') => {
+                            if let Some(name) = app.tree.selected_name() {
+                                let name = name.to_string();
+                                if let Err(e) = app.spawn_for_task(&name) {
+                                    app.tree.error = Some(e.to_string());
+                                }
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            if let Some(name) = app.tree.selected_name() {
+                                let name = name.to_string();
+                                app.restart_session(&name);
+                            }
+                        }
+                        KeyCode::Tab => {
+                            if let Some(task) = app.next_needs_input_session(None) {
+                                return Ok(Action::ZoomIn(task));
+                            } else {
+                                app.tree.error = Some("no sessions need input".into());
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            return Ok(Action::TopLevel);
                         }
                         _ => {}
-                    }
-                    continue;
-                }
-
-                match &mode {
-                    TreeMode::ConfirmDone(name) => {
-                        let name = name.clone();
-                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
-                            kbtz::debug_log::log(&format!("confirm done: {name}"));
-                            if let Err(e) = kbtz::ops::mark_done(&app.conn, &name) {
-                                app.tree.error = Some(e.to_string());
-                            }
-                            app.refresh_tree()?;
-                            app.tree_dirty = false;
-                            kbtz::debug_log::log("confirm done: refresh_tree complete");
-                        }
-                        mode = TreeMode::Normal;
-                        continue;
-                    }
-                    TreeMode::ConfirmPause(name) => {
-                        let name = name.clone();
-                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
-                            kbtz::debug_log::log(&format!("confirm pause: {name}"));
-                            if let Err(e) = kbtz::ops::pause_task(&app.conn, &name) {
-                                app.tree.error = Some(e.to_string());
-                            }
-                            app.refresh_tree()?;
-                            app.tree_dirty = false;
-                            kbtz::debug_log::log("confirm pause: refresh_tree complete");
-                        }
-                        mode = TreeMode::Normal;
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                app.tree.error = None;
-
-                match key.code {
-                    KeyCode::Char('q') => {
-                        return Ok(Action::Quit);
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        app.move_down();
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        app.move_up();
-                    }
-                    KeyCode::Char(' ') => {
-                        app.toggle_collapse();
-                        app.refresh_tree()?;
-                        app.tree_dirty = false;
-                    }
-                    KeyCode::Enter => {
-                        if let Some(name) = app.selected_name() {
-                            if app.task_to_session.contains_key(name) {
-                                return Ok(Action::ZoomIn(name.to_string()));
-                            } else {
-                                app.tree.error = Some("no active session for this task".into());
-                            }
-                        }
-                    }
-                    KeyCode::Char('p') => {
-                        if let Some(name) = app.selected_name() {
-                            let name = name.to_string();
-                            let status = app.tree.rows[app.tree.cursor].status.as_str();
-                            let result = match status {
-                                "paused" => kbtz::ops::unpause_task(&app.conn, &name),
-                                "open" => kbtz::ops::pause_task(&app.conn, &name),
-                                "active" => {
-                                    mode = TreeMode::ConfirmPause(name);
-                                    continue;
-                                }
-                                _ => {
-                                    app.tree.error = Some(format!("cannot pause {status} task"));
-                                    Ok(())
-                                }
-                            };
-                            match result {
-                                Ok(()) => {
-                                    app.refresh_tree()?;
-                                    app.tree_dirty = false;
-                                }
-                                Err(e) => app.tree.error = Some(e.to_string()),
-                            }
-                        }
-                    }
-                    KeyCode::Char('d') => {
-                        if let Some(name) = app.selected_name() {
-                            let name = name.to_string();
-                            let status = app.tree.rows[app.tree.cursor].status.as_str();
-                            match status {
-                                "done" => {
-                                    app.tree.error = Some("task is already done".into());
-                                }
-                                "active" => {
-                                    mode = TreeMode::ConfirmDone(name);
-                                    continue;
-                                }
-                                _ => match kbtz::ops::mark_done(&app.conn, &name) {
-                                    Ok(()) => {
-                                        app.refresh_tree()?;
-                                        app.tree_dirty = false;
-                                    }
-                                    Err(e) => app.tree.error = Some(e.to_string()),
-                                },
-                            }
-                        }
-                    }
-                    KeyCode::Char('U') => {
-                        if let Some(name) = app.selected_name() {
-                            let name = name.to_string();
-                            match kbtz::ops::force_unassign_task(&app.conn, &name) {
-                                Ok(()) => {
-                                    app.refresh_tree()?;
-                                    app.tree_dirty = false;
-                                }
-                                Err(e) => app.tree.error = Some(e.to_string()),
-                            }
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        if let Some(name) = app.selected_name() {
-                            let name = name.to_string();
-                            if let Err(e) = app.spawn_for_task(&name) {
-                                app.tree.error = Some(e.to_string());
-                            }
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        if let Some(name) = app.selected_name() {
-                            let name = name.to_string();
-                            app.restart_session(&name);
-                        }
-                    }
-                    KeyCode::Tab => {
-                        if let Some(task) = app.next_needs_input_session(None) {
-                            return Ok(Action::ZoomIn(task));
-                        } else {
-                            app.tree.error = Some("no sessions need input".into());
-                        }
-                    }
-                    KeyCode::Char('c') => {
-                        return Ok(Action::TopLevel);
-                    }
-                    KeyCode::Char('?') => {
-                        mode = TreeMode::Help;
-                    }
-                    _ => {}
+                    },
+                    TreeKeyAction::Continue => {}
                 }
             }
         }

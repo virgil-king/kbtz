@@ -469,7 +469,7 @@ where
 }
 
 /// Render a confirmation dialog overlay.
-pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str) {
+pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str, message: &str) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
     let height = 5.min(term.height.saturating_sub(2));
@@ -488,7 +488,7 @@ pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str) {
         Line::from(vec![
             Span::raw("Task "),
             Span::styled(task_name, Style::default().bold()),
-            Span::raw(" has an active session."),
+            Span::raw(format!(" {message}")),
         ]),
         Line::raw(""),
         Line::from(vec![
@@ -693,8 +693,26 @@ mod tests {
     fn tree_view_move_down_clamps() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
         tv.rows = vec![
-            TreeRow { name: "a".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![false], blocked_by: vec![] },
-            TreeRow { name: "b".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
+            TreeRow {
+                name: "a".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 0,
+                has_children: false,
+                is_last_at_depth: vec![false],
+                blocked_by: vec![],
+            },
+            TreeRow {
+                name: "b".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 0,
+                has_children: false,
+                is_last_at_depth: vec![true],
+                blocked_by: vec![],
+            },
         ];
         tv.move_down();
         assert_eq!(tv.cursor, 1);
@@ -705,9 +723,16 @@ mod tests {
     #[test]
     fn tree_view_move_up_clamps() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "a".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "a".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         tv.move_up(); // already at 0
         assert_eq!(tv.cursor, 0);
     }
@@ -715,9 +740,16 @@ mod tests {
     #[test]
     fn tree_view_toggle_collapse() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "parent".into(), status: "open".into(), description: String::new(), depth: 0, has_children: true, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "parent".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: true,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         assert!(!tv.collapsed.contains("parent"));
         tv.toggle_collapse();
         assert!(tv.collapsed.contains("parent"));
@@ -736,9 +768,16 @@ mod tests {
     #[test]
     fn tree_view_clamp_cursor_shrunk() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "a".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "a".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         tv.cursor = 5;
         tv.clamp_cursor();
         assert_eq!(tv.cursor, 0);
@@ -754,9 +793,16 @@ mod tests {
     #[test]
     fn handle_key_space_returns_refresh() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "a".into(), status: "open".into(), description: String::new(), depth: 0, has_children: true, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "a".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: true,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char(' '));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
         assert!(tv.collapsed.contains("a"));
@@ -765,9 +811,16 @@ mod tests {
     #[test]
     fn handle_key_done_refuse_active() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "active".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "active".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('d'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
         assert!(tv.error.is_some());
@@ -776,9 +829,16 @@ mod tests {
     #[test]
     fn handle_key_done_confirm_active() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Confirm);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "active".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "active".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('d'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
         assert!(matches!(tv.mode, TreeMode::ConfirmDone(_)));
@@ -792,9 +852,16 @@ mod tests {
     #[test]
     fn handle_key_done_open_task() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('d'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::MarkDone(_)));
     }
@@ -802,9 +869,16 @@ mod tests {
     #[test]
     fn handle_key_pause_open() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('p'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Pause(_)));
     }
@@ -812,9 +886,16 @@ mod tests {
     #[test]
     fn handle_key_unpause() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "paused".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "paused".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('p'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Unpause(_)));
     }
@@ -822,9 +903,16 @@ mod tests {
     #[test]
     fn handle_key_pause_confirm_active() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Confirm);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "active".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "active".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('p'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
         assert!(matches!(tv.mode, TreeMode::ConfirmPause(_)));
@@ -833,11 +921,21 @@ mod tests {
     #[test]
     fn handle_key_force_unassign() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        tv.rows = vec![
-            TreeRow { name: "t".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        tv.rows = vec![TreeRow {
+            name: "t".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let key = KeyEvent::from(KeyCode::Char('U'));
-        assert!(matches!(tv.handle_key(key), TreeKeyAction::ForceUnassign(_)));
+        assert!(matches!(
+            tv.handle_key(key),
+            TreeKeyAction::ForceUnassign(_)
+        ));
     }
 
     #[test]
@@ -882,9 +980,16 @@ mod tests {
     #[test]
     fn build_tree_items_default_decoration() {
         let collapsed = HashSet::new();
-        let rows = vec![
-            TreeRow { name: "task".into(), status: "open".into(), description: "desc".into(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        let rows = vec![TreeRow {
+            name: "task".into(),
+            status: "open".into(),
+            description: "desc".into(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let items = build_tree_items(&rows, &collapsed, |_| RowDecoration::default());
         assert_eq!(items.len(), 1);
     }
@@ -892,9 +997,16 @@ mod tests {
     #[test]
     fn build_tree_items_with_decoration() {
         let collapsed = HashSet::new();
-        let rows = vec![
-            TreeRow { name: "task".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
-        ];
+        let rows = vec![TreeRow {
+            name: "task".into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }];
         let items = build_tree_items(&rows, &collapsed, |_| RowDecoration {
             icon_override: Some(("X ".into(), Style::default())),
             after_name: vec![Span::raw(" extra")],
@@ -907,8 +1019,26 @@ mod tests {
         let mut collapsed = HashSet::new();
         collapsed.insert("parent".to_string());
         let rows = vec![
-            TreeRow { name: "parent".into(), status: "open".into(), description: String::new(), depth: 0, has_children: true, is_last_at_depth: vec![true], blocked_by: vec![] },
-            TreeRow { name: "leaf".into(), status: "open".into(), description: String::new(), depth: 0, has_children: false, is_last_at_depth: vec![true], blocked_by: vec![] },
+            TreeRow {
+                name: "parent".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 0,
+                has_children: true,
+                is_last_at_depth: vec![true],
+                blocked_by: vec![],
+            },
+            TreeRow {
+                name: "leaf".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 0,
+                has_children: false,
+                is_last_at_depth: vec![true],
+                blocked_by: vec![],
+            },
         ];
         let items = build_tree_items(&rows, &collapsed, |_| RowDecoration::default());
         assert_eq!(items.len(), 2);
