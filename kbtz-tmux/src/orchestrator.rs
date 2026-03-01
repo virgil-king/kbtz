@@ -118,10 +118,8 @@ impl Orchestrator {
             }
         };
         let mut map = HashMap::new();
-        for row in rows {
-            if let Ok((name, status, assignee)) = row {
-                map.insert(name, TaskSnapshot { status, assignee });
-            }
+        for (name, status, assignee) in rows.flatten() {
+            map.insert(name, TaskSnapshot { status, assignee });
         }
         map
     }
