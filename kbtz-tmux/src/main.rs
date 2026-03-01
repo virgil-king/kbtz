@@ -1,4 +1,5 @@
 mod lifecycle;
+mod orchestrator;
 mod tmux;
 
 use anyhow::Result;

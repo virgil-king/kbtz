@@ -1,11 +1,11 @@
 mod app;
 mod backend;
-mod config;
 mod lifecycle;
-mod prompt;
 mod session;
 mod shepherd_session;
 mod tree;
+
+use kbtz_workspace::{config, prompt};
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
