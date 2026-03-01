@@ -1,3 +1,5 @@
+pub mod config;
+pub mod prompt;
 pub mod protocol;
 
 /// Max scrollback rows retained per session for the scroll-back viewer.
