@@ -133,7 +133,8 @@ impl Orchestrator {
             })
             .context("failed to execute batch task query")?;
         let mut map = HashMap::new();
-        for (name, status, assignee) in rows.flatten() {
+        for row in rows {
+            let (name, status, assignee) = row.context("failed to read task row")?;
             map.insert(name, TaskSnapshot { status, assignee });
         }
         Ok(map)
