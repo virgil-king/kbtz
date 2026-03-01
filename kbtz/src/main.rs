@@ -367,12 +367,40 @@ fn tokenize_exec_line(line: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
-/// Pre-process exec input to resolve heredoc syntax.
+/// Check whether double quotes are balanced in a string, respecting escape sequences.
+///
+/// Returns `true` when every opening `"` has a matching closing `"`.
+fn has_balanced_quotes(s: &str) -> bool {
+    let mut in_quotes = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' => in_quotes = false,
+                '\\' => {
+                    if matches!(chars.peek(), Some(&'"') | Some(&'\\')) {
+                        chars.next();
+                    }
+                }
+                _ => {}
+            }
+        } else if c == '"' {
+            in_quotes = true;
+        }
+    }
+    !in_quotes
+}
+
+/// Pre-process exec input to resolve heredoc syntax and multiline quoted strings.
 ///
 /// A token of the form `<<DELIMITER` causes subsequent lines to be accumulated
 /// until a line matching `DELIMITER` (after trimming) is found. The accumulated
 /// text replaces the `<<DELIMITER` token. Only one heredoc per command line is
 /// supported.
+///
+/// Double-quoted strings may span multiple lines. When a line has unbalanced
+/// quotes, subsequent lines are joined (with embedded newlines) until the
+/// quotes are balanced.
 fn resolve_heredocs(input: &str) -> Result<Vec<(usize, String, Vec<String>)>> {
     let lines: Vec<&str> = input.lines().collect();
     let mut result = Vec::new();
@@ -387,7 +415,18 @@ fn resolve_heredocs(input: &str) -> Result<Vec<(usize, String, Vec<String>)>> {
             continue;
         }
 
-        let mut tokens = tokenize_exec_line(line)
+        // Accumulate continuation lines when double quotes are unbalanced.
+        let mut accumulated = line.to_string();
+        while !has_balanced_quotes(&accumulated) {
+            if i >= lines.len() {
+                bail!("line {lineno}: unterminated double quote");
+            }
+            accumulated.push('\n');
+            accumulated.push_str(lines[i]);
+            i += 1;
+        }
+
+        let mut tokens = tokenize_exec_line(&accumulated)
             .with_context(|| format!("line {lineno}: invalid quoting: {line}"))?;
 
         // Find heredoc markers
@@ -903,6 +942,40 @@ DESC
         assert_eq!(result.unwrap(), None);
     }
 
+    // --- has_balanced_quotes unit tests ---
+
+    #[test]
+    fn balanced_quotes_simple() {
+        assert!(has_balanced_quotes(r#"hello "world""#));
+    }
+
+    #[test]
+    fn balanced_quotes_no_quotes() {
+        assert!(has_balanced_quotes("no quotes here"));
+    }
+
+    #[test]
+    fn unbalanced_quotes_open() {
+        assert!(!has_balanced_quotes(r#"note task "oops"#));
+    }
+
+    #[test]
+    fn balanced_quotes_escaped_quote() {
+        assert!(has_balanced_quotes(r#""say \"hello\"""#));
+    }
+
+    #[test]
+    fn unbalanced_quotes_escaped_closing() {
+        // The \" escapes the quote, so the string is still open
+        assert!(!has_balanced_quotes(r#""ends with \""#));
+    }
+
+    #[test]
+    fn balanced_quotes_escaped_backslash_before_quote() {
+        // \\\\" means: escaped backslash + closing quote
+        assert!(has_balanced_quotes(r#""trailing backslash\\""#));
+    }
+
     // --- tokenize_exec_line unit tests ---
 
     #[test]
@@ -1058,5 +1131,53 @@ note my-task \"It's got 'single quotes' inside\"
         let notes = ops::list_notes(&conn, "my-task").unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].content, "It's got 'single quotes' inside");
+    }
+
+    // --- multiline quoted string tests ---
+
+    #[test]
+    fn exec_note_with_newline_in_double_quotes() {
+        let conn = test_conn();
+        let input = "add my-task \"A task\"\nnote my-task \"line one\nline two\"\n";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "line one\nline two");
+    }
+
+    #[test]
+    fn exec_add_with_multiline_note_flag() {
+        let conn = test_conn();
+        let input = "add my-task \"A task\" -n \"first\nsecond\nthird\"\n";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn exec_multiline_quote_with_heredoc_on_next_command() {
+        // A multiline quoted string on one command shouldn't interfere with
+        // a heredoc on a subsequent command.
+        let conn = test_conn();
+        let input = "\
+add my-task \"A task\" -n \"line one\nline two\"
+note my-task <<EOF
+heredoc body
+EOF
+";
+        run_exec(&conn, input).unwrap();
+        let notes = ops::list_notes(&conn, "my-task").unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].content, "line one\nline two");
+        assert_eq!(notes[1].content, "heredoc body");
+    }
+
+    #[test]
+    fn exec_unterminated_multiline_quote_errors() {
+        let conn = test_conn();
+        // Quote opened but never closed across all remaining lines
+        let input = "add my-task \"A task\"\nnote my-task \"oops\n";
+        assert!(run_exec(&conn, input).is_err());
     }
 }
