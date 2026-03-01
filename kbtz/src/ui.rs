@@ -267,9 +267,7 @@ impl TreeView {
             self.cursor = 0;
             self.list_state.select(None);
         } else {
-            if self.cursor >= self.rows.len() {
-                self.cursor = self.rows.len() - 1;
-            }
+            self.cursor = self.cursor.min(self.rows.len() - 1);
             self.list_state.select(Some(self.cursor));
         }
     }
@@ -455,7 +453,7 @@ where
 
             let mut spans = vec![
                 Span::raw(prefix),
-                Span::raw(collapse_indicator.to_string()),
+                Span::raw(collapse_indicator),
                 Span::styled(icon, icon_style),
                 Span::styled(row.name.clone(), Style::default().bold()),
             ];
