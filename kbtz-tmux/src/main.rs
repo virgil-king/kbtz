@@ -1,3 +1,5 @@
+mod tmux;
+
 use anyhow::Result;
 use clap::Parser;
 
