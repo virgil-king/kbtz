@@ -1,15 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use ratatui::widgets::ListState;
 use rusqlite::ffi::ErrorCode;
 use rusqlite::Connection;
 
 use kbtz::model::Task;
 use kbtz::ops;
-use kbtz::ui::TreeRow;
+use kbtz::ui::{ActiveTaskPolicy, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
@@ -22,14 +21,6 @@ use crate::shepherd_session::ShepherdSession;
 pub struct TermSize {
     pub rows: u16,
     pub cols: u16,
-}
-
-pub struct TreeView {
-    pub rows: Vec<TreeRow>,
-    pub cursor: usize,
-    pub list_state: ListState,
-    pub collapsed: HashSet<String>,
-    pub error: Option<String>,
 }
 
 pub struct App {
@@ -128,13 +119,7 @@ impl App {
             persistent_sessions,
             toplevel: None,
             term,
-            tree: TreeView {
-                rows: Vec::new(),
-                cursor: 0,
-                list_state: ListState::default(),
-                collapsed: HashSet::new(),
-                error: None,
-            },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
         };
         app.refresh_tree()?;
@@ -176,15 +161,7 @@ impl App {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
         tasks.retain(|t| t.status != "done");
         self.tree.rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
-        if !self.tree.rows.is_empty() {
-            if self.tree.cursor >= self.tree.rows.len() {
-                self.tree.cursor = self.tree.rows.len() - 1;
-            }
-            self.tree.list_state.select(Some(self.tree.cursor));
-        } else {
-            self.tree.cursor = 0;
-            self.tree.list_state.select(None);
-        }
+        self.tree.clamp_cursor();
         Ok(())
     }
 
@@ -597,40 +574,6 @@ impl App {
         }
     }
 
-    // Navigation
-
-    pub fn move_up(&mut self) {
-        if self.tree.cursor > 0 {
-            self.tree.cursor -= 1;
-            self.tree.list_state.select(Some(self.tree.cursor));
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        if !self.tree.rows.is_empty() && self.tree.cursor < self.tree.rows.len() - 1 {
-            self.tree.cursor += 1;
-            self.tree.list_state.select(Some(self.tree.cursor));
-        }
-    }
-
-    pub fn toggle_collapse(&mut self) {
-        if let Some(row) = self.tree.rows.get(self.tree.cursor) {
-            if row.has_children {
-                let name = row.name.clone();
-                if !self.tree.collapsed.remove(&name) {
-                    self.tree.collapsed.insert(name);
-                }
-            }
-        }
-    }
-
-    pub fn selected_name(&self) -> Option<&str> {
-        self.tree
-            .rows
-            .get(self.tree.cursor)
-            .map(|r| r.name.as_str())
-    }
-
     /// Get an ordered list of session IDs for cycling.
     pub fn session_ids_ordered(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.sessions.keys().cloned().collect();
@@ -896,13 +839,7 @@ mod tests {
             persistent_sessions: false,
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
-            tree: TreeView {
-                rows: Vec::new(),
-                cursor: 0,
-                list_state: ListState::default(),
-                collapsed: HashSet::new(),
-                error: None,
-            },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
         };
         (app, status_dir)

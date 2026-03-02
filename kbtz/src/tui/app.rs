@@ -1,19 +1,10 @@
-use std::collections::HashSet;
-
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::model::Note;
 use crate::ops;
-use crate::ui::{self, TreeRow};
+use crate::ui::{self, ActiveTaskPolicy, TreeView};
 use crate::validate::validate_name;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    AddTask,
-    Help,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddField {
@@ -82,27 +73,19 @@ impl AddForm {
 }
 
 pub struct App {
-    pub rows: Vec<TreeRow>,
-    pub cursor: usize,
-    pub collapsed: HashSet<String>,
+    pub tree: TreeView,
     pub show_notes: bool,
     pub notes: Vec<Note>,
-    pub mode: Mode,
     pub add_form: Option<AddForm>,
-    pub error: Option<String>,
 }
 
 impl App {
     pub fn new(conn: &Connection, root: Option<&str>) -> Result<Self> {
         let mut app = App {
-            rows: Vec::new(),
-            cursor: 0,
-            collapsed: HashSet::new(),
+            tree: TreeView::new(ActiveTaskPolicy::Refuse),
             show_notes: false,
             notes: Vec::new(),
-            mode: Mode::Normal,
             add_form: None,
-            error: None,
         };
         app.refresh(conn, root)?;
         Ok(app)
@@ -111,15 +94,8 @@ impl App {
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
         let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
         tasks.retain(|t| t.status != "done");
-        self.rows = ui::flatten_tree(&tasks, &self.collapsed, conn)?;
-        // Clamp cursor
-        if !self.rows.is_empty() {
-            if self.cursor >= self.rows.len() {
-                self.cursor = self.rows.len() - 1;
-            }
-        } else {
-            self.cursor = 0;
-        }
+        self.tree.rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
+        self.tree.clamp_cursor();
         // Refresh notes if panel is open
         if self.show_notes {
             self.load_notes(conn)?;
@@ -127,36 +103,13 @@ impl App {
         Ok(())
     }
 
-    pub fn move_up(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-        }
-    }
-
-    pub fn move_down(&mut self) {
-        if !self.rows.is_empty() && self.cursor < self.rows.len() - 1 {
-            self.cursor += 1;
-        }
-    }
-
-    pub fn toggle_collapse(&mut self) {
-        if let Some(row) = self.rows.get(self.cursor) {
-            if row.has_children {
-                let name = row.name.clone();
-                if !self.collapsed.remove(&name) {
-                    self.collapsed.insert(name);
-                }
-            }
-        }
-    }
-
     pub fn toggle_notes(&mut self) {
         self.show_notes = !self.show_notes;
     }
 
     pub fn load_notes(&mut self, conn: &Connection) -> Result<()> {
-        if let Some(row) = self.rows.get(self.cursor) {
-            self.notes = ops::list_notes(conn, &row.name)?;
+        if let Some(name) = self.tree.selected_name() {
+            self.notes = ops::list_notes(conn, name)?;
         } else {
             self.notes.clear();
         }
@@ -164,22 +117,20 @@ impl App {
     }
 
     pub fn selected_name(&self) -> Option<&str> {
-        self.rows.get(self.cursor).map(|r| r.name.as_str())
+        self.tree.selected_name()
     }
 
     pub fn enter_add_mode(&mut self, with_parent: bool) {
         let parent = if with_parent {
-            self.selected_name().map(|s| s.to_string())
+            self.tree.selected_name().map(|s| s.to_string())
         } else {
             None
         };
         self.add_form = Some(AddForm::new(parent));
-        self.mode = Mode::AddTask;
     }
 
     pub fn cancel_add_mode(&mut self) {
         self.add_form = None;
-        self.mode = Mode::Normal;
     }
 
     pub fn submit_add(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
@@ -206,7 +157,6 @@ impl App {
         ) {
             Ok(()) => {
                 self.add_form = None;
-                self.mode = Mode::Normal;
                 self.refresh(conn, root)?;
             }
             Err(e) => {
@@ -214,12 +164,5 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    pub fn toggle_help(&mut self) {
-        self.mode = match self.mode {
-            Mode::Help => Mode::Normal,
-            _ => Mode::Help,
-        };
     }
 }
