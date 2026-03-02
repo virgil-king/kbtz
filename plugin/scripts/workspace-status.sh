@@ -14,9 +14,21 @@ set -euo pipefail
 state="${1:?Usage: workspace-status.sh <idle|active|needs_input> [--force]}"
 force="${2:-}"
 
+# Diagnostic logging (enabled by KBTZ_DEBUG=<path>)
+_hook_log() {
+  [ -n "${KBTZ_DEBUG:-}" ] || return 0
+  printf '[%s] %s\n' "$(date -Iseconds)" "$*" >> "$KBTZ_DEBUG" 2>/dev/null || true
+}
+
 # Sanitize session ID for filename (ws/3 -> ws-3)
 filename="${KBTZ_SESSION_ID//\//-}"
 status_file="${KBTZ_WORKSPACE_DIR}/${filename}"
+
+# Read previous state for change detection
+prev=""
+[ -f "$status_file" ] && prev=$(cat "$status_file" 2>/dev/null) || true
+
+_hook_log "workspace-status: sid=$KBTZ_SESSION_ID state=$state prev=${prev:-<none>} task=${KBTZ_TASK:-?}"
 
 # Don't let Stop (idle) overwrite needs_input — the Notification hook fires
 # before Stop when the agent calls AskUserQuestion, so the sequence is:
@@ -24,8 +36,7 @@ status_file="${KBTZ_WORKSPACE_DIR}/${filename}"
 # Without this guard the session would show idle when it's actually waiting.
 # SessionEnd passes --force to bypass this (a dead session can't need input).
 if [ "$state" = "idle" ] && [ "$force" != "--force" ]; then
-  current=$(cat "$status_file" 2>/dev/null) || true
-  [ "$current" = "needs_input" ] && exit 0
+  [ "$prev" = "needs_input" ] && exit 0
 fi
 
 printf '%s' "$state" > "$status_file"
