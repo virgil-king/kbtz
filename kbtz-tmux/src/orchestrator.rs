@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use log::{error, info, warn};
 use rusqlite::Connection;
 
-use kbtz::{db, ops, watch};
+use kbtz::{db, ops, paths, watch};
 use kbtz_workspace::config::Config;
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
@@ -64,14 +64,8 @@ impl Orchestrator {
         prefer: Option<String>,
         running: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let db_path = std::env::var("KBTZ_DB").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            format!("{home}/.kbtz/kbtz.db")
-        });
-        let workspace_dir = std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            format!("{home}/.kbtz/workspace")
-        });
+        let db_path = paths::db_path();
+        let workspace_dir = paths::workspace_dir();
         let conn = db::open(&db_path)?;
         db::init(&conn)?;
         let config = Config::load()?;
@@ -337,8 +331,48 @@ impl Orchestrator {
             }
         }
 
+        self.cleanup_stale_status_files();
+
         info!("Reconciliation done ({} adopted)", self.windows.len());
         Ok(())
+    }
+
+    /// Delete status files that don't correspond to any tracked window.
+    fn cleanup_stale_status_files(&self) {
+        let live_sids: HashSet<&str> = self.windows.keys().map(|s| s.as_str()).collect();
+
+        let entries = match std::fs::read_dir(&self.workspace_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to read workspace dir for cleanup: {e}");
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            // Skip non-status files (locks, sentinels, sockets, pid files).
+            if name.contains('.')
+                || name == "pane-exited"
+                || name == "orchestrator"
+            {
+                continue;
+            }
+            let sid = paths::filename_to_session_id(name);
+            if !live_sids.contains(sid.as_str()) {
+                info!("Removing stale status file: {name} (sid={sid})");
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!("Failed to remove stale status file {name}: {e}");
+                }
+            }
+        }
     }
 
     /// Run the main loop. Fully event-driven:
