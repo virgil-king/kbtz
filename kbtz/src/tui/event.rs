@@ -14,6 +14,7 @@ pub enum KeyAction {
     Unpause(String),
     MarkDone(String),
     ForceUnassign(String),
+    RunAction,
     Continue,
 }
 
@@ -33,7 +34,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         TreeKeyAction::Continue => KeyAction::Continue,
         TreeKeyAction::Unhandled => match key.code {
             KeyCode::Esc => KeyAction::Quit,
-            KeyCode::Enter | KeyCode::Char('n') => {
+            KeyCode::Enter => KeyAction::RunAction,
+            KeyCode::Char('n') => {
                 app.toggle_notes();
                 KeyAction::Continue
             }

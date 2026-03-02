@@ -566,9 +566,10 @@ fn run() -> Result<()> {
         Command::Watch {
             root,
             poll_interval,
+            action,
         } => {
             let conn = open_db(&db_path)?;
-            tui::run(&db_path, &conn, root.as_deref(), poll_interval)?;
+            tui::run(&db_path, &conn, root.as_deref(), poll_interval, action.as_deref())?;
         }
 
         Command::Wait => {

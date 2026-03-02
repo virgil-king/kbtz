@@ -266,6 +266,9 @@ pub enum Command {
         /// Poll interval in milliseconds
         #[arg(long, default_value = "1000")]
         poll_interval: u64,
+        /// Shell command to run on Enter (receives KBTZ_TASK, KBTZ_TASK_STATUS, KBTZ_TASK_ASSIGNEE env vars)
+        #[arg(long)]
+        action: Option<String>,
     },
 
     /// Wait for database changes (blocks until a change occurs)
