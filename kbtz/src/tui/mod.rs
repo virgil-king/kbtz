@@ -4,6 +4,7 @@ mod event;
 mod tree;
 
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,8 +25,10 @@ pub fn run(
     root: Option<&str>,
     poll_interval: u64,
     action: Option<&str>,
+    workspace_dir: Option<&str>,
 ) -> Result<()> {
-    let mut app = App::new(conn, root)?;
+    let workspace_dir = workspace_dir.map(PathBuf::from);
+    let mut app = App::new(conn, root, workspace_dir.as_deref())?;
 
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -33,7 +36,15 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app, db_path, conn, root, poll_interval, action);
+    let result = run_loop(
+        &mut terminal,
+        &mut app,
+        db_path,
+        conn,
+        root,
+        poll_interval,
+        action,
+    );
 
     terminal::disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -52,8 +63,15 @@ fn run_loop(
 ) -> Result<()> {
     let poll_duration = Duration::from_millis(poll_interval);
 
-    // Set up file watcher
+    // Set up file watcher for DB
     let (_watcher, rx) = watch::watch_db(db_path)?;
+
+    // Set up file watcher for workspace status directory
+    let status_watcher = app
+        .workspace_dir
+        .as_deref()
+        .map(watch::watch_dir)
+        .transpose()?;
 
     loop {
         terminal.draw(|frame| tree::render(frame, app))?;
@@ -142,7 +160,10 @@ fn run_loop(
                                         .arg(cmd)
                                         .env("KBTZ_TASK", &row.name)
                                         .env("KBTZ_TASK_STATUS", &row.status)
-                                        .env("KBTZ_TASK_ASSIGNEE", row.assignee.as_deref().unwrap_or(""))
+                                        .env(
+                                            "KBTZ_TASK_ASSIGNEE",
+                                            row.assignee.as_deref().unwrap_or(""),
+                                        )
                                         .status();
 
                                     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
@@ -154,7 +175,8 @@ fn run_loop(
                                             app.tree.error = Some(format!("action failed: {e}"));
                                         }
                                         Ok(exit) if !exit.success() => {
-                                            app.tree.error = Some(format!("action exited with {exit}"));
+                                            app.tree.error =
+                                                Some(format!("action exited with {exit}"));
                                         }
                                         Ok(_) => {}
                                     }
@@ -175,10 +197,18 @@ fn run_loop(
             }
         }
 
-        // Check for file changes (non-blocking)
+        // Check for DB file changes (non-blocking)
         if watch::wait_for_change(&rx, Duration::ZERO) {
             watch::drain_events(&rx);
             app.refresh(conn, root)?;
+        }
+
+        // Check for workspace status file changes (non-blocking)
+        if let Some((_, ref status_rx)) = status_watcher {
+            if watch::wait_for_change(status_rx, Duration::ZERO) {
+                watch::drain_events(status_rx);
+                app.refresh_statuses();
+            }
         }
     }
 }

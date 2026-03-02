@@ -313,9 +313,7 @@ impl App {
             };
             match claim {
                 Some(task_name) => {
-                    kbtz::debug_log::log(&format!(
-                        "spawn: claimed {task_name} as {session_id}"
-                    ));
+                    kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
                     let task = ops::get_task(&self.conn, &task_name)?;
                     match self.spawn_session(&task, &session_id) {
                         Ok(session) => {

@@ -3,12 +3,15 @@
 //! Used by both `kbtz watch` (the CLI TUI) and `kbtz-workspace`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, ListItem, ListState, Paragraph};
 use rusqlite::Connection;
+
+use crate::paths;
 
 use crate::model::Task;
 use crate::ops;
@@ -400,21 +403,89 @@ pub struct RowDecoration {
     pub after_name: Vec<Span<'static>>,
 }
 
+/// Extension point for per-row tree customization.
+pub trait TreeDecorator {
+    fn decorate(&self, row: &TreeRow) -> RowDecoration;
+}
+
+/// No-op decorator — returns default decoration for every row.
+pub struct DefaultDecorator;
+
+impl TreeDecorator for DefaultDecorator {
+    fn decorate(&self, _row: &TreeRow) -> RowDecoration {
+        RowDecoration::default()
+    }
+}
+
+/// Map a session status string to its indicator emoji.
+pub fn session_indicator(status: &str) -> &'static str {
+    match status.trim() {
+        "active" => "\u{1f7e2}",      // 🟢
+        "idle" => "\u{1f7e1}",        // 🟡
+        "needs_input" => "\u{1f514}", // 🔔
+        _ => "\u{23f3}",              // ⏳
+    }
+}
+
+/// Decorator that reads session status from workspace status files.
+/// Replaces the task status icon with a session indicator for tasks
+/// that have an active session with a status file.
+pub struct FileStatusDecorator {
+    /// assignee string → status file content (e.g. "active", "idle")
+    pub statuses: HashMap<String, String>,
+}
+
+impl FileStatusDecorator {
+    /// Read status files from the workspace directory, keyed by assignee strings
+    /// found in the given tree rows.
+    pub fn from_dir(dir: &Path, rows: &[TreeRow]) -> Self {
+        let mut statuses = HashMap::new();
+        for row in rows {
+            let Some(ref assignee) = row.assignee else {
+                continue;
+            };
+            if statuses.contains_key(assignee) {
+                continue;
+            }
+            let filename = paths::session_id_to_filename(assignee);
+            let path = dir.join(&filename);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                statuses.insert(assignee.clone(), content);
+            }
+        }
+        Self { statuses }
+    }
+}
+
+impl TreeDecorator for FileStatusDecorator {
+    fn decorate(&self, row: &TreeRow) -> RowDecoration {
+        if let Some(ref assignee) = row.assignee {
+            if let Some(status) = self.statuses.get(assignee) {
+                return RowDecoration {
+                    icon_override: Some((
+                        format!("{} ", session_indicator(status)),
+                        status_style(&row.status),
+                    )),
+                    after_name: vec![],
+                };
+            }
+        }
+        RowDecoration::default()
+    }
+}
+
 /// Build ListItems for all tree rows.
 ///
-/// The `decorate` closure is called for each row to provide optional
-/// per-row customization (e.g. session indicators in kbtz-workspace).
-pub fn build_tree_items<F>(
+/// The decorator is called for each row to provide optional
+/// per-row customization (e.g. session indicators).
+pub fn build_tree_items(
     rows: &[TreeRow],
     collapsed: &HashSet<String>,
-    decorate: F,
-) -> Vec<ListItem<'static>>
-where
-    F: Fn(&TreeRow) -> RowDecoration,
-{
+    decorator: &dyn TreeDecorator,
+) -> Vec<ListItem<'static>> {
     rows.iter()
         .map(|row| {
-            let decoration = decorate(row);
+            let decoration = decorator.decorate(row);
             let prefix = tree_prefix(row);
 
             let collapse_indicator = if row.has_children {
@@ -988,7 +1059,7 @@ mod tests {
             is_last_at_depth: vec![true],
             blocked_by: vec![],
         }];
-        let items = build_tree_items(&rows, &collapsed, |_| RowDecoration::default());
+        let items = build_tree_items(&rows, &collapsed, &DefaultDecorator);
         assert_eq!(items.len(), 1);
     }
 
@@ -1005,10 +1076,16 @@ mod tests {
             is_last_at_depth: vec![true],
             blocked_by: vec![],
         }];
-        let items = build_tree_items(&rows, &collapsed, |_| RowDecoration {
-            icon_override: Some(("X ".into(), Style::default())),
-            after_name: vec![Span::raw(" extra")],
-        });
+        struct TestDecorator;
+        impl TreeDecorator for TestDecorator {
+            fn decorate(&self, _row: &TreeRow) -> RowDecoration {
+                RowDecoration {
+                    icon_override: Some(("X ".into(), Style::default())),
+                    after_name: vec![Span::raw(" extra")],
+                }
+            }
+        }
+        let items = build_tree_items(&rows, &collapsed, &TestDecorator);
         assert_eq!(items.len(), 1);
     }
 
@@ -1038,7 +1115,79 @@ mod tests {
                 blocked_by: vec![],
             },
         ];
-        let items = build_tree_items(&rows, &collapsed, |_| RowDecoration::default());
+        let items = build_tree_items(&rows, &collapsed, &DefaultDecorator);
         assert_eq!(items.len(), 2);
+    }
+
+    // ── session_indicator ──
+
+    #[test]
+    fn session_indicator_known_statuses() {
+        assert_eq!(session_indicator("active"), "\u{1f7e2}");
+        assert_eq!(session_indicator("idle"), "\u{1f7e1}");
+        assert_eq!(session_indicator("needs_input"), "\u{1f514}");
+    }
+
+    #[test]
+    fn session_indicator_trims_whitespace() {
+        assert_eq!(session_indicator("active\n"), "\u{1f7e2}");
+        assert_eq!(session_indicator("  idle  "), "\u{1f7e1}");
+    }
+
+    #[test]
+    fn session_indicator_unknown_is_hourglass() {
+        assert_eq!(session_indicator("starting"), "\u{23f3}");
+        assert_eq!(session_indicator(""), "\u{23f3}");
+    }
+
+    // ── FileStatusDecorator ──
+
+    #[test]
+    fn file_status_decorator_overrides_icon() {
+        let mut statuses = HashMap::new();
+        statuses.insert("ws/1".into(), "active".into());
+        let decorator = FileStatusDecorator { statuses };
+
+        let row = make_row("task", "active", Some("ws/1"));
+        let dec = decorator.decorate(&row);
+        assert!(dec.icon_override.is_some());
+        let (icon, _) = dec.icon_override.unwrap();
+        assert!(icon.contains('\u{1f7e2}'));
+    }
+
+    #[test]
+    fn file_status_decorator_no_match_returns_default() {
+        let decorator = FileStatusDecorator {
+            statuses: HashMap::new(),
+        };
+        let row = make_row("task", "open", None);
+        let dec = decorator.decorate(&row);
+        assert!(dec.icon_override.is_none());
+        assert!(dec.after_name.is_empty());
+    }
+
+    #[test]
+    fn file_status_decorator_from_dir() {
+        let dir = std::env::temp_dir().join("kbtz-test-file-status");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ws-1"), "active\n").unwrap();
+
+        let rows = vec![make_row("task", "active", Some("ws/1"))];
+        let decorator = FileStatusDecorator::from_dir(&dir, &rows);
+        assert_eq!(decorator.statuses.get("ws/1").unwrap(), "active\n");
+
+        let dec = decorator.decorate(&rows[0]);
+        assert!(dec.icon_override.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_decorator_returns_default() {
+        let row = make_row("t", "open", None);
+        let dec = DefaultDecorator.decorate(&row);
+        assert!(dec.icon_override.is_none());
+        assert!(dec.after_name.is_empty());
     }
 }

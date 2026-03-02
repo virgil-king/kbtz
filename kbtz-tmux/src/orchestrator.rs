@@ -248,14 +248,15 @@ impl Orchestrator {
         env.insert("KBTZ_WORKSPACE_DIR".into(), self.workspace_dir.clone());
 
         let window_title = format!("⏳ {task_name}");
-        let window_id = match tmux::spawn_window(&self.session, &window_title, &env, &command, &args) {
-            Ok(wid) => wid,
-            Err(e) => {
-                error!("Failed to spawn window for {task_name}: {e}");
-                let _ = ops::release_task(&self.conn, &task_name, &session_id);
-                return Err(e);
-            }
-        };
+        let window_id =
+            match tmux::spawn_window(&self.session, &window_title, &env, &command, &args) {
+                Ok(wid) => wid,
+                Err(e) => {
+                    error!("Failed to spawn window for {task_name}: {e}");
+                    let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                    return Err(e);
+                }
+            };
 
         // Tag window for crash recovery. If tagging fails, the window is
         // invisible to reconcile — kill it and release the claim.
@@ -360,10 +361,7 @@ impl Orchestrator {
                 None => continue,
             };
             // Skip non-status files (locks, sentinels, sockets, pid files).
-            if name.contains('.')
-                || name == "pane-exited"
-                || name == "orchestrator"
-            {
+            if name.contains('.') || name == "pane-exited" || name == "orchestrator" {
                 continue;
             }
             let sid = paths::filename_to_session_id(name);

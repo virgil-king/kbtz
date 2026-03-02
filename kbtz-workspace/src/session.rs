@@ -425,12 +425,12 @@ impl SessionStatus {
     }
 
     pub fn indicator(&self) -> &'static str {
-        match self {
-            Self::Starting => "\u{23f3}",    // ⏳
-            Self::Active => "\u{1f7e2}",     // 🟢
-            Self::Idle => "\u{1f7e1}",       // 🟡
-            Self::NeedsInput => "\u{1f514}", // 🔔
-        }
+        kbtz::ui::session_indicator(match self {
+            Self::Starting => "starting",
+            Self::Active => "active",
+            Self::Idle => "idle",
+            Self::NeedsInput => "needs_input",
+        })
     }
 }
 

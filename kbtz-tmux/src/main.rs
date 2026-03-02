@@ -166,10 +166,7 @@ fn bootstrap(cli: &Cli) -> Result<()> {
 
     if tmux::has_session(&cli.session) {
         eprintln!("Session '{}' exists, attaching...", cli.session);
-        let err = exec::execvp(
-            "tmux",
-            &["tmux", "attach-session", "-t", &cli.session],
-        );
+        let err = exec::execvp("tmux", &["tmux", "attach-session", "-t", &cli.session]);
         bail!("exec tmux attach failed: {err}");
     }
 
@@ -184,18 +181,24 @@ fn bootstrap(cli: &Cli) -> Result<()> {
         ),
         cli.session
     );
+    let workspace_dir = paths::workspace_dir();
     tmux::create_session(
         &cli.session,
         "📋 tasks",
         "kbtz",
-        &["watch", "--action", &action],
+        &[
+            "watch",
+            "--workspace-dir",
+            &workspace_dir,
+            "--action",
+            &action,
+        ],
     )?;
 
     // Step 4: Configure tmux settings.
     tmux::configure_session(&cli.session)?;
 
     // Store workspace dir as a session option for keybindings.
-    let workspace_dir = paths::workspace_dir();
     tmux::set_session_option(&cli.session, "@kbtz_workspace_dir", &workspace_dir)?;
 
     // Step 5: Spawn the toplevel task-management session.
@@ -203,8 +206,7 @@ fn bootstrap(cli: &Cli) -> Result<()> {
     spawn_manager_window(&cli.session, &config)?;
 
     // Step 6: Spawn the orchestrator as a window in the session.
-    let self_exe =
-        std::env::current_exe().context("failed to determine kbtz-tmux binary path")?;
+    let self_exe = std::env::current_exe().context("failed to determine kbtz-tmux binary path")?;
     let self_exe = self_exe.to_string_lossy();
 
     let mut orch_args = vec![
@@ -222,14 +224,17 @@ fn bootstrap(cli: &Cli) -> Result<()> {
     }
 
     let orch_env = HashMap::new();
-    tmux::spawn_window(&cli.session, "🔧 orchestrator", &orch_env, &self_exe, &orch_args)?;
+    tmux::spawn_window(
+        &cli.session,
+        "🔧 orchestrator",
+        &orch_env,
+        &self_exe,
+        &orch_args,
+    )?;
 
     // Step 7: Attach.
     eprintln!("Attaching to session '{}'...", cli.session);
-    let err = exec::execvp(
-        "tmux",
-        &["tmux", "attach-session", "-t", &cli.session],
-    );
+    let err = exec::execvp("tmux", &["tmux", "attach-session", "-t", &cli.session]);
     bail!("exec tmux attach failed: {err}");
 }
 
@@ -280,20 +285,18 @@ fn jump_needs_input(session: &str) -> Result<()> {
     // Get workspace dir from tmux session option or env.
     let workspace_dir = std::env::var("KBTZ_WORKSPACE_DIR").ok().or_else(|| {
         let output = Command::new("tmux")
-            .args([
-                "show-option",
-                "-t",
-                session,
-                "-v",
-                "@kbtz_workspace_dir",
-            ])
+            .args(["show-option", "-t", session, "-v", "@kbtz_workspace_dir"])
             .output()
             .ok()?;
         if !output.status.success() {
             return None;
         }
         let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if val.is_empty() { None } else { Some(val) }
+        if val.is_empty() {
+            None
+        } else {
+            Some(val)
+        }
     });
     let workspace_dir = match workspace_dir {
         Some(d) => d,
@@ -308,7 +311,11 @@ fn jump_needs_input(session: &str) -> Result<()> {
         .and_then(|o| {
             if o.status.success() {
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
                 None
             }

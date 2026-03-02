@@ -567,9 +567,17 @@ fn run() -> Result<()> {
             root,
             poll_interval,
             action,
+            workspace_dir,
         } => {
             let conn = open_db(&db_path)?;
-            tui::run(&db_path, &conn, root.as_deref(), poll_interval, action.as_deref())?;
+            tui::run(
+                &db_path,
+                &conn,
+                root.as_deref(),
+                poll_interval,
+                action.as_deref(),
+                workspace_dir.as_deref(),
+            )?;
         }
 
         Command::Wait => {

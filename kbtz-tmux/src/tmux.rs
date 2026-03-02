@@ -61,12 +61,7 @@ pub fn has_session(name: &str) -> bool {
 }
 
 /// Create a new tmux session with the given name and initial window.
-pub fn create_session(
-    name: &str,
-    window_name: &str,
-    command: &str,
-    args: &[&str],
-) -> Result<()> {
+pub fn create_session(name: &str, window_name: &str, command: &str, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new("tmux");
     cmd.args(["new-session", "-d", "-s", name, "-n", window_name, "--"]);
     cmd.arg(command);

@@ -269,6 +269,9 @@ pub enum Command {
         /// Shell command to run on Enter (receives KBTZ_TASK, KBTZ_TASK_STATUS, KBTZ_TASK_ASSIGNEE env vars)
         #[arg(long)]
         action: Option<String>,
+        /// Workspace status directory for session indicators
+        #[arg(long, env = "KBTZ_WORKSPACE_DIR")]
+        workspace_dir: Option<String>,
     },
 
     /// Wait for database changes (blocks until a change occurs)

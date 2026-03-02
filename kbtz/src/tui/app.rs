@@ -1,9 +1,13 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::model::Note;
 use crate::ops;
-use crate::ui::{self, ActiveTaskPolicy, TreeView};
+use crate::ui::{
+    self, ActiveTaskPolicy, DefaultDecorator, FileStatusDecorator, TreeDecorator, TreeView,
+};
 use crate::validate::validate_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,16 +82,24 @@ pub struct App {
     pub notes: Vec<Note>,
     pub notes_scroll: u16,
     pub add_form: Option<AddForm>,
+    pub workspace_dir: Option<PathBuf>,
+    pub decorator: Box<dyn TreeDecorator>,
 }
 
 impl App {
-    pub fn new(conn: &Connection, root: Option<&str>) -> Result<Self> {
+    pub fn new(
+        conn: &Connection,
+        root: Option<&str>,
+        workspace_dir: Option<&Path>,
+    ) -> Result<Self> {
         let mut app = App {
             tree: TreeView::new(ActiveTaskPolicy::Refuse),
             show_notes: false,
             notes: Vec::new(),
             notes_scroll: 0,
             add_form: None,
+            workspace_dir: workspace_dir.map(PathBuf::from),
+            decorator: Box::new(DefaultDecorator),
         };
         app.refresh(conn, root)?;
         Ok(app)
@@ -98,11 +110,19 @@ impl App {
         tasks.retain(|t| t.status != "done");
         self.tree.rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
         self.tree.clamp_cursor();
+        self.refresh_statuses();
         // Refresh notes if panel is open
         if self.show_notes {
             self.load_notes(conn)?;
         }
         Ok(())
+    }
+
+    pub fn refresh_statuses(&mut self) {
+        let Some(dir) = &self.workspace_dir else {
+            return;
+        };
+        self.decorator = Box::new(FileStatusDecorator::from_dir(dir, &self.tree.rows));
     }
 
     pub fn toggle_notes(&mut self) {
