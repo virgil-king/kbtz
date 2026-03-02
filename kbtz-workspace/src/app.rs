@@ -224,19 +224,35 @@ impl App {
 
         for action in actions {
             match action {
-                SessionAction::RequestExit { session_id } => {
+                SessionAction::RequestExit { session_id, reason } => {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
+                        kbtz::debug_log::log(&format!(
+                            "action: request_exit {} (task={}, reason={})",
+                            session_id,
+                            session.task_name(),
+                            reason
+                        ));
                         self.backend.request_exit(session.as_mut());
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
+                        kbtz::debug_log::log(&format!(
+                            "action: force_kill {} (task={})",
+                            session_id,
+                            session.task_name()
+                        ));
                         session.force_kill();
                         descriptions.push(format!("{session_id} killed"));
                     }
                 }
                 SessionAction::Remove { session_id } => {
                     if self.sessions.contains_key(&session_id) {
+                        let task = self.sessions[&session_id].task_name().to_string();
+                        kbtz::debug_log::log(&format!(
+                            "action: remove {} (task={})",
+                            session_id, task
+                        ));
                         // If it wasn't force-killed, it exited on its own.
                         if !descriptions.iter().any(|d| d.starts_with(&session_id)) {
                             descriptions.push(format!("{session_id} exited"));
@@ -297,14 +313,23 @@ impl App {
             };
             match claim {
                 Some(task_name) => {
+                    kbtz::debug_log::log(&format!(
+                        "spawn: claimed {task_name} as {session_id}"
+                    ));
                     let task = ops::get_task(&self.conn, &task_name)?;
                     match self.spawn_session(&task, &session_id) {
                         Ok(session) => {
+                            kbtz::debug_log::log(&format!(
+                                "spawn: session started for {task_name} ({session_id})"
+                            ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
                             self.sessions.insert(session_id, session);
                         }
                         Err(e) => {
+                            kbtz::debug_log::log(&format!(
+                                "spawn: FAILED for {task_name} ({session_id}): {e}"
+                            ));
                             // Failed to spawn — release the claim
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                             self.counter -= 1;
@@ -331,6 +356,9 @@ impl App {
         self.counter += 1;
         let session_id = format!("ws/{}", self.counter);
 
+        kbtz::debug_log::log(&format!(
+            "spawn_for_task: claiming {task_name} as {session_id}"
+        ));
         ops::claim_task(&self.conn, task_name, &session_id)?;
 
         let task = match ops::get_task(&self.conn, task_name) {
@@ -344,12 +372,18 @@ impl App {
 
         match self.spawn_session(&task, &session_id) {
             Ok(session) => {
+                kbtz::debug_log::log(&format!(
+                    "spawn_for_task: session started for {task_name} ({session_id})"
+                ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
                 self.sessions.insert(session_id, session);
                 Ok(())
             }
             Err(e) => {
+                kbtz::debug_log::log(&format!(
+                    "spawn_for_task: FAILED for {task_name} ({session_id}): {e}"
+                ));
                 let _ = ops::release_task(&self.conn, task_name, &session_id);
                 self.counter -= 1;
                 Err(e)
@@ -403,12 +437,16 @@ impl App {
             .worker_args(crate::prompt::AGENT_PROMPT, &task_prompt);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
-        let env_vars: Vec<(&str, &str)> = vec![
+        let debug_path = std::env::var("KBTZ_DEBUG").unwrap_or_default();
+        let mut env_vars: Vec<(&str, &str)> = vec![
             ("KBTZ_DB", &self.db_path),
             ("KBTZ_SESSION_ID", session_id),
             ("KBTZ_TASK", &task.name),
             ("KBTZ_WORKSPACE_DIR", &status_dir_str),
         ];
+        if !debug_path.is_empty() {
+            env_vars.push(("KBTZ_DEBUG", &debug_path));
+        }
         self.spawner.spawn(
             self.backend.command(),
             &arg_refs,
@@ -425,7 +463,17 @@ impl App {
         for (session_id, session) in &mut self.sessions {
             let path = self.status_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
-                session.set_status(SessionStatus::from_str(&content));
+                let new_status = SessionStatus::from_str(&content);
+                if *session.status() != new_status {
+                    kbtz::debug_log::log(&format!(
+                        "status: {} {} -> {} (task={})",
+                        session_id,
+                        session.status().label(),
+                        new_status.label(),
+                        session.task_name()
+                    ));
+                }
+                session.set_status(new_status);
             }
         }
         Ok(())
@@ -436,6 +484,10 @@ impl App {
         if let Some(session) = self.sessions.remove(session_id) {
             let task_name = session.task_name().to_string();
             let sid = session.session_id().to_string();
+            kbtz::debug_log::log(&format!(
+                "remove_session: {sid} (task={task_name}, status={})",
+                session.status().label()
+            ));
             let _ = ops::release_task(&self.conn, &task_name, &sid);
             // Only remove the task->session mapping if it still points to this
             // session. A new session may have already claimed the same task
@@ -452,6 +504,7 @@ impl App {
 
     /// Reconnect to shepherd sessions from a previous workspace instance.
     pub fn reconnect_sessions(&mut self) -> Result<()> {
+        kbtz::debug_log::log("reconnect: scanning for shepherd sockets");
         let entries = std::fs::read_dir(&self.status_dir)?;
         for entry in entries.flatten() {
             let path = entry.path();
@@ -473,6 +526,9 @@ impl App {
                                 "reconnect_sessions: kill({pid}, 0) returned EPERM"
                             ));
                         }
+                        kbtz::debug_log::log(&format!(
+                            "reconnect: shepherd dead for {session_id} (pid={pid}), cleaning up"
+                        ));
                         // Shepherd died — clean up stale files
                         let _ = std::fs::remove_file(&path);
                         let _ = std::fs::remove_file(&pid_path);
@@ -496,6 +552,9 @@ impl App {
                         self.term.cols,
                     ) {
                         Ok(session) => {
+                            kbtz::debug_log::log(&format!(
+                                "reconnect: adopted {session_id} (task={task_name})"
+                            ));
                             if let Some(n) = session_id
                                 .strip_prefix("ws/")
                                 .and_then(|s| s.parse::<u64>().ok())
@@ -505,7 +564,10 @@ impl App {
                             self.task_to_session.insert(task_name, session_id.clone());
                             self.sessions.insert(session_id, Box::new(session));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            kbtz::debug_log::log(&format!(
+                                "reconnect: stale socket for {session_id} (task={task_name}): {e}"
+                            ));
                             // Stale socket -- clean up
                             let _ = std::fs::remove_file(&path);
                             let _ = std::fs::remove_file(&pid_path);
@@ -514,6 +576,9 @@ impl App {
                     }
                 }
                 None => {
+                    kbtz::debug_log::log(&format!(
+                        "reconnect: orphaned shepherd {session_id}, killing"
+                    ));
                     // No task claim -- orphaned shepherd. Kill and clean up.
                     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
                         if let Ok(pid) = pid_str.trim().parse::<i32>() {
@@ -525,6 +590,10 @@ impl App {
                 }
             }
         }
+        kbtz::debug_log::log(&format!(
+            "reconnect: done, {} sessions active",
+            self.sessions.len()
+        ));
         Ok(())
     }
 
@@ -630,6 +699,9 @@ impl App {
     /// Kill and release a session for a task so it can be respawned.
     pub fn restart_session(&mut self, task_name: &str) {
         if let Some(session_id) = self.task_to_session.get(task_name).cloned() {
+            kbtz::debug_log::log(&format!(
+                "restart_session: killing {session_id} (task={task_name})"
+            ));
             if let Some(session) = self.sessions.get_mut(&session_id) {
                 session.force_kill();
             }
@@ -643,6 +715,11 @@ impl App {
     /// processes and task claims are left intact.  Without persistent sessions,
     /// workers are killed and task claims are released.
     pub fn shutdown(&mut self) {
+        kbtz::debug_log::log(&format!(
+            "shutdown: {} sessions, persistent={}",
+            self.sessions.len(),
+            self.persistent_sessions
+        ));
         if self.persistent_sessions {
             // Persistent mode: detach from sockets, leave shepherds running.
             for (_, _session) in self.sessions.drain() {}

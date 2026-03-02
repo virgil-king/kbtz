@@ -151,6 +151,7 @@ impl Watchers {
         }
         if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
             kbtz::watch::drain_events(&self.status_rx);
+            kbtz::debug_log::log("watchers.poll: status event -> read_status_files");
             app.read_status_files()?;
         }
         Ok(())

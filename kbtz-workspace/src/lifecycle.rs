@@ -36,7 +36,7 @@ pub struct WorldSnapshot {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SessionAction {
-    RequestExit { session_id: String },
+    RequestExit { session_id: String, reason: String },
     ForceKill { session_id: String },
     Remove { session_id: String },
     SpawnUpTo { count: usize },
@@ -70,6 +70,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<SessionAction> {
                 if should_reap_session(session) {
                     actions.push(SessionAction::RequestExit {
                         session_id: session.session_id.clone(),
+                        reason: reap_reason(session),
                     });
                     // Will transition to Stopping; don't count toward concurrency.
                 } else {
@@ -101,6 +102,23 @@ fn should_reap_task(session_id: &str, task: &TaskSnapshot) -> bool {
         "active" => task.assignee.as_deref() != Some(session_id),
         "open" => true, // agent released it
         _ => false,
+    }
+}
+
+/// Human-readable reason why a session is being reaped.
+fn reap_reason(session: &SessionSnapshot) -> String {
+    match &session.task {
+        None => "task deleted".to_string(),
+        Some(task) => match task.status.as_str() {
+            "done" => "task done".to_string(),
+            "paused" => "task paused".to_string(),
+            "open" => "task released (open)".to_string(),
+            "active" => format!(
+                "reassigned to {}",
+                task.assignee.as_deref().unwrap_or("nobody")
+            ),
+            other => format!("unexpected status: {other}"),
+        },
     }
 }
 
@@ -142,6 +160,10 @@ mod tests {
         }
     }
 
+    fn has_request_exit(actions: &[SessionAction], session_id: &str) -> bool {
+        actions.iter().any(|a| matches!(a, SessionAction::RequestExit { session_id: sid, .. } if sid == session_id))
+    }
+
     // 1. Exited session -> Remove + SpawnUpTo
     #[test]
     fn exited_session_removed_and_slot_filled() {
@@ -173,9 +195,7 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert!(has_request_exit(&actions, "ws/1"));
     }
 
     // 3. Healthy session -> no action (only SpawnUpTo for free slots)
@@ -288,9 +308,7 @@ mod tests {
     fn deleted_task_triggers_request_exit() {
         let w = world(vec![snapshot("ws/1", SessionPhase::Running, None)], 2);
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert!(has_request_exit(&actions, "ws/1"));
     }
 
     // 10. Reassigned task -> RequestExit
@@ -301,9 +319,7 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert!(has_request_exit(&actions, "ws/1"));
     }
 
     // 11. Manual mode (max_concurrency=0) -> no SpawnUpTo
@@ -342,9 +358,7 @@ mod tests {
             0,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&SessionAction::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert!(has_request_exit(&actions, "ws/1"));
         assert!(!actions
             .iter()
             .any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
