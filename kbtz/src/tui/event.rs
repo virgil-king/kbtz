@@ -24,6 +24,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         return handle_add(app, key);
     }
 
+    if app.show_notes {
+        return handle_notes(app, key);
+    }
+
     match app.tree.handle_key(key) {
         TreeKeyAction::Quit => KeyAction::Quit,
         TreeKeyAction::Refresh => KeyAction::Refresh,
@@ -50,6 +54,47 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyCode::Char('N') => KeyAction::AddNote,
             _ => KeyAction::Continue,
         },
+    }
+}
+
+fn handle_notes(app: &mut App, key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('q') => {
+            app.toggle_notes();
+            KeyAction::Continue
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.notes_scroll = app.notes_scroll.saturating_add(1);
+            KeyAction::Continue
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.notes_scroll = app.notes_scroll.saturating_sub(1);
+            KeyAction::Continue
+        }
+        KeyCode::PageDown => {
+            app.notes_scroll = app.notes_scroll.saturating_add(20);
+            KeyAction::Continue
+        }
+        KeyCode::PageUp => {
+            app.notes_scroll = app.notes_scroll.saturating_sub(20);
+            KeyAction::Continue
+        }
+        KeyCode::Char('G') => {
+            // Approximate total line count (word-wrap may add more, but this
+            // is a reasonable upper bound that ratatui clamps safely).
+            let lines: u16 = app
+                .notes
+                .iter()
+                .map(|n| n.content.lines().count() as u16 + 2)
+                .sum();
+            app.notes_scroll = lines.saturating_sub(1);
+            KeyAction::Continue
+        }
+        KeyCode::Char('g') => {
+            app.notes_scroll = 0;
+            KeyAction::Continue
+        }
+        _ => KeyAction::Continue,
     }
 }
 

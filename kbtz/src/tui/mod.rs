@@ -92,6 +92,7 @@ fn run_loop(
                                                 app.tree.error = Some(e.to_string());
                                             } else {
                                                 app.show_notes = true;
+                                                app.notes_scroll = 0;
                                                 app.load_notes(conn)?;
                                             }
                                         }
