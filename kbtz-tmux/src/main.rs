@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use log::info;
+use log::{error, info};
 
 use kbtz::paths;
 use kbtz_tmux::tmux;
@@ -66,16 +66,40 @@ fn acquire_lock(workspace_dir: &str) -> Result<fs::File> {
         .open(&lock_path)
         .context("failed to open lock file")?;
 
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock {
-            bail!("Orchestrator already running");
+    // Retry briefly — a previous orchestrator may still be shutting down.
+    for attempt in 0..10 {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(file);
         }
-        return Err(err).context("flock failed");
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::WouldBlock {
+            return Err(err).context("flock failed");
+        }
+        if attempt < 9 {
+            info!("Waiting for previous orchestrator to exit...");
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 
-    Ok(file)
+    bail!("Orchestrator already running (waited 10s)");
+}
+
+/// Writer that tees output to both a file and stderr.
+struct TeeWriter {
+    file: fs::File,
+}
+
+impl io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let _ = io::stderr().write_all(buf);
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = io::stderr().flush();
+        self.file.flush()
+    }
 }
 
 fn setup_logging(workspace_dir: &str) -> Result<()> {
@@ -87,7 +111,7 @@ fn setup_logging(workspace_dir: &str) -> Result<()> {
         .context("failed to open log file")?;
 
     env_logger::Builder::new()
-        .target(env_logger::Target::Pipe(Box::new(file)))
+        .target(env_logger::Target::Pipe(Box::new(TeeWriter { file })))
         .filter_level(log::LevelFilter::Info)
         .format_timestamp_secs()
         .init();
@@ -132,7 +156,7 @@ fn spawn_manager_window(session: &str, config: &Config) -> Result<()> {
     let mut env = HashMap::new();
     env.insert("KBTZ_DB".into(), db_path);
 
-    let window_id = tmux::spawn_window(session, "manager", &env, &binary, &args)?;
+    let window_id = tmux::spawn_window(session, "💬 manager", &env, &binary, &args)?;
     tmux::set_window_option(&window_id, "@kbtz_toplevel", "true")?;
     Ok(())
 }
@@ -152,7 +176,20 @@ fn bootstrap(cli: &Cli) -> Result<()> {
     eprintln!("Creating session '{}'...", cli.session);
 
     // Step 3: Create session with kbtz watch in window 0.
-    tmux::create_session(&cli.session, "tasks", "kbtz", &["watch"])?;
+    let action = format!(
+        concat!(
+            "tmux list-windows -t {} -F '#{{window_id}} #{{@kbtz_task}}' ",
+            "| awk -v t=\"$KBTZ_TASK\" '$2==t {{print $1}}' ",
+            "| head -1 | xargs -r tmux select-window -t"
+        ),
+        cli.session
+    );
+    tmux::create_session(
+        &cli.session,
+        "📋 tasks",
+        "kbtz",
+        &["watch", "--action", &action],
+    )?;
 
     // Step 4: Configure tmux settings.
     tmux::configure_session(&cli.session)?;
@@ -184,8 +221,8 @@ fn bootstrap(cli: &Cli) -> Result<()> {
         orch_args.push(pref.clone());
     }
 
-    let env = HashMap::new();
-    tmux::spawn_window(&cli.session, "orchestrator", &env, &self_exe, &orch_args)?;
+    let orch_env = HashMap::new();
+    tmux::spawn_window(&cli.session, "🔧 orchestrator", &orch_env, &self_exe, &orch_args)?;
 
     // Step 7: Attach.
     eprintln!("Attaching to session '{}'...", cli.session);
@@ -200,8 +237,14 @@ fn run_orchestrator(cli: Cli) -> Result<()> {
     let workspace_dir = paths::workspace_dir();
     fs::create_dir_all(&workspace_dir)?;
 
-    let _lock = acquire_lock(&workspace_dir)?;
     setup_logging(&workspace_dir)?;
+    let _lock = match acquire_lock(&workspace_dir) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("{e:#}");
+            return Err(e);
+        }
+    };
 
     info!(
         "Starting (max={}, poll={}s, session={})",

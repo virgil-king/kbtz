@@ -247,7 +247,8 @@ impl Orchestrator {
         env.insert("KBTZ_SESSION_ID".into(), session_id.clone());
         env.insert("KBTZ_WORKSPACE_DIR".into(), self.workspace_dir.clone());
 
-        let window_id = match tmux::spawn_window(&self.session, &task_name, &env, &command, &args) {
+        let window_title = format!("⏳ {task_name}");
+        let window_id = match tmux::spawn_window(&self.session, &window_title, &env, &command, &args) {
             Ok(wid) => wid,
             Err(e) => {
                 error!("Failed to spawn window for {task_name}: {e}");
@@ -260,8 +261,6 @@ impl Orchestrator {
         // invisible to reconcile — kill it and release the claim.
         if let Err(e) = tmux::set_window_option(&window_id, "@kbtz_task", &task_name)
             .and_then(|()| tmux::set_window_option(&window_id, "@kbtz_sid", &session_id))
-            .and_then(|()| tmux::set_window_option(&window_id, "automatic-rename", "off"))
-            .and_then(|()| tmux::set_window_option(&window_id, "allow-rename", "off"))
         {
             error!("Failed to tag window {window_id} for {task_name}: {e}");
             let _ = tmux::kill_window(&window_id);
@@ -441,26 +440,10 @@ impl Orchestrator {
     pub fn shutdown(&mut self) {
         info!("Shutting down...");
 
-        let sids: Vec<String> = self.windows.keys().cloned().collect();
-        for sid in &sids {
-            if let Some(tw) = self.windows.get(sid) {
-                if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                    send_signal(pid, libc::SIGTERM);
-                }
-                let _ = ops::release_task(&self.conn, &tw.task_name, &tw.session_id);
-            }
+        for tw in self.windows.values() {
+            let _ = ops::release_task(&self.conn, &tw.task_name, &tw.session_id);
         }
-
-        std::thread::sleep(lifecycle::GRACEFUL_TIMEOUT);
-
-        for sid in &sids {
-            if let Some(tw) = self.windows.remove(sid) {
-                if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                    send_signal(pid, libc::SIGKILL);
-                }
-                let _ = tmux::kill_window(&tw.window_id);
-            }
-        }
+        self.windows.clear();
 
         info!("Shutdown complete");
     }

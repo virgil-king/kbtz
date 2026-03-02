@@ -285,11 +285,14 @@ These work out of the box:
 | `^B [` | Enter copy mode (scroll) |
 | `^B d` | Detach (everything persists) |
 
-Add these to your `~/.tmux.conf` for manager and needs-input navigation:
+Add these to your `~/.tmux.conf` for additional navigation:
 
 ```tmux
+# kbtz-tmux: return to task tree
+bind-key t select-window -t :0
+
 # kbtz-tmux: switch to manager window
-bind-key m run-shell "tmux list-windows -F '#{window_id} #{@kbtz_toplevel}' \
+bind-key g run-shell "tmux list-windows -F '##{window_id} ##{@kbtz_toplevel}' \
   | awk '\\$2==\"true\" {print \\$1}' | head -1 \
   | xargs -r tmux select-window -t"
 
