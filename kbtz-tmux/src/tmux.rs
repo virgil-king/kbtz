@@ -38,12 +38,13 @@ pub fn get_window_option(window_id: &str, option: &str) -> Result<Option<String>
 
 /// Set a tmux window option (e.g., @kbtz_task = "my-task").
 pub fn set_window_option(window_id: &str, option: &str, value: &str) -> Result<()> {
-    let status = Command::new("tmux")
+    let output = Command::new("tmux")
         .args(["set-window-option", "-t", window_id, option, value])
-        .status()
+        .output()
         .context("failed to run tmux set-window-option")?;
-    if !status.success() {
-        bail!("tmux set-window-option failed for {window_id}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux set-window-option failed for {window_id}: {stderr}");
     }
     Ok(())
 }
@@ -81,40 +82,57 @@ pub fn create_session(
 
 /// Set a tmux session-level option.
 pub fn set_session_option(session: &str, option: &str, value: &str) -> Result<()> {
-    let status = Command::new("tmux")
+    let output = Command::new("tmux")
         .args(["set-option", "-t", session, option, value])
-        .status()
+        .output()
         .context("failed to run tmux set-option")?;
-    if !status.success() {
-        bail!("tmux set-option {option} failed for session {session}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux set-option {option} failed for session {session}: {stderr}");
     }
     Ok(())
 }
 
-/// Apply session-level tmux settings for the workspace.
+/// Set a tmux window option as the session default for new windows.
+pub fn set_window_option_default(session: &str, option: &str, value: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["set-option", "-w", "-t", session, option, value])
+        .output()
+        .context("failed to run tmux set-option -w")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux set-option -w {option} failed for session {session}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Apply tmux settings for the workspace session.
 pub fn configure_session(session: &str) -> Result<()> {
-    let settings = [
-        ("automatic-rename", "off"),
-        ("allow-rename", "off"),
-        ("remain-on-exit", "off"),
-        ("mouse", "on"),
-        ("status-interval", "1"),
-    ];
-    for (opt, val) in settings {
-        set_session_option(session, opt, val)?;
-    }
-    Ok(())
-}
+    // Session options.
+    set_session_option(session, "mouse", "on")?;
+    set_session_option(session, "status-interval", "1")?;
 
-/// Bind a key to a run-shell command (global, not session-scoped).
-pub fn bind_key(key: &str, command: &str) -> Result<()> {
-    let status = Command::new("tmux")
-        .args(["bind-key", "-T", "prefix", key, "run-shell", command])
-        .status()
-        .context("failed to run tmux bind-key")?;
-    if !status.success() {
-        bail!("tmux bind-key {key} failed");
+    // Window option defaults (apply to all new windows in this session).
+    set_window_option_default(session, "automatic-rename", "off")?;
+    set_window_option_default(session, "allow-rename", "off")?;
+    set_window_option_default(session, "remain-on-exit", "off")?;
+
+    // Also set on the existing window 0 (kbtz watch) since it was
+    // created before these defaults were applied.
+    let output = Command::new("tmux")
+        .args(["list-windows", "-t", session, "-F", "#{window_id}"])
+        .output()
+        .context("failed to list windows")?;
+    if output.status.success() {
+        for wid in String::from_utf8_lossy(&output.stdout).lines() {
+            let wid = wid.trim();
+            if !wid.is_empty() {
+                let _ = set_window_option(wid, "automatic-rename", "off");
+                let _ = set_window_option(wid, "allow-rename", "off");
+            }
+        }
     }
+
     Ok(())
 }
 
@@ -174,7 +192,7 @@ pub fn pane_pid(window_id: &str) -> Result<Option<u32>> {
 pub fn kill_window(window_id: &str) -> Result<()> {
     let _ = Command::new("tmux")
         .args(["kill-window", "-t", window_id])
-        .status();
+        .output(); // capture stderr to avoid leaking to terminal
     Ok(())
 }
 
@@ -182,12 +200,13 @@ pub fn kill_window(window_id: &str) -> Result<()> {
 /// This gives us event-driven dead-window detection instead of polling.
 pub fn install_pane_hook(session: &str, sentinel_path: &str) -> Result<()> {
     let hook_cmd = format!("run-shell 'touch {sentinel_path}'");
-    let status = Command::new("tmux")
+    let output = Command::new("tmux")
         .args(["set-hook", "-t", session, "pane-exited", &hook_cmd])
-        .status()
+        .output()
         .context("failed to install pane-exited hook")?;
-    if !status.success() {
-        bail!("tmux set-hook pane-exited failed");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux set-hook pane-exited failed: {stderr}");
     }
     Ok(())
 }
@@ -196,6 +215,6 @@ pub fn install_pane_hook(session: &str, sentinel_path: &str) -> Result<()> {
 pub fn remove_pane_hook(session: &str) -> Result<()> {
     let _ = Command::new("tmux")
         .args(["set-hook", "-u", "-t", session, "pane-exited"])
-        .status();
+        .output(); // capture stderr to avoid leaking to terminal
     Ok(())
 }
