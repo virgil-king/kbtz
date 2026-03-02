@@ -130,6 +130,7 @@ pub fn spawn_window(
     let mut cmd = Command::new("tmux");
     cmd.args([
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id}",
