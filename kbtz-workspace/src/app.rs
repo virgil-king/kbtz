@@ -751,27 +751,8 @@ mod tests {
         fn force_kill(&mut self) {
             self.alive = false;
         }
-        fn start_passthrough(&self) -> Result<()> {
-            Ok(())
-        }
-        fn stop_passthrough(&self) -> Result<()> {
-            Ok(())
-        }
-        fn enter_scroll_mode(&self) -> Result<usize> {
-            Ok(0)
-        }
-        fn exit_scroll_mode(&self) -> Result<()> {
-            Ok(())
-        }
-        fn render_scrollback(&self, _offset: usize, _cols: u16) -> Result<usize> {
-            Ok(0)
-        }
-        fn scrollback_available(&self) -> Result<usize> {
-            Ok(0)
-        }
-        fn has_mouse_tracking(&self) -> bool {
-            false
-        }
+        fn start_forwarding(&self) {}
+        fn stop_forwarding(&self) {}
         fn write_input(&mut self, _buf: &[u8]) -> Result<()> {
             Ok(())
         }

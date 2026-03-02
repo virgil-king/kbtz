@@ -61,91 +61,95 @@ CONFIG FILE:
         command = \"/usr/local/bin/claude\"
         args = [\"--verbose\"]
 
-TREE MODE KEYS:
-    j/k, Up/Down   Navigate
-    Enter           Zoom into session
-    Tab             Jump to next session needing input
-    s               Spawn session for task
-    c               Switch to task manager session
-    Space           Collapse/expand
-    p               Pause/unpause task
-    d               Mark task done
-    U               Force-unassign task
-    ?               Help
-    q               Quit
+USAGE:
+    Start a workspace for the default database (~/.kbtz/kbtz.db):
+        kbtz-workspace
 
-ZOOMED MODE / TASK MANAGER:
-    ^B t            Return to tree
-    ^B c            Switch to task manager session
-    ^B n/p          Next/prev session
-    ^B Tab          Jump to next session needing input
-    ^B [            Scroll mode (also: Shift+Up, PgUp, left-click)
-    ^B ^B           Send literal Ctrl-B
-    ^B ?            Help
-    ^B q            Quit"
+    Start with a specific database and concurrency:
+        kbtz-workspace --db ./project.db --concurrency 4"
 )]
 struct Cli {
-    /// Path to kbtz database [default: $KBTZ_DB or ~/.kbtz/kbtz.db]
-    #[arg(long, env = "KBTZ_DB")]
+    /// Path to kbtz database
+    #[arg(long)]
     db: Option<String>,
 
-    /// Max concurrent sessions [default: 8]
-    #[arg(short = 'j', long)]
+    /// Maximum number of concurrent agent sessions
+    #[arg(long)]
     concurrency: Option<usize>,
 
-    /// Preference hint for task selection (FTS match)
-    #[arg(long)]
-    prefer: Option<String>,
-
-    /// Agent backend to use for sessions [default: claude]
+    /// Backend (agent runtime) to use
     #[arg(long)]
     backend: Option<String>,
 
-    /// Override the backend's default command binary
+    /// Custom agent command (overrides backend default)
     #[arg(long)]
     command: Option<String>,
 
-    /// Disable automatic session spawning; use 's' in tree mode to spawn manually
+    /// Start in manual mode (no auto-spawning)
     #[arg(long)]
     manual: bool,
 
-    /// Enable persistent sessions (shepherd-based); sessions survive workspace restart
+    /// Prefer tasks matching this prefix when auto-spawning
+    #[arg(long)]
+    prefer: Option<String>,
+
+    /// Enable persistent sessions (survive workspace restart)
     #[arg(long)]
     persistent_sessions: bool,
 }
 
-const PREFIX_KEY: u8 = 0x02; // Ctrl-B
+/// Prefix key for passthrough commands (Ctrl-B, like tmux).
+const PREFIX_KEY: u8 = 0x02;
 
-/// Watches the kbtz database and status directory for changes.
-/// Polling with `poll()` checks both channels and refreshes app state.
+/// Watches the kbtz database and status files for changes.
 struct Watchers {
     _db_watcher: notify::RecommendedWatcher,
-    db_rx: std::sync::mpsc::Receiver<()>,
     _status_watcher: notify::RecommendedWatcher,
-    status_rx: std::sync::mpsc::Receiver<()>,
+    rx: std::sync::mpsc::Receiver<std::result::Result<notify::Event, notify::Error>>,
 }
 
 impl Watchers {
     fn new(app: &App) -> Result<Self> {
-        let (_db_watcher, db_rx) = kbtz::watch::watch_db(&app.db_path)?;
-        let (_status_watcher, status_rx) = kbtz::watch::watch_dir(&app.status_dir)?;
-        Ok(Watchers {
-            _db_watcher,
-            db_rx,
-            _status_watcher,
-            status_rx,
+        use notify::Watcher;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx2 = tx.clone();
+
+        let mut db_watcher =
+            notify::recommended_watcher(move |res: std::result::Result<notify::Event, _>| {
+                let _ = tx.send(res);
+            })
+            .context("failed to create DB watcher")?;
+        db_watcher
+            .watch(
+                std::path::Path::new(&app.db_path),
+                notify::RecursiveMode::NonRecursive,
+            )
+            .context("failed to watch database file")?;
+
+        let mut status_watcher =
+            notify::recommended_watcher(move |res: std::result::Result<notify::Event, _>| {
+                let _ = tx2.send(res);
+            })
+            .context("failed to create status watcher")?;
+        status_watcher
+            .watch(&app.status_dir, notify::RecursiveMode::NonRecursive)
+            .context("failed to watch status directory")?;
+
+        Ok(Self {
+            _db_watcher: db_watcher,
+            _status_watcher: status_watcher,
+            rx,
         })
     }
 
+    /// Drain all pending filesystem events and refresh app state if anything changed.
     fn poll(&self, app: &mut App) -> Result<()> {
-        let db_event = kbtz::watch::wait_for_change(&self.db_rx, Duration::ZERO);
-        if db_event {
-            kbtz::watch::drain_events(&self.db_rx);
-            kbtz::debug_log::log("watchers.poll: db event -> refresh_tree");
-            app.refresh_tree()?;
+        let mut changed = false;
+        while self.rx.try_recv().is_ok() {
+            changed = true;
         }
-        if kbtz::watch::wait_for_change(&self.status_rx, Duration::ZERO) {
-            kbtz::watch::drain_events(&self.status_rx);
+        if changed {
+            app.refresh_tree()?;
             app.read_status_files()?;
         }
         Ok(())
@@ -599,24 +603,26 @@ fn passthrough_mode(
     }
 
     // Set up passthrough screen: raw mode, scroll region for status bar.
-    // Use CSI H + CSI J instead of CSI 2 J to avoid terminal scrollback
-    // accumulation (see tree_mode comment).
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
     stdout.flush()?;
 
-    // Start raw byte forwarding: render VTE state to screen and enable
-    // the reader thread to write child output directly to stdout.
+    // Enable raw byte forwarding from the reader thread to stdout.
     if let Some(session) = app.get_session(kind.session_id()) {
-        session.start_passthrough()?;
+        session.start_forwarding();
     }
+
+    // Trigger SIGWINCH so the child repaints at the current terminal size.
+    // Use a two-step resize (size-1 then size) to guarantee a repaint
+    // even if the size didn't actually change.
+    trigger_repaint(app, kind.session_id());
 
     let result = passthrough_loop(app, kind, running);
 
     // Stop raw byte forwarding before leaving passthrough mode.
     if let Some(session) = app.get_session(kind.session_id()) {
-        session.stop_passthrough()?;
+        session.stop_forwarding();
     }
 
     // Reset scroll region and raw mode.
@@ -627,12 +633,22 @@ fn passthrough_mode(
     result
 }
 
+/// Trigger a SIGWINCH-based repaint by doing a two-step resize.
+/// This guarantees the child repaints even if the size didn't change.
+fn trigger_repaint(app: &App, session_id: &str) {
+    if let Some(session) = app.get_session(session_id) {
+        // Resize to (rows-1, cols) then back to (rows, cols).
+        // The intermediate size differs, so the child sees SIGWINCH.
+        let _ = session.resize(app.term.rows.saturating_sub(1), app.term.cols);
+        let _ = session.resize(app.term.rows, app.term.cols);
+    }
+}
+
 fn handle_prefix_command(
     cmd: u8,
     app: &mut App,
     kind: &SessionKind,
     stdin: &mut io::StdinLock,
-    scroll: &mut ScrollState,
     last_status: &SessionStatus,
 ) -> Result<Option<Action>> {
     let sid = kind.session_id();
@@ -640,18 +656,8 @@ fn handle_prefix_command(
     let cols = app.term.cols;
 
     match cmd {
-        b't' | b'd' => {
-            if scroll.active {
-                exit_scroll_mode(app, sid, scroll)?;
-            }
-            Ok(Some(Action::ReturnToTree))
-        }
-        b'c' if !kind.is_toplevel() => {
-            if scroll.active {
-                exit_scroll_mode(app, sid, scroll)?;
-            }
-            Ok(Some(Action::TopLevel))
-        }
+        b't' | b'd' => Ok(Some(Action::ReturnToTree)),
+        b'c' if !kind.is_toplevel() => Ok(Some(Action::TopLevel)),
         b'n' => {
             let next_task = match kind {
                 SessionKind::Worker { task, .. } => app.cycle_session(&Action::NextSession, task),
@@ -661,9 +667,6 @@ fn handle_prefix_command(
                     .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
             };
             if let Some(next_task) = next_task {
-                if scroll.active {
-                    exit_scroll_mode(app, sid, scroll)?;
-                }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
                 Ok(None)
@@ -678,9 +681,6 @@ fn handle_prefix_command(
                     .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
             };
             if let Some(prev_task) = prev_task {
-                if scroll.active {
-                    exit_scroll_mode(app, sid, scroll)?;
-                }
                 Ok(Some(Action::ZoomIn(prev_task)))
             } else {
                 Ok(None)
@@ -692,9 +692,6 @@ fn handle_prefix_command(
                 SessionKind::TopLevel => None,
             };
             if let Some(next_task) = app.next_needs_input_session(exclude) {
-                if scroll.active {
-                    exit_scroll_mode(app, sid, scroll)?;
-                }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
                 draw_normal_status_bar(
@@ -707,12 +704,6 @@ fn handle_prefix_command(
                 Ok(None)
             }
         }
-        b'[' => {
-            if !scroll.active {
-                enter_scroll_mode(app, sid, scroll)?;
-            }
-            Ok(None)
-        }
         PREFIX_KEY => {
             if let Some(session) = app.get_session_mut(sid) {
                 session.write_input(&[PREFIX_KEY])?;
@@ -723,260 +714,42 @@ fn handle_prefix_command(
             draw_help_bar(rows, cols, kind);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
-            if scroll.active {
-                draw_scroll_status_bar(rows, cols, scroll);
-            } else {
-                draw_normal_status_bar(rows, cols, kind, last_status, None);
-            }
+            draw_normal_status_bar(rows, cols, kind, last_status, None);
             Ok(None)
         }
-        b'q' => {
-            if scroll.active {
-                exit_scroll_mode(app, sid, scroll)?;
-            }
-            Ok(Some(Action::Quit))
-        }
+        b'q' => Ok(Some(Action::Quit)),
         _ => Ok(None),
     }
 }
 
-// ── Scroll mode ────────────────────────────────────────────────────────
-
-struct ScrollState {
-    active: bool,
-    offset: usize,
-    total: usize,
-}
-
-impl ScrollState {
-    fn new() -> Self {
-        Self {
-            active: false,
-            offset: 0,
-            total: 0,
-        }
-    }
-}
-
-/// Enter scroll mode.  Freezes the screen and disables mouse tracking
-/// so the terminal can handle native text selection.  Works even when
-/// there is no scrollback (the user can still select visible text).
-fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
-    if let Some(session) = app.get_session(session_id) {
-        scroll.total = session.enter_scroll_mode()?;
-        scroll.offset = 0;
-        scroll.active = true;
-        // Disable mouse tracking so the terminal handles native text selection.
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
-        let _ = write!(out, "\x1b[?1000l\x1b[?1006l\x1b[?25h");
-        let _ = out.flush();
-        // Render the current viewport (offset 0 = live screen).
-        session.render_scrollback(0, app.term.cols)?;
-        draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
-    }
-    Ok(())
-}
-
-fn exit_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> Result<()> {
-    scroll.active = false;
-    scroll.offset = 0;
-    if let Some(session) = app.get_session(session_id) {
-        session.exit_scroll_mode()?;
-    }
-    Ok(())
-}
-
-fn scroll_to(
-    app: &App,
-    session_id: &str,
-    scroll: &mut ScrollState,
-    new_offset: usize,
-) -> Result<()> {
-    if let Some(session) = app.get_session(session_id) {
-        scroll.offset = session.render_scrollback(new_offset, app.term.cols)?;
-        // Update total in case more scrollback accumulated while scrolled.
-        scroll.total = session.scrollback_available()?;
-    }
-    Ok(())
-}
-
-/// Handle input while in scroll mode.  Returns `Ok(true)` if the event
-/// was consumed (caller should redraw scroll status bar), `Ok(false)` if
-/// scroll mode was exited (caller should redraw normal status bar).
-fn handle_scroll_input(
-    app: &App,
-    session_id: &str,
-    scroll: &mut ScrollState,
-    buf: &[u8],
-    i: &mut usize,
-    n: usize,
-    rows: u16,
-) -> Result<bool> {
-    let page = (rows.saturating_sub(2)) as usize; // leave room for status bar
-
-    // Check for CSI sequences (arrow keys, PgUp/PgDn, mouse, etc.)
-    if buf[*i] == 0x1b && *i + 2 < n && buf[*i + 1] == b'[' {
-        if buf[*i + 2] == b'A' {
-            // Up arrow
-            *i += 3;
-            let new = scroll.offset.saturating_add(1).min(scroll.total);
-            scroll_to(app, session_id, scroll, new)?;
-            return Ok(true);
-        }
-        if buf[*i + 2] == b'B' {
-            // Down arrow
-            *i += 3;
-            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
-            return Ok(true);
-        }
-        // Shift+Up (CSI 1;2A)
-        if buf[*i + 2] == b'1'
-            && *i + 5 < n
-            && buf[*i + 3] == b';'
-            && buf[*i + 4] == b'2'
-            && buf[*i + 5] == b'A'
-        {
-            *i += 6;
-            let new = scroll.offset.saturating_add(1).min(scroll.total);
-            scroll_to(app, session_id, scroll, new)?;
-            return Ok(true);
-        }
-        // Shift+Down (CSI 1;2B)
-        if buf[*i + 2] == b'1'
-            && *i + 5 < n
-            && buf[*i + 3] == b';'
-            && buf[*i + 4] == b'2'
-            && buf[*i + 5] == b'B'
-        {
-            *i += 6;
-            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
-            return Ok(true);
-        }
-        if buf[*i + 2] == b'5' && *i + 3 < n && buf[*i + 3] == b'~' {
-            // Page Up
-            *i += 4;
-            let new = scroll.offset.saturating_add(page).min(scroll.total);
-            scroll_to(app, session_id, scroll, new)?;
-            return Ok(true);
-        }
-        if buf[*i + 2] == b'6' && *i + 3 < n && buf[*i + 3] == b'~' {
-            // Page Down
-            *i += 4;
-            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(page))?;
-            return Ok(true);
-        }
-        // Consume unrecognized CSI sequences
-        *i += 1;
-        return Ok(true);
-    }
-
-    match buf[*i] {
-        b'q' | 0x1b => {
-            *i += 1;
-            exit_scroll_mode(app, session_id, scroll)?;
-            Ok(false)
-        }
-        b'k' => {
-            *i += 1;
-            let new = scroll.offset.saturating_add(1).min(scroll.total);
-            scroll_to(app, session_id, scroll, new)?;
-            Ok(true)
-        }
-        b'j' => {
-            *i += 1;
-            scroll_to(app, session_id, scroll, scroll.offset.saturating_sub(1))?;
-            Ok(true)
-        }
-        b'g' => {
-            // Go to top of scrollback
-            *i += 1;
-            scroll_to(app, session_id, scroll, scroll.total)?;
-            Ok(true)
-        }
-        b'G' => {
-            // Go to bottom (exit scroll mode)
-            *i += 1;
-            exit_scroll_mode(app, session_id, scroll)?;
-            Ok(false)
-        }
-        _ => {
-            *i += 1;
-            Ok(true) // consume unknown keys in scroll mode
-        }
-    }
-}
-
-struct SgrMouseEvent {
-    button: u16,
-    len: usize,
-}
-
-/// Try to parse an SGR mouse sequence starting at `buf[start]`.
-/// Expected format: \x1b[<button;x;yM (or m for release).
-/// Returns None if the sequence is incomplete.
-fn parse_sgr_mouse_scroll(buf: &[u8], start: usize, n: usize) -> Option<SgrMouseEvent> {
-    // We expect buf[start..start+3] == \x1b[<
-    if start + 3 >= n {
-        return None;
-    }
-    let mut pos = start + 3; // skip \x1b[<
-                             // Parse button number (digits before first ';')
-    let btn_start = pos;
-    while pos < n && buf[pos].is_ascii_digit() {
-        pos += 1;
-    }
-    if pos >= n || pos == btn_start {
-        return None;
-    }
-    let button: u16 = std::str::from_utf8(&buf[btn_start..pos])
-        .ok()?
-        .parse()
-        .ok()?;
-    // Skip ;x;y and find M or m
-    while pos < n && buf[pos] != b'M' && buf[pos] != b'm' {
-        pos += 1;
-    }
-    if pos >= n {
-        return None; // incomplete
-    }
-    pos += 1; // consume M/m
-    Some(SgrMouseEvent {
-        button,
-        len: pos - start,
-    })
-}
 
 /// Refresh the terminal after a resize or wake from sleep.
 ///
-/// Exits scroll mode if active, updates dimensions if the terminal size
-/// changed, re-establishes the scroll region, clears the screen, and
-/// re-renders the VTE state with cursor positioning.
+/// Updates dimensions if the terminal size changed, re-establishes
+/// the scroll region, clears the screen, and triggers a SIGWINCH
+/// so the child repaints.
 fn refresh_passthrough_screen(
     app: &mut App,
     kind: &SessionKind,
     last_status: &SessionStatus,
-    scroll: &mut ScrollState,
 ) -> Result<()> {
     let sid = kind.session_id();
-    if scroll.active {
-        exit_scroll_mode(app, sid, scroll)?;
-    }
     let (cols, rows) = terminal::size()?;
     if cols != app.term.cols || rows != app.term.rows {
         app.handle_resize(cols, rows);
     }
     // Stop forwarding, re-establish the scroll region, clear screen,
-    // then re-render and resume forwarding.
+    // then resume forwarding and trigger repaint.
     if let Some(session) = app.get_session(sid) {
-        session.stop_passthrough()?;
+        session.stop_forwarding();
     }
     let mut stdout = io::stdout();
     write!(stdout, "\x1b[1;{}r\x1b[H\x1b[J", app.term.rows - 1)?;
     stdout.flush()?;
     if let Some(session) = app.get_session(sid) {
-        session.start_passthrough()?;
+        session.start_forwarding();
     }
+    trigger_repaint(app, sid);
     draw_normal_status_bar(app.term.rows, app.term.cols, kind, last_status, None);
     Ok(())
 }
@@ -997,7 +770,6 @@ fn passthrough_loop(
     let mut stdin = stdin.lock();
     let mut buf = [0u8; 4096];
     let mut last_status = SessionStatus::Starting;
-    let mut scroll = ScrollState::new();
 
     let sid = kind.session_id();
     let watchers = Watchers::new(app)?;
@@ -1041,7 +813,7 @@ fn passthrough_loop(
             kbtz::debug_log::log(&format!(
                 "passthrough refresh: size_changed={size_changed} elapsed={elapsed:?}"
             ));
-            refresh_passthrough_screen(app, kind, &last_status, &mut scroll)?;
+            refresh_passthrough_screen(app, kind, &last_status)?;
             if app.get_session(sid).is_none() {
                 return Ok(Action::ReturnToTree);
             }
@@ -1061,7 +833,7 @@ fn passthrough_loop(
         if debug_msg.is_some() {
             redraw = true;
         }
-        if redraw && !scroll.active {
+        if redraw {
             draw_normal_status_bar(
                 app.term.rows,
                 app.term.cols,
@@ -1077,107 +849,8 @@ fn passthrough_loop(
             Some(n) => n,
         };
 
-        let rows = app.term.rows;
-        let cols = app.term.cols;
-
         let mut i = 0;
         while i < n {
-            // ── Scroll mode input ──────────────────────────────────
-            if scroll.active {
-                // PREFIX_KEY commands still work in scroll mode
-                if buf[i] == PREFIX_KEY {
-                    i += 1;
-                    let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
-                        Some(b) => b,
-                        None => return Ok(Action::Quit),
-                    };
-                    if let Some(action) = handle_prefix_command(
-                        cmd,
-                        app,
-                        kind,
-                        &mut stdin,
-                        &mut scroll,
-                        &last_status,
-                    )? {
-                        return Ok(action);
-                    }
-                    if scroll.active {
-                        draw_scroll_status_bar(rows, cols, &scroll);
-                    } else {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
-                    }
-                    continue;
-                }
-
-                match handle_scroll_input(app, sid, &mut scroll, &buf, &mut i, n, rows)? {
-                    true => draw_scroll_status_bar(rows, cols, &scroll),
-                    false => {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
-                    }
-                }
-                continue;
-            }
-
-            // ── Normal mode input ──────────────────────────────────
-
-            // Check for SGR mouse events
-            if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' && buf[i + 2] == b'<' {
-                if let Some(evt) = parse_sgr_mouse_scroll(&buf, i, n) {
-                    if evt.button == 0 {
-                        // Left click → enter scroll mode for text selection.
-                        enter_scroll_mode(app, sid, &mut scroll)?;
-                        if scroll.active {
-                            draw_scroll_status_bar(rows, cols, &scroll);
-                        }
-                        i += evt.len;
-                        continue;
-                    }
-                    // Forward other mouse events to child if it requested
-                    // mouse tracking, otherwise discard.
-                    if let Some(session) = app.get_session_mut(sid) {
-                        if session.has_mouse_tracking() {
-                            session.write_input(&buf[i..i + evt.len])?;
-                        }
-                    }
-                    i += evt.len;
-                    continue;
-                }
-            }
-
-            // Check for Shift+Up → enter scroll mode and scroll up 1 line
-            if buf[i] == 0x1b
-                && i + 5 < n
-                && buf[i + 1] == b'['
-                && buf[i + 2] == b'1'
-                && buf[i + 3] == b';'
-                && buf[i + 4] == b'2'
-                && buf[i + 5] == b'A'
-            {
-                enter_scroll_mode(app, sid, &mut scroll)?;
-                if scroll.active {
-                    let new = scroll.offset.saturating_add(1).min(scroll.total);
-                    scroll_to(app, sid, &mut scroll, new)?;
-                    draw_scroll_status_bar(rows, cols, &scroll);
-                }
-                i += 6;
-                continue;
-            }
-
-            // Check for PgUp → enter scroll mode
-            if buf[i] == 0x1b && i + 3 < n && buf[i + 1] == b'[' {
-                let page = (rows.saturating_sub(2)) as usize;
-                if buf[i + 2] == b'5' && buf[i + 3] == b'~' {
-                    enter_scroll_mode(app, sid, &mut scroll)?;
-                    if scroll.active {
-                        let new = scroll.offset.saturating_add(page).min(scroll.total);
-                        scroll_to(app, sid, &mut scroll, new)?;
-                        draw_scroll_status_bar(rows, cols, &scroll);
-                    }
-                    i += 4;
-                    continue;
-                }
-            }
-
             if buf[i] == PREFIX_KEY {
                 i += 1;
                 let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
@@ -1185,43 +858,19 @@ fn passthrough_loop(
                     None => return Ok(Action::Quit),
                 };
                 if let Some(action) =
-                    handle_prefix_command(cmd, app, kind, &mut stdin, &mut scroll, &last_status)?
+                    handle_prefix_command(cmd, app, kind, &mut stdin, &last_status)?
                 {
                     return Ok(action);
                 }
-                if scroll.active {
-                    draw_scroll_status_bar(rows, cols, &scroll);
-                }
             } else {
-                // Find the next PREFIX_KEY or ESC sequence we intercept,
-                // and write the entire chunk to the PTY in one call.
+                // Find the next PREFIX_KEY and write the entire chunk
+                // to the PTY in one call.
                 let start = i;
                 while i < n && buf[i] != PREFIX_KEY {
-                    if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
-                        // Stop before SGR mouse sequence
-                        if buf[i + 2] == b'<' {
-                            break;
-                        }
-                        // Stop before Shift+Up
-                        if buf[i + 2] == b'1'
-                            && i + 5 < n
-                            && buf[i + 3] == b';'
-                            && buf[i + 4] == b'2'
-                            && buf[i + 5] == b'A'
-                        {
-                            break;
-                        }
-                        // Stop before PgUp
-                        if buf[i + 2] == b'5' && i + 3 < n && buf[i + 3] == b'~' {
-                            break;
-                        }
-                    }
                     i += 1;
                 }
-                if i > start {
-                    if let Some(session) = app.get_session_mut(sid) {
-                        session.write_input(&buf[start..i])?;
-                    }
+                if let Some(session) = app.get_session_mut(sid) {
+                    session.write_input(&buf[start..i])?;
                 }
             }
         }
@@ -1252,22 +901,6 @@ fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>) 
     let _ = out.flush();
 }
 
-fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
-    let content = format!(
-        " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
-        scroll.offset, scroll.total,
-    );
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
-}
-
 fn draw_normal_status_bar(
     rows: u16,
     cols: u16,
@@ -1293,83 +926,12 @@ fn draw_normal_status_bar(
 fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind) {
     let content = match kind {
         SessionKind::TopLevel => {
-            " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
+            " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
         }
         SessionKind::Worker { .. } => {
-            " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
+            " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
         }
     };
     draw_bar(rows, cols, "7;33", content, None);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_sgr_scroll_up() {
-        let buf = b"\x1b[<64;10;5M";
-        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
-        assert_eq!(evt.button, 64);
-        assert_eq!(evt.len, buf.len());
-    }
-
-    #[test]
-    fn parse_sgr_scroll_down() {
-        let buf = b"\x1b[<65;10;5M";
-        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
-        assert_eq!(evt.button, 65);
-        assert_eq!(evt.len, buf.len());
-    }
-
-    #[test]
-    fn parse_sgr_click() {
-        let buf = b"\x1b[<0;10;5M";
-        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
-        assert_eq!(evt.button, 0);
-    }
-
-    #[test]
-    fn parse_sgr_release() {
-        // SGR release uses lowercase 'm'
-        let buf = b"\x1b[<0;10;5m";
-        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
-        assert_eq!(evt.button, 0);
-        assert_eq!(evt.len, buf.len());
-    }
-
-    #[test]
-    fn parse_sgr_incomplete_returns_none() {
-        // Missing terminator
-        let buf = b"\x1b[<64;10;5";
-        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
-    }
-
-    #[test]
-    fn parse_sgr_too_short_returns_none() {
-        let buf = b"\x1b[<";
-        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
-    }
-
-    #[test]
-    fn parse_sgr_no_button_digits_returns_none() {
-        let buf = b"\x1b[<;10;5M";
-        assert!(parse_sgr_mouse_scroll(buf, 0, buf.len()).is_none());
-    }
-
-    #[test]
-    fn parse_sgr_at_offset() {
-        let buf = b"xxxxx\x1b[<64;1;1M";
-        let evt = parse_sgr_mouse_scroll(buf, 5, buf.len()).unwrap();
-        assert_eq!(evt.button, 64);
-        assert_eq!(evt.len, buf.len() - 5);
-    }
-
-    #[test]
-    fn parse_sgr_large_coordinates() {
-        let buf = b"\x1b[<64;200;100M";
-        let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
-        assert_eq!(evt.button, 64);
-        assert_eq!(evt.len, buf.len());
-    }
-}
