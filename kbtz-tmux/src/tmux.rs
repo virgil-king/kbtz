@@ -48,10 +48,74 @@ pub fn set_window_option(window_id: &str, option: &str, value: &str) -> Result<(
     Ok(())
 }
 
-/// Check if a window ID exists in the session.
-pub fn window_alive(session: &str, window_id: &str) -> Result<bool> {
-    let ids = list_window_ids(session)?;
-    Ok(ids.iter().any(|id| id == window_id))
+/// Check if a tmux session exists.
+pub fn has_session(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Create a new tmux session with the given name and initial window.
+pub fn create_session(
+    name: &str,
+    window_name: &str,
+    command: &str,
+    args: &[&str],
+) -> Result<()> {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["new-session", "-d", "-s", name, "-n", window_name, "--"]);
+    cmd.arg(command);
+    cmd.args(args);
+
+    let output = cmd.output().context("failed to run tmux new-session")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux new-session failed: {stderr}");
+    }
+    Ok(())
+}
+
+/// Set a tmux session-level option.
+pub fn set_session_option(session: &str, option: &str, value: &str) -> Result<()> {
+    let status = Command::new("tmux")
+        .args(["set-option", "-t", session, option, value])
+        .status()
+        .context("failed to run tmux set-option")?;
+    if !status.success() {
+        bail!("tmux set-option {option} failed for session {session}");
+    }
+    Ok(())
+}
+
+/// Apply session-level tmux settings for the workspace.
+pub fn configure_session(session: &str) -> Result<()> {
+    let settings = [
+        ("automatic-rename", "off"),
+        ("allow-rename", "off"),
+        ("remain-on-exit", "off"),
+        ("mouse", "on"),
+        ("status-interval", "1"),
+    ];
+    for (opt, val) in settings {
+        set_session_option(session, opt, val)?;
+    }
+    Ok(())
+}
+
+/// Bind a key to a run-shell command (global, not session-scoped).
+pub fn bind_key(key: &str, command: &str) -> Result<()> {
+    let status = Command::new("tmux")
+        .args(["bind-key", "-T", "prefix", key, "run-shell", command])
+        .status()
+        .context("failed to run tmux bind-key")?;
+    if !status.success() {
+        bail!("tmux bind-key {key} failed");
+    }
+    Ok(())
 }
 
 /// Spawn a new tmux window running the given command with environment variables.

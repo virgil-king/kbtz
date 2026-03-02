@@ -344,19 +344,22 @@ impl Orchestrator {
     /// Run the main loop. Fully event-driven:
     /// - DB changes wake instantly (via watch_db inotify)
     /// - Pane exits wake instantly (via tmux hook -> sentinel file -> watch_dir inotify)
+    /// - Signal handler wakes instantly (via wake_tx)
     /// - Fallback poll interval catches edge cases where hooks fail
-    pub fn run(&mut self) -> Result<()> {
+    pub fn run(
+        &mut self,
+        wake_tx: std::sync::mpsc::Sender<()>,
+        wake_rx: std::sync::mpsc::Receiver<()>,
+    ) -> Result<()> {
         self.reconcile()?;
 
         // Install tmux hook for event-driven dead-window detection.
         let sentinel_path = format!("{}/pane-exited", self.workspace_dir);
         tmux::install_pane_hook(&self.session, &sentinel_path)?;
 
-        // Set up watchers for both DB changes and pane exit events.
-        let (unified_tx, unified_rx) = std::sync::mpsc::channel();
-
+        // Set up watchers, merging all event sources into the wake channel.
         let (_db_watcher, db_rx) = watch::watch_db(&self.db_path)?;
-        let tx1 = unified_tx.clone();
+        let tx1 = wake_tx.clone();
         std::thread::spawn(move || {
             for _ in db_rx {
                 let _ = tx1.send(());
@@ -365,7 +368,7 @@ impl Orchestrator {
 
         let workspace_path = std::path::Path::new(&self.workspace_dir);
         let (_dir_watcher, dir_rx) = watch::watch_dir(workspace_path)?;
-        let tx2 = unified_tx;
+        let tx2 = wake_tx;
         std::thread::spawn(move || {
             for _ in dir_rx {
                 let _ = tx2.send(());
@@ -384,8 +387,14 @@ impl Orchestrator {
                 }
             }
 
-            watch::drain_events(&unified_rx);
-            watch::wait_for_change(&unified_rx, self.poll_interval);
+            // If session vanished, stop the loop.
+            if !tmux::has_session(&self.session) {
+                info!("Tmux session '{}' gone, exiting", self.session);
+                break;
+            }
+
+            watch::drain_events(&wake_rx);
+            watch::wait_for_change(&wake_rx, self.poll_interval);
         }
 
         let _ = tmux::remove_pane_hook(&self.session);
