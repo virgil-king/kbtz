@@ -109,7 +109,6 @@ pub fn set_window_option_default(session: &str, option: &str, value: &str) -> Re
 /// Apply tmux settings for the workspace session.
 pub fn configure_session(session: &str) -> Result<()> {
     // Session options.
-    set_session_option(session, "mouse", "on")?;
     set_session_option(session, "status-interval", "1")?;
 
     // Window option defaults (apply to all new windows in this session).
