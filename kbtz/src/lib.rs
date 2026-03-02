@@ -3,6 +3,7 @@ pub mod debug_log;
 pub mod model;
 pub mod ops;
 pub mod output;
+pub mod paths;
 pub mod tui;
 pub mod ui;
 pub mod validate;

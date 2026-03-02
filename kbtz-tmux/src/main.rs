@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use log::info;
 
+use kbtz::paths;
 use kbtz_tmux::tmux;
 use kbtz_workspace::config::Config;
 use kbtz_workspace::prompt::TOPLEVEL_PROMPT;
@@ -113,10 +114,7 @@ fn spawn_manager_window(session: &str, config: &Config) -> Result<()> {
         .unwrap_or("claude")
         .to_string();
 
-    let db_path = std::env::var("KBTZ_DB").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{home}/.kbtz/kbtz.db")
-    });
+    let db_path = paths::db_path();
 
     let mut args: Vec<String> = Vec::new();
     if let Some(cfg) = agent_cfg {
@@ -160,10 +158,7 @@ fn bootstrap(cli: &Cli) -> Result<()> {
     tmux::configure_session(&cli.session)?;
 
     // Store workspace dir as a session option for keybindings.
-    let workspace_dir = std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{home}/.kbtz/workspace")
-    });
+    let workspace_dir = paths::workspace_dir();
     tmux::set_session_option(&cli.session, "@kbtz_workspace_dir", &workspace_dir)?;
 
     // Step 5: Spawn the toplevel task-management session.
@@ -228,10 +223,7 @@ fn install_keybindings(session: &str) -> Result<()> {
 }
 
 fn run_orchestrator(cli: Cli) -> Result<()> {
-    let workspace_dir = std::env::var("KBTZ_WORKSPACE_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        format!("{home}/.kbtz/workspace")
-    });
+    let workspace_dir = paths::workspace_dir();
     fs::create_dir_all(&workspace_dir)?;
 
     let _lock = acquire_lock(&workspace_dir)?;
@@ -315,10 +307,12 @@ fn jump_needs_input(session: &str) -> Result<()> {
             }
             if let Ok(content) = fs::read_to_string(&path) {
                 if content.trim() == "needs_input" {
-                    // Filename is session ID with / replaced by -
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        let sid = name.replace('-', "/");
-                        needs_input_sids.push(sid);
+                        // Skip non-status files (locks, sentinels, sockets, pid files).
+                        if name.contains('.') || name == "pane-exited" || name == "orchestrator" {
+                            continue;
+                        }
+                        needs_input_sids.push(paths::filename_to_session_id(name));
                     }
                 }
             }
