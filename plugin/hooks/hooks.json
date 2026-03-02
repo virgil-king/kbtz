@@ -13,11 +13,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active SessionStart"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active SessionStart"
           }
         ]
       }
@@ -27,11 +27,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active UserPromptSubmit"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active UserPromptSubmit"
           }
         ]
       }
@@ -42,11 +42,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input Notification"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input Notification"
           }
         ]
       },
@@ -55,11 +55,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh needs_input Notification"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh needs_input Notification"
           }
         ]
       },
@@ -78,11 +78,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active PreToolUse"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active PreToolUse"
           }
         ]
       }
@@ -92,11 +92,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle Stop"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle Stop"
           }
         ]
       }
@@ -106,11 +106,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh idle SessionEnd"
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle --force"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh idle SessionEnd"
           }
         ]
       }
