@@ -69,6 +69,14 @@ fn handle_notes(app: &mut App, key: KeyEvent) -> KeyAction {
             app.notes_scroll = app.notes_scroll.saturating_sub(1);
             KeyAction::Continue
         }
+        KeyCode::PageDown => {
+            app.notes_scroll = app.notes_scroll.saturating_add(20);
+            KeyAction::Continue
+        }
+        KeyCode::PageUp => {
+            app.notes_scroll = app.notes_scroll.saturating_sub(20);
+            KeyAction::Continue
+        }
         KeyCode::Char('G') => {
             // Approximate total line count (word-wrap may add more, but this
             // is a reasonable upper bound that ratatui clamps safely).
