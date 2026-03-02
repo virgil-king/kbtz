@@ -18,7 +18,13 @@ use crate::watch;
 use app::App;
 use event::KeyAction;
 
-pub fn run(db_path: &str, conn: &Connection, root: Option<&str>, poll_interval: u64) -> Result<()> {
+pub fn run(
+    db_path: &str,
+    conn: &Connection,
+    root: Option<&str>,
+    poll_interval: u64,
+    action: Option<&str>,
+) -> Result<()> {
     let mut app = App::new(conn, root)?;
 
     terminal::enable_raw_mode()?;
@@ -27,7 +33,7 @@ pub fn run(db_path: &str, conn: &Connection, root: Option<&str>, poll_interval: 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app, db_path, conn, root, poll_interval);
+    let result = run_loop(&mut terminal, &mut app, db_path, conn, root, poll_interval, action);
 
     terminal::disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -42,6 +48,7 @@ fn run_loop(
     conn: &Connection,
     root: Option<&str>,
     poll_interval: u64,
+    action: Option<&str>,
 ) -> Result<()> {
     let poll_duration = Duration::from_millis(poll_interval);
 
@@ -122,6 +129,38 @@ fn run_loop(
                                 app.tree.error = Some(e.to_string());
                             } else {
                                 app.refresh(conn, root)?;
+                            }
+                        }
+                        KeyAction::RunAction => {
+                            if let Some(cmd) = action {
+                                if let Some(row) = app.tree.rows.get(app.tree.cursor) {
+                                    terminal::disable_raw_mode()?;
+                                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+                                    let result = std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(cmd)
+                                        .env("KBTZ_TASK", &row.name)
+                                        .env("KBTZ_TASK_STATUS", &row.status)
+                                        .env("KBTZ_TASK_ASSIGNEE", row.assignee.as_deref().unwrap_or(""))
+                                        .status();
+
+                                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                                    terminal::enable_raw_mode()?;
+                                    terminal.clear()?;
+
+                                    match result {
+                                        Err(e) => {
+                                            app.tree.error = Some(format!("action failed: {e}"));
+                                        }
+                                        Ok(exit) if !exit.success() => {
+                                            app.tree.error = Some(format!("action exited with {exit}"));
+                                        }
+                                        Ok(_) => {}
+                                    }
+
+                                    app.refresh(conn, root)?;
+                                }
                             }
                         }
                         KeyAction::Refresh => {

@@ -216,7 +216,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
-    let height = 21.min(term.height.saturating_sub(2));
+    let height = 22.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
@@ -242,7 +242,11 @@ fn render_help(frame: &mut Frame) {
             Span::raw("Toggle collapse"),
         ]),
         Line::from(vec![
-            Span::styled("Enter/n ", Style::default().fg(Color::Cyan)),
+            Span::styled("Enter   ", Style::default().fg(Color::Cyan)),
+            Span::raw("Run action (--action)"),
+        ]),
+        Line::from(vec![
+            Span::styled("n       ", Style::default().fg(Color::Cyan)),
             Span::raw("View notes"),
         ]),
         Line::from(vec![
