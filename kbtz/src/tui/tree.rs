@@ -6,16 +6,12 @@ use crate::ui;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     if app.show_notes {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(frame.area());
-        render_tree(frame, app, chunks[0]);
-        render_notes(frame, app, chunks[1]);
-    } else {
-        let area = frame.area();
-        render_tree(frame, app, area);
+        render_notes(frame, app, frame.area());
+        return;
     }
+
+    let area = frame.area();
+    render_tree(frame, app, area);
 
     match &app.tree.mode {
         ui::TreeMode::ConfirmDone(name) => {
@@ -60,6 +56,13 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let notes_area = chunks[0];
+    let hint_area = chunks[1];
+
     let title = app
         .selected_name()
         .map(|n| format!(" Notes: {n} "))
@@ -77,9 +80,16 @@ fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.notes_scroll, 0));
 
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, notes_area);
+
+    frame.render_widget(
+        Paragraph::new("Esc/q/n: back  j/k: scroll  g/G: top/bottom")
+            .style(Style::default().fg(Color::DarkGray)),
+        hint_area,
+    );
 }
 
 fn render_field(
@@ -233,7 +243,7 @@ fn render_help(frame: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("Enter/n ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle notes panel"),
+            Span::raw("View notes"),
         ]),
         Line::from(vec![
             Span::styled("a       ", Style::default().fg(Color::Cyan)),

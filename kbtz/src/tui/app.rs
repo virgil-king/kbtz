@@ -76,6 +76,7 @@ pub struct App {
     pub tree: TreeView,
     pub show_notes: bool,
     pub notes: Vec<Note>,
+    pub notes_scroll: u16,
     pub add_form: Option<AddForm>,
 }
 
@@ -85,6 +86,7 @@ impl App {
             tree: TreeView::new(ActiveTaskPolicy::Refuse),
             show_notes: false,
             notes: Vec::new(),
+            notes_scroll: 0,
             add_form: None,
         };
         app.refresh(conn, root)?;
@@ -105,6 +107,7 @@ impl App {
 
     pub fn toggle_notes(&mut self) {
         self.show_notes = !self.show_notes;
+        self.notes_scroll = 0;
     }
 
     pub fn load_notes(&mut self, conn: &Connection) -> Result<()> {
