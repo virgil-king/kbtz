@@ -260,6 +260,8 @@ impl Orchestrator {
         // invisible to reconcile — kill it and release the claim.
         if let Err(e) = tmux::set_window_option(&window_id, "@kbtz_task", &task_name)
             .and_then(|()| tmux::set_window_option(&window_id, "@kbtz_sid", &session_id))
+            .and_then(|()| tmux::set_window_option(&window_id, "automatic-rename", "off"))
+            .and_then(|()| tmux::set_window_option(&window_id, "allow-rename", "off"))
         {
             error!("Failed to tag window {window_id} for {task_name}: {e}");
             let _ = tmux::kill_window(&window_id);

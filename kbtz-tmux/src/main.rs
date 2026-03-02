@@ -165,9 +165,6 @@ fn bootstrap(cli: &Cli) -> Result<()> {
     let config = Config::load()?;
     spawn_manager_window(&cli.session, &config)?;
 
-    // Step 5b: Install keybindings.
-    install_keybindings(&cli.session)?;
-
     // Step 6: Spawn the orchestrator as a window in the session.
     let self_exe =
         std::env::current_exe().context("failed to determine kbtz-tmux binary path")?;
@@ -197,29 +194,6 @@ fn bootstrap(cli: &Cli) -> Result<()> {
         &["tmux", "attach-session", "-t", &cli.session],
     );
     bail!("exec tmux attach failed: {err}");
-}
-
-fn install_keybindings(session: &str) -> Result<()> {
-    // prefix-c → switch to manager window
-    let manager_cmd = concat!(
-        "tmux list-windows -F '#{window_id} #{@kbtz_toplevel}' ",
-        "| awk '$2==\"true\" {print $1}' ",
-        "| head -1 ",
-        "| xargs -r tmux select-window -t"
-    );
-    tmux::bind_key("c", manager_cmd)?;
-
-    // prefix-Tab → jump to next needs-input session
-    let self_exe =
-        std::env::current_exe().context("failed to determine kbtz-tmux binary path")?;
-    let tab_cmd = format!(
-        "{} jump-needs-input --session {}",
-        self_exe.display(),
-        session
-    );
-    tmux::bind_key("Tab", &tab_cmd)?;
-
-    Ok(())
 }
 
 fn run_orchestrator(cli: Cli) -> Result<()> {

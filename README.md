@@ -276,14 +276,26 @@ Re-running `kbtz-tmux` when a session exists attaches to it.
 
 ### Tmux keybindings
 
+These work out of the box:
+
 | Key | Action |
 |-----|--------|
 | `^B 0` | Return to task tree (window 0) |
-| `^B c` | Switch to manager session |
 | `^B n` / `^B p` | Next / previous window |
-| `^B Tab` | Jump to next session needing input |
 | `^B [` | Enter copy mode (scroll) |
 | `^B d` | Detach (everything persists) |
+
+Add these to your `~/.tmux.conf` for manager and needs-input navigation:
+
+```tmux
+# Switch to manager window (tagged with @kbtz_toplevel)
+bind-key c run-shell "tmux list-windows -F '#{window_id} #{@kbtz_toplevel}' \
+  | awk '\\$2==\"true\" {print \\$1}' | head -1 \
+  | xargs -r tmux select-window -t"
+
+# Jump to next agent needing input
+bind-key Tab run-shell "kbtz-tmux jump-needs-input"
+```
 
 ### Lifecycle
 
