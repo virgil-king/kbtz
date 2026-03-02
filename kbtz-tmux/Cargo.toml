@@ -1,0 +1,19 @@
+[package]
+name = "kbtz-tmux"
+version = "0.1.0"
+edition = "2021"
+description = "Tmux-based workspace orchestrator for kbtz agent sessions"
+license = "Apache-2.0"
+repository = "https://github.com/virgil-king/kbtz"
+
+[dependencies]
+kbtz = { path = "../kbtz" }
+kbtz-workspace = { path = "../kbtz-workspace" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+exec = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
