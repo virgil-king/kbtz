@@ -288,12 +288,12 @@ These work out of the box:
 Add these to your `~/.tmux.conf` for manager and needs-input navigation:
 
 ```tmux
-# Switch to manager window (tagged with @kbtz_toplevel)
-bind-key c run-shell "tmux list-windows -F '#{window_id} #{@kbtz_toplevel}' \
+# kbtz-tmux: switch to manager window
+bind-key m run-shell "tmux list-windows -F '#{window_id} #{@kbtz_toplevel}' \
   | awk '\\$2==\"true\" {print \\$1}' | head -1 \
   | xargs -r tmux select-window -t"
 
-# Jump to next agent needing input
+# kbtz-tmux: jump to next agent needing input
 bind-key Tab run-shell "kbtz-tmux jump-needs-input"
 ```
 
