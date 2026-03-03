@@ -460,10 +460,21 @@ impl FileStatusDecorator {
 impl TreeDecorator for FileStatusDecorator {
     fn decorate(&self, row: &TreeRow) -> RowDecoration {
         if let Some(ref assignee) = row.assignee {
+            // Known session with status file: 🤖🟢 task-name
             if let Some(status) = self.statuses.get(assignee) {
                 return RowDecoration {
                     icon_override: Some((
-                        format!("{} ", session_indicator(status)),
+                        format!("\u{1f916}{} ", session_indicator(status)),
+                        status_style(&row.status),
+                    )),
+                    after_name: vec![],
+                };
+            }
+            // Assigned but no status file (external/stale): 👽⭕  task-name
+            if row.status == "active" {
+                return RowDecoration {
+                    icon_override: Some((
+                        format!("\u{1f47d}{}  ", icon_for_task(row)),
                         status_style(&row.status),
                     )),
                     after_name: vec![],
@@ -1152,6 +1163,7 @@ mod tests {
         let dec = decorator.decorate(&row);
         assert!(dec.icon_override.is_some());
         let (icon, _) = dec.icon_override.unwrap();
+        assert!(icon.contains('\u{1f916}'));
         assert!(icon.contains('\u{1f7e2}'));
     }
 
