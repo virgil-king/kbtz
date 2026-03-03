@@ -46,9 +46,7 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, |_| {
-        ui::RowDecoration::default()
-    });
+    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, app.decorator.as_ref());
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Tasks "))
         .highlight_style(Style::default().bg(Color::DarkGray));

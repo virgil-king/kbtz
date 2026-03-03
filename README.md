@@ -10,16 +10,18 @@ The name comes from "kibitz" -- to watch and offer commentary.
 - **Structure work with dependencies** — parent/child and blocking relationships between tasks so agents work in the right order
 - **Unblocked tasks immediately get their own agent** — when a task's dependencies are satisfied, the workspace claims it and spawns a new session automatically
 
-kbtz has two components:
+kbtz has three components:
 
-- **`kbtz-workspace`** — The terminal workspace you interact with. Manages concurrent agent sessions against a shared task database with a tmux-like interface for monitoring and interacting with them.
+- **`kbtz-workspace`** — A terminal workspace with a built-in multiplexer. Manages concurrent agent sessions against a shared task database with a tmux-like interface for monitoring and interacting with them.
+- **`kbtz-tmux`** — An alternative orchestrator that uses tmux as the session substrate. Same task orchestration, but delegates window management to tmux.
 - **`kbtz`** — The underlying CLI that agents use to interact with the task database: creating tasks, setting dependencies, claiming work, and adding notes.
 
 ## Install
 
 ```bash
 cargo install --path kbtz             # task tracker CLI
-cargo install --path kbtz-workspace   # workspace manager
+cargo install --path kbtz-workspace   # workspace manager (built-in multiplexer)
+cargo install --path kbtz-tmux        # workspace manager (tmux-based)
 ```
 
 ## kbtz-workspace
@@ -247,6 +249,63 @@ Install from the marketplace:
 /plugin install kbtz@kbtz
 ```
 
+## kbtz-tmux
+
+`kbtz-tmux` is an alternative orchestrator that uses tmux as the session substrate instead of managing PTYs directly. Where `kbtz-workspace` provides its own terminal multiplexer, `kbtz-tmux` delegates window management to tmux and focuses purely on task orchestration.
+
+### Usage
+
+```bash
+kbtz-tmux [OPTIONS]
+```
+
+Running `kbtz-tmux` is the single command to start everything. It creates a tmux session with:
+- Window 0: `kbtz watch` (task tree)
+- Manager window: interactive task management agent
+- Orchestrator window: the orchestration loop
+
+Re-running `kbtz-tmux` when a session exists attaches to it.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--session <name>` | `workspace` / `$KBTZ_TMUX_SESSION` | Tmux session name |
+| `--max <N>` | `4` | Max concurrent agent sessions |
+| `--prefer <text>` | | FTS preference hint for task selection |
+| `--poll <secs>` | `60` | Fallback poll interval |
+| `--no-attach` | | Run orchestrator directly (no session bootstrap) |
+
+### Tmux keybindings
+
+These work out of the box:
+
+| Key | Action |
+|-----|--------|
+| `^B 0` | Return to task tree (window 0) |
+| `^B n` / `^B p` | Next / previous window |
+| `^B [` | Enter copy mode (scroll) |
+| `^B d` | Detach (everything persists) |
+
+Add these to your `~/.tmux.conf` for additional navigation:
+
+```tmux
+# kbtz-tmux: return to task tree
+bind-key t select-window -t :0
+
+# kbtz-tmux: switch to manager window
+bind-key g run-shell "tmux list-windows -F '##{window_id} ##{@kbtz_toplevel}' \
+  | awk '\\$2==\"true\" {print \\$1}' | head -1 \
+  | xargs -r tmux select-window -t"
+
+# kbtz-tmux: jump to next agent needing input
+bind-key Tab run-shell "kbtz-tmux jump-needs-input"
+```
+
+### Lifecycle
+
+- **Detach** (`^B d`): all windows persist. Re-run `kbtz-tmux` to reattach.
+- **Kill session**: tmux kills all windows including the orchestrator. Task claims are released on next startup via reconciliation.
+- **Orchestrator crash**: agent windows survive. Re-run `kbtz-tmux` to reattach; manually restart the orchestrator window if needed.
+
 ## Architecture
 
 ```
@@ -256,6 +315,7 @@ kbtz/src/
   model.rs     Task and Note data types
   ops.rs       All database operations (40+ tests)
   output.rs    Text, tree, and JSON formatters
+  paths.rs     Centralized path resolution and session ID encoding
   validate.rs  Name validation, cycle detection
   main.rs      CLI dispatch
   tui/         Ratatui TUI with tree view and notes panel
@@ -268,4 +328,11 @@ kbtz-workspace/src/
   lifecycle.rs Pure state machine for session reaping and spawning
   tree.rs      Ratatui tree view rendering
   prompt.rs    Agent and task manager system prompts
+
+kbtz-tmux/src/
+  main.rs         Bootstrap, orchestrator runner, jump-needs-input subcommand
+  orchestrator.rs Orchestrator loop: claim/spawn/reap/reconcile
+  tmux.rs         Tmux CLI wrapper functions
+  lifecycle.rs    Pure state machine for window lifecycle decisions
+  lib.rs          Public API (lifecycle, tmux modules)
 ```

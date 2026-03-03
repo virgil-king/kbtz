@@ -65,7 +65,7 @@ pub enum Action {
 }
 
 fn session_id_to_filename(session_id: &str) -> String {
-    session_id.replace('/', "-")
+    kbtz::paths::session_id_to_filename(session_id)
 }
 
 /// Returns true if the error is an SQLite SQLITE_BUSY (database locked)
@@ -313,9 +313,7 @@ impl App {
             };
             match claim {
                 Some(task_name) => {
-                    kbtz::debug_log::log(&format!(
-                        "spawn: claimed {task_name} as {session_id}"
-                    ));
+                    kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
                     let task = ops::get_task(&self.conn, &task_name)?;
                     match self.spawn_session(&task, &session_id) {
                         Ok(session) => {
@@ -512,7 +510,7 @@ impl App {
                 continue;
             }
             let stem = path.file_stem().unwrap().to_string_lossy();
-            let session_id = stem.replacen('-', "/", 1);
+            let session_id = kbtz::paths::filename_to_session_id(&stem);
             let pid_path = path.with_extension("pid");
 
             // Verify the shepherd process is still alive before attempting to connect.

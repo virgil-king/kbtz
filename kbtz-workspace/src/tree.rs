@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
 
 use crate::app::App;
+use crate::session::SessionHandle;
 use kbtz::ui;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -14,25 +17,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_footer(frame, app, chunks[1]);
 }
 
-fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.tree.rows.is_empty() {
-        let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" kbtz-workspace "),
-            );
-        frame.render_widget(msg, area);
-        return;
-    }
+struct SessionDecorator<'a> {
+    task_to_session: &'a HashMap<String, String>,
+    sessions: &'a HashMap<String, Box<dyn SessionHandle>>,
+}
 
-    let task_to_session = &app.task_to_session;
-    let sessions = &app.sessions;
-    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, |row| {
+impl ui::TreeDecorator for SessionDecorator<'_> {
+    fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
         // Workspace session: 🤖 + status indicator + session ID
-        if let Some(sid) = task_to_session.get(&row.name) {
-            if let Some(session) = sessions.get(sid) {
+        if let Some(sid) = self.task_to_session.get(&row.name) {
+            if let Some(session) = self.sessions.get(sid) {
                 return ui::RowDecoration {
                     icon_override: Some((
                         format!("\u{1f916}{} ", session.status().indicator()),
@@ -61,7 +55,27 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         ui::RowDecoration::default()
-    });
+    }
+}
+
+fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.tree.rows.is_empty() {
+        let msg = Paragraph::new("No tasks. Add tasks with: kbtz add <name> <description>")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" kbtz-workspace "),
+            );
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let decorator = SessionDecorator {
+        task_to_session: &app.task_to_session,
+        sessions: &app.sessions,
+    };
+    let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, &decorator);
 
     let active = app.sessions.len();
     let title = if app.manual {
