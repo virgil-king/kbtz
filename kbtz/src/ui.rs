@@ -279,12 +279,25 @@ impl TreeView {
         });
     }
 
+    /// Cycle to the next filter state:
+    /// hide both → show paused → show done → show all → hide both
+    pub fn cycle_filter(&mut self) {
+        (self.show_done, self.show_paused) = match (self.show_done, self.show_paused) {
+            (false, false) => (false, true),
+            (false, true) => (true, false),
+            (true, false) => (true, true),
+            (true, true) => (false, false),
+        };
+    }
+
     /// Returns a label describing the current filter state, or `None` if
     /// using default filtering (hiding done and paused).
     pub fn filter_label(&self) -> Option<&'static str> {
         match (self.show_done, self.show_paused) {
+            (false, false) => None,
+            (false, true) => Some("+paused"),
+            (true, false) => Some("+done"),
             (true, true) => Some("all"),
-            _ => None,
         }
     }
 
@@ -359,9 +372,7 @@ impl TreeView {
                         }
                     }
                     KeyCode::Char('f') => {
-                        let showing_all = self.show_done && self.show_paused;
-                        self.show_done = !showing_all;
-                        self.show_paused = !showing_all;
+                        self.cycle_filter();
                         TreeKeyAction::ToggleShowAll
                     }
                     KeyCode::Char('?') => {
@@ -1088,16 +1099,30 @@ mod tests {
     // ── filter ──
 
     #[test]
-    fn handle_key_filter_toggles_show_all() {
+    fn handle_key_filter_cycles_states() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
         assert!(!tv.show_done);
         assert!(!tv.show_paused);
 
+        // hide both → show paused
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(!tv.show_done);
+        assert!(tv.show_paused);
+
+        // show paused → show done
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(tv.show_done);
+        assert!(!tv.show_paused);
+
+        // show done → show all
         let key = KeyEvent::from(KeyCode::Char('f'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(tv.show_done);
         assert!(tv.show_paused);
 
+        // show all → hide both
         let key = KeyEvent::from(KeyCode::Char('f'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(!tv.show_done);
@@ -1133,15 +1158,17 @@ mod tests {
     }
 
     #[test]
-    fn filter_label_default_is_none() {
-        let tv = TreeView::new(ActiveTaskPolicy::Refuse);
-        assert!(tv.filter_label().is_none());
-    }
-
-    #[test]
-    fn filter_label_all_when_showing_all() {
+    fn filter_label_all_states() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        assert_eq!(tv.filter_label(), None);
+
+        tv.show_paused = true;
+        assert_eq!(tv.filter_label(), Some("+paused"));
+
+        tv.show_paused = false;
         tv.show_done = true;
+        assert_eq!(tv.filter_label(), Some("+done"));
+
         tv.show_paused = true;
         assert_eq!(tv.filter_label(), Some("all"));
     }
