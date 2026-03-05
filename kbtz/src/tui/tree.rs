@@ -21,7 +21,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ui::render_confirm(frame, "Pause", name, "has an active session.")
         }
         ui::TreeMode::Help => render_help(frame),
-        ui::TreeMode::Normal => {}
+        ui::TreeMode::Search(_) | ui::TreeMode::Normal => {}
     }
     if app.add_form.is_some() {
         render_add_dialog(frame, app);
@@ -29,7 +29,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
-    let (tree_area, error_area) = if app.tree.error.is_some() {
+    let needs_footer = app.tree.error.is_some()
+        || matches!(app.tree.mode, ui::TreeMode::Search(_))
+        || app.tree.filter.is_some();
+
+    let (tree_area, footer_area) = if needs_footer {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -39,11 +43,20 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
         (area, None)
     };
 
-    if let (Some(err), Some(err_area)) = (&app.tree.error, error_area) {
-        frame.render_widget(
-            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
-            err_area,
-        );
+    if let Some(footer) = footer_area {
+        if let ui::TreeMode::Search(query) = &app.tree.mode {
+            frame.render_widget(Paragraph::new(ui::search_footer_line(query)), footer);
+        } else if let Some(err) = &app.tree.error {
+            frame.render_widget(
+                Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+                footer,
+            );
+        } else if let Some(filter) = &app.tree.filter {
+            frame.render_widget(
+                Paragraph::new(Line::from(ui::filter_footer_spans(filter))),
+                footer,
+            );
+        }
     }
 
     let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, app.decorator.as_ref());
@@ -214,7 +227,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
-    let height = 22.min(term.height.saturating_sub(2));
+    let height = 24.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
@@ -270,6 +283,14 @@ fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("U       ", Style::default().fg(Color::Cyan)),
             Span::raw("Force-unassign task"),
+        ]),
+        Line::from(vec![
+            Span::styled("/       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Search/filter tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("Esc     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Clear search filter"),
         ]),
         Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),
