@@ -108,7 +108,11 @@ impl App {
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
         let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
         self.tree.filter_tasks(&mut tasks);
-        self.tree.rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
+        let rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
+        self.tree.rows = match &self.tree.filter {
+            Some(query) => ui::filter_rows(&rows, query),
+            None => rows,
+        };
         self.tree.clamp_cursor();
         self.refresh_statuses();
         // Refresh notes if panel is open

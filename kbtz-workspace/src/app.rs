@@ -160,7 +160,11 @@ impl App {
     pub fn refresh_tree(&mut self) -> Result<()> {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
         self.tree.filter_tasks(&mut tasks);
-        self.tree.rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
+        let rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
+        self.tree.rows = match &self.tree.filter {
+            Some(query) => kbtz::ui::filter_rows(&rows, query),
+            None => rows,
+        };
         self.tree.clamp_cursor();
         Ok(())
     }

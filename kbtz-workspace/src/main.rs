@@ -72,6 +72,7 @@ TREE MODE KEYS:
     p               Pause/unpause task
     d               Mark task done
     U               Force-unassign task
+    /               Search/filter tasks
     ?               Help
     q               Quit
 
@@ -442,7 +443,7 @@ fn tree_loop(
                     let msg = active_task_message(app, name);
                     kbtz::ui::render_confirm(frame, "Pause", name, &msg);
                 }
-                kbtz::ui::TreeMode::Normal => {}
+                kbtz::ui::TreeMode::Search(_) | kbtz::ui::TreeMode::Normal => {}
             }
         })?;
 

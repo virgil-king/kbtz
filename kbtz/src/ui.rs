@@ -189,6 +189,7 @@ pub enum TreeMode {
     Help,
     ConfirmDone(String),
     ConfirmPause(String),
+    Search(String),
 }
 
 /// Action returned by `TreeView::handle_key()`.
@@ -222,6 +223,7 @@ pub struct TreeView {
     pub error: Option<String>,
     pub mode: TreeMode,
     pub active_policy: ActiveTaskPolicy,
+    pub filter: Option<String>,
     pub show_done: bool,
     pub show_paused: bool,
 }
@@ -236,6 +238,7 @@ impl TreeView {
             error: None,
             mode: TreeMode::Normal,
             active_policy,
+            filter: None,
             show_done: false,
             show_paused: false,
         }
@@ -346,6 +349,34 @@ impl TreeView {
                     TreeKeyAction::Continue
                 }
             }
+            TreeMode::Search(query) => {
+                let mut query = query.clone();
+                match key.code {
+                    KeyCode::Esc => {
+                        self.filter = None;
+                        self.mode = TreeMode::Normal;
+                        TreeKeyAction::Refresh
+                    }
+                    KeyCode::Enter => {
+                        self.filter = if query.is_empty() { None } else { Some(query) };
+                        self.mode = TreeMode::Normal;
+                        TreeKeyAction::Refresh
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        self.filter = if query.is_empty() { None } else { Some(query.clone()) };
+                        self.mode = TreeMode::Search(query);
+                        TreeKeyAction::Refresh
+                    }
+                    KeyCode::Char(c) => {
+                        query.push(c);
+                        self.filter = Some(query.clone());
+                        self.mode = TreeMode::Search(query);
+                        TreeKeyAction::Refresh
+                    }
+                    _ => TreeKeyAction::Continue,
+                }
+            }
             TreeMode::Normal => {
                 self.error = None;
                 match key.code {
@@ -378,6 +409,15 @@ impl TreeView {
                     KeyCode::Char('?') => {
                         self.mode = TreeMode::Help;
                         TreeKeyAction::Continue
+                    }
+                    KeyCode::Char('/') => {
+                        let initial = self.filter.clone().unwrap_or_default();
+                        self.mode = TreeMode::Search(initial);
+                        TreeKeyAction::Continue
+                    }
+                    KeyCode::Esc if self.filter.is_some() => {
+                        self.filter = None;
+                        TreeKeyAction::Refresh
                     }
                     _ => TreeKeyAction::Unhandled,
                 }
@@ -524,6 +564,83 @@ impl TreeDecorator for FileStatusDecorator {
         }
         RowDecoration::default()
     }
+}
+
+/// Filter tree rows to only those matching the query (case-insensitive substring
+/// of name or description). Ancestor rows are retained to preserve tree structure.
+pub fn filter_rows(rows: &[TreeRow], query: &str) -> Vec<TreeRow> {
+    let query_lower = query.to_lowercase();
+    // First pass: find which rows match directly.
+    let matches: HashSet<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.name.to_lowercase().contains(&query_lower)
+                || row.description.to_lowercase().contains(&query_lower)
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Second pass: for each matching row, include its ancestors.
+    // Ancestors are rows at shallower depths that precede it in the flat list.
+    let mut keep: Vec<bool> = vec![false; rows.len()];
+    for &idx in &matches {
+        keep[idx] = true;
+        // Walk backwards to find ancestors at each depth level.
+        let mut need_depth = rows[idx].depth;
+        if need_depth > 0 {
+            for j in (0..idx).rev() {
+                if rows[j].depth < need_depth {
+                    keep[j] = true;
+                    need_depth = rows[j].depth;
+                    if need_depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Third pass: rebuild with corrected is_last_at_depth.
+    let kept: Vec<&TreeRow> = rows.iter().zip(&keep).filter(|(_, k)| **k).map(|(r, _)| r).collect();
+    let mut result = Vec::with_capacity(kept.len());
+    for (i, row) in kept.iter().enumerate() {
+        let mut new_row = (*row).clone();
+        // Recalculate is_last_at_depth: a row is last at its depth if no later
+        // sibling exists at the same depth (before the next row at a shallower depth).
+        let is_last = kept[i + 1..]
+            .iter()
+            .take_while(|r| r.depth >= new_row.depth)
+            .all(|r| r.depth != new_row.depth);
+        if new_row.depth < new_row.is_last_at_depth.len() {
+            new_row.is_last_at_depth[new_row.depth] = is_last;
+        }
+        // Check if any children survived filtering.
+        let has_visible_children = kept[i + 1..]
+            .first()
+            .is_some_and(|next| next.depth > new_row.depth);
+        new_row.has_children = has_visible_children;
+        result.push(new_row);
+    }
+    result
+}
+
+/// Render the search input footer line.
+pub fn search_footer_line(query: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("/", Style::default().fg(Color::Cyan)),
+        Span::raw(query.to_string()),
+        Span::styled("_", Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+/// Render a filter indicator for the footer when a filter is active but not in search mode.
+pub fn filter_footer_spans(filter: &str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("/", Style::default().fg(Color::Cyan)),
+        Span::styled(filter.to_string(), Style::default().fg(Color::Yellow)),
+        Span::raw("  "),
+    ]
 }
 
 /// Build ListItems for all tree rows.
@@ -1319,5 +1436,196 @@ mod tests {
         let dec = DefaultDecorator.decorate(&row);
         assert!(dec.icon_override.is_none());
         assert!(dec.after_name.is_empty());
+    }
+
+    // ── filter_rows ──
+
+    fn make_row_with_desc(name: &str, desc: &str) -> TreeRow {
+        TreeRow {
+            name: name.into(),
+            status: "open".into(),
+            description: desc.into(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        }
+    }
+
+    #[test]
+    fn filter_rows_matches_name() {
+        let rows = vec![
+            make_row_with_desc("auth-login", "Login feature"),
+            make_row_with_desc("db-migrate", "Run migrations"),
+        ];
+        let filtered = filter_rows(&rows, "auth");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "auth-login");
+    }
+
+    #[test]
+    fn filter_rows_matches_description() {
+        let rows = vec![
+            make_row_with_desc("task-a", "Fix login bug"),
+            make_row_with_desc("task-b", "Add signup page"),
+        ];
+        let filtered = filter_rows(&rows, "login");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "task-a");
+    }
+
+    #[test]
+    fn filter_rows_case_insensitive() {
+        let rows = vec![make_row_with_desc("MyTask", "Description")];
+        let filtered = filter_rows(&rows, "mytask");
+        assert_eq!(filtered.len(), 1);
+        let filtered = filter_rows(&rows, "MYTASK");
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filter_rows_preserves_ancestors() {
+        let rows = vec![
+            TreeRow {
+                name: "parent".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 0,
+                has_children: true,
+                is_last_at_depth: vec![true],
+                blocked_by: vec![],
+            },
+            TreeRow {
+                name: "child-match".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 1,
+                has_children: false,
+                is_last_at_depth: vec![true, true],
+                blocked_by: vec![],
+            },
+            TreeRow {
+                name: "child-no".into(),
+                status: "open".into(),
+                description: String::new(),
+                assignee: None,
+                depth: 1,
+                has_children: false,
+                is_last_at_depth: vec![true, true],
+                blocked_by: vec![],
+            },
+        ];
+        let filtered = filter_rows(&rows, "match");
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "parent");
+        assert_eq!(filtered[1].name, "child-match");
+    }
+
+    #[test]
+    fn filter_rows_empty_query_returns_all() {
+        let rows = vec![
+            make_row_with_desc("a", ""),
+            make_row_with_desc("b", ""),
+        ];
+        let filtered = filter_rows(&rows, "");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn filter_rows_no_match_returns_empty() {
+        let rows = vec![make_row_with_desc("task", "desc")];
+        let filtered = filter_rows(&rows, "zzz");
+        assert!(filtered.is_empty());
+    }
+
+    // ── Search mode key handling ──
+
+    #[test]
+    fn handle_key_slash_enters_search() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let key = KeyEvent::from(KeyCode::Char('/'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
+        assert!(matches!(tv.mode, TreeMode::Search(ref q) if q.is_empty()));
+    }
+
+    #[test]
+    fn search_mode_typing_updates_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.mode = TreeMode::Search(String::new());
+        let key = KeyEvent::from(KeyCode::Char('a'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert_eq!(tv.filter.as_deref(), Some("a"));
+        assert!(matches!(tv.mode, TreeMode::Search(ref q) if q == "a"));
+    }
+
+    #[test]
+    fn search_mode_enter_confirms_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.mode = TreeMode::Search("test".into());
+        tv.filter = Some("test".into());
+        let key = KeyEvent::from(KeyCode::Enter);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert_eq!(tv.filter.as_deref(), Some("test"));
+        assert!(matches!(tv.mode, TreeMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_esc_clears_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.mode = TreeMode::Search("test".into());
+        tv.filter = Some("test".into());
+        let key = KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert!(tv.filter.is_none());
+        assert!(matches!(tv.mode, TreeMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_backspace_shrinks_query() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.mode = TreeMode::Search("ab".into());
+        tv.filter = Some("ab".into());
+        let key = KeyEvent::from(KeyCode::Backspace);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert_eq!(tv.filter.as_deref(), Some("a"));
+        assert!(matches!(tv.mode, TreeMode::Search(ref q) if q == "a"));
+    }
+
+    #[test]
+    fn search_mode_backspace_empty_clears_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.mode = TreeMode::Search("a".into());
+        tv.filter = Some("a".into());
+        let key = KeyEvent::from(KeyCode::Backspace);
+        tv.handle_key(key);
+        assert!(tv.filter.is_none());
+    }
+
+    #[test]
+    fn esc_in_normal_clears_active_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.filter = Some("test".into());
+        let key = KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert!(tv.filter.is_none());
+    }
+
+    #[test]
+    fn esc_in_normal_without_filter_is_unhandled() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let key = KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Unhandled));
+    }
+
+    #[test]
+    fn slash_with_existing_filter_reopens_search() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.filter = Some("old".into());
+        let key = KeyEvent::from(KeyCode::Char('/'));
+        tv.handle_key(key);
+        assert!(matches!(tv.mode, TreeMode::Search(ref q) if q == "old"));
     }
 }

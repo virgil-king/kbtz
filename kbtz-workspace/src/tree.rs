@@ -97,13 +97,19 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let text = if let Some(err) = &app.tree.error {
+    let text = if let ui::TreeMode::Search(query) = &app.tree.mode {
+        ui::search_footer_line(query)
+    } else if let Some(err) = &app.tree.error {
         Line::from(vec![Span::styled(
             err.as_str(),
             Style::default().fg(Color::Red),
         )])
     } else {
-        Line::from(vec![
+        let mut spans = Vec::new();
+        if let Some(filter) = &app.tree.filter {
+            spans.extend(ui::filter_footer_spans(filter));
+        }
+        spans.extend(vec![
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(":nav  "),
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
@@ -116,19 +122,16 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":manager  "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
             Span::raw(":collapse  "),
-            Span::styled("p", Style::default().fg(Color::Cyan)),
-            Span::raw(":pause  "),
-            Span::styled("d", Style::default().fg(Color::Cyan)),
-            Span::raw(":done  "),
-            Span::styled("U", Style::default().fg(Color::Cyan)),
-            Span::raw(":force-unassign  "),
+            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::raw(":search  "),
             Span::styled("f", Style::default().fg(Color::Cyan)),
             Span::raw(":filter  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
             Span::raw(":quit"),
-        ])
+        ]);
+        Line::from(spans)
     };
 
     frame.render_widget(Paragraph::new(text), area);
@@ -137,7 +140,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 27.min(term.height.saturating_sub(2));
+    let height = 30.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -185,6 +188,14 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  U          ", Style::default().fg(Color::Cyan)),
             Span::raw("Force-unassign task"),
+        ]),
+        Line::from(vec![
+            Span::styled("  /          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Search/filter tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Clear search filter"),
         ]),
         Line::from(vec![
             Span::styled("  f          ", Style::default().fg(Color::Cyan)),
