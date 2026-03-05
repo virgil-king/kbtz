@@ -107,7 +107,7 @@ impl App {
 
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
         let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
-        tasks.retain(|t| t.status != "done");
+        self.tree.filter_tasks(&mut tasks);
         self.tree.rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
         self.tree.clamp_cursor();
         self.refresh_statuses();

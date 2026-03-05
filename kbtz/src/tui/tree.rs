@@ -47,8 +47,12 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, app.decorator.as_ref());
+    let title = match app.tree.filter_label() {
+        Some(label) => format!(" Tasks ({label}) "),
+        None => " Tasks ".to_string(),
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Tasks "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().bg(Color::DarkGray));
     frame.render_stateful_widget(list, tree_area, &mut app.tree.list_state);
 }
@@ -214,7 +218,7 @@ fn render_add_dialog(frame: &mut Frame, app: &App) {
 fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 50.min(term.width.saturating_sub(4));
-    let height = 22.min(term.height.saturating_sub(2));
+    let height = 23.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
 
     frame.render_widget(Clear, area);
@@ -270,6 +274,10 @@ fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("U       ", Style::default().fg(Color::Cyan)),
             Span::raw("Force-unassign task"),
+        ]),
+        Line::from(vec![
+            Span::styled("f       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle done/paused filter"),
         ]),
         Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),
