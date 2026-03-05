@@ -159,7 +159,7 @@ impl App {
     /// Rebuild the tree view from the database.
     pub fn refresh_tree(&mut self) -> Result<()> {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
-        tasks.retain(|t| t.status != "done");
+        self.tree.filter_tasks(&mut tasks);
         let rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
         self.tree.rows = match &self.tree.filter {
             Some(query) => kbtz::ui::filter_rows(&rows, query),

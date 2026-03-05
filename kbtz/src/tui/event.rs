@@ -35,6 +35,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         TreeKeyAction::Unpause(n) => KeyAction::Unpause(n),
         TreeKeyAction::MarkDone(n) => KeyAction::MarkDone(n),
         TreeKeyAction::ForceUnassign(n) => KeyAction::ForceUnassign(n),
+        TreeKeyAction::ToggleShowAll => KeyAction::Refresh,
         TreeKeyAction::Continue => KeyAction::Continue,
         TreeKeyAction::Unhandled => match key.code {
             KeyCode::Esc => KeyAction::Quit,

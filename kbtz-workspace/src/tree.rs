@@ -78,11 +78,15 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, &decorator);
 
     let active = app.sessions.len();
+    let filter_suffix = match app.tree.filter_label() {
+        Some(label) => format!(", {label}"),
+        None => String::new(),
+    };
     let title = if app.manual {
-        format!(" kbtz-workspace ({active} sessions, manual) ")
+        format!(" kbtz-workspace ({active} sessions, manual{filter_suffix}) ")
     } else {
         let max = app.max_concurrency;
-        format!(" kbtz-workspace ({active}/{max} sessions) ")
+        format!(" kbtz-workspace ({active}/{max} sessions{filter_suffix}) ")
     };
 
     let list = List::new(items)
@@ -120,6 +124,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":collapse  "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(":search  "),
+            Span::styled("f", Style::default().fg(Color::Cyan)),
+            Span::raw(":filter  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -134,7 +140,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 28.min(term.height.saturating_sub(2));
+    let height = 30.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -190,6 +196,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  Esc        ", Style::default().fg(Color::Cyan)),
             Span::raw("Clear search filter"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle done/paused filter"),
         ]),
         Line::from(vec![
             Span::styled("  q          ", Style::default().fg(Color::Cyan)),

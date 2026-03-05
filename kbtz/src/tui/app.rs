@@ -107,7 +107,7 @@ impl App {
 
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
         let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
-        tasks.retain(|t| t.status != "done");
+        self.tree.filter_tasks(&mut tasks);
         let rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
         self.tree.rows = match &self.tree.filter {
             Some(query) => ui::filter_rows(&rows, query),
