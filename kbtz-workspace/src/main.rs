@@ -459,7 +459,7 @@ fn tree_loop(
 
                 match app.tree.handle_key(key) {
                     TreeKeyAction::Quit => return Ok(Action::Quit),
-                    TreeKeyAction::Refresh => app.refresh_tree()?,
+                    TreeKeyAction::Refresh | TreeKeyAction::ToggleShowAll => app.refresh_tree()?,
                     TreeKeyAction::Pause(name) => match kbtz::ops::pause_task(&app.conn, &name) {
                         Ok(()) => app.refresh_tree()?,
                         Err(e) => app.tree.error = Some(e.to_string()),

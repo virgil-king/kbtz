@@ -205,6 +205,8 @@ pub enum TreeKeyAction {
     MarkDone(String),
     /// Force-unassign this task.
     ForceUnassign(String),
+    /// Toggle visibility of done/paused tasks; caller should refresh from DB.
+    ToggleShowAll,
     /// Key was not handled; caller should check app-specific bindings.
     Unhandled,
     /// Handled, no further action needed.
@@ -220,6 +222,8 @@ pub struct TreeView {
     pub error: Option<String>,
     pub mode: TreeMode,
     pub active_policy: ActiveTaskPolicy,
+    pub show_done: bool,
+    pub show_paused: bool,
 }
 
 impl TreeView {
@@ -232,6 +236,8 @@ impl TreeView {
             error: None,
             mode: TreeMode::Normal,
             active_policy,
+            show_done: false,
+            show_paused: false,
         }
     }
 
@@ -262,6 +268,37 @@ impl TreeView {
 
     pub fn selected_name(&self) -> Option<&str> {
         self.rows.get(self.cursor).map(|r| r.name.as_str())
+    }
+
+    /// Filter a task list according to the current show_done/show_paused flags.
+    pub fn filter_tasks(&self, tasks: &mut Vec<Task>) {
+        tasks.retain(|t| match t.status.as_str() {
+            "done" => self.show_done,
+            "paused" => self.show_paused,
+            _ => true,
+        });
+    }
+
+    /// Cycle to the next filter state:
+    /// hide both → show paused → show done → show all → hide both
+    pub fn cycle_filter(&mut self) {
+        (self.show_done, self.show_paused) = match (self.show_done, self.show_paused) {
+            (false, false) => (false, true),
+            (false, true) => (true, false),
+            (true, false) => (true, true),
+            (true, true) => (false, false),
+        };
+    }
+
+    /// Returns a label describing the current filter state, or `None` if
+    /// using default filtering (hiding done and paused).
+    pub fn filter_label(&self) -> Option<&'static str> {
+        match (self.show_done, self.show_paused) {
+            (false, false) => None,
+            (false, true) => Some("+paused"),
+            (true, false) => Some("+done"),
+            (true, true) => Some("all"),
+        }
     }
 
     /// Clamp cursor after rows change (e.g. after refresh from DB).
@@ -333,6 +370,10 @@ impl TreeView {
                         } else {
                             TreeKeyAction::Continue
                         }
+                    }
+                    KeyCode::Char('f') => {
+                        self.cycle_filter();
+                        TreeKeyAction::ToggleShowAll
                     }
                     KeyCode::Char('?') => {
                         self.mode = TreeMode::Help;
@@ -1053,6 +1094,83 @@ mod tests {
         let key = KeyEvent::from(KeyCode::Char('n'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
         assert!(matches!(tv.mode, TreeMode::Normal));
+    }
+
+    // ── filter ──
+
+    #[test]
+    fn handle_key_filter_cycles_states() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        assert!(!tv.show_done);
+        assert!(!tv.show_paused);
+
+        // hide both → show paused
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(!tv.show_done);
+        assert!(tv.show_paused);
+
+        // show paused → show done
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(tv.show_done);
+        assert!(!tv.show_paused);
+
+        // show done → show all
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(tv.show_done);
+        assert!(tv.show_paused);
+
+        // show all → hide both
+        let key = KeyEvent::from(KeyCode::Char('f'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(!tv.show_done);
+        assert!(!tv.show_paused);
+    }
+
+    #[test]
+    fn filter_tasks_hides_done_and_paused_by_default() {
+        let tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let mut tasks = vec![
+            make_task("open-task", None, "open"),
+            make_task("done-task", None, "done"),
+            make_task("paused-task", None, "paused"),
+            make_task("active-task", None, "active"),
+        ];
+        tv.filter_tasks(&mut tasks);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["open-task", "active-task"]);
+    }
+
+    #[test]
+    fn filter_tasks_shows_all_when_enabled() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_done = true;
+        tv.show_paused = true;
+        let mut tasks = vec![
+            make_task("open-task", None, "open"),
+            make_task("done-task", None, "done"),
+            make_task("paused-task", None, "paused"),
+        ];
+        tv.filter_tasks(&mut tasks);
+        assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn filter_label_all_states() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        assert_eq!(tv.filter_label(), None);
+
+        tv.show_paused = true;
+        assert_eq!(tv.filter_label(), Some("+paused"));
+
+        tv.show_paused = false;
+        tv.show_done = true;
+        assert_eq!(tv.filter_label(), Some("+done"));
+
+        tv.show_paused = true;
+        assert_eq!(tv.filter_label(), Some("all"));
     }
 
     // ── build_tree_items ──
