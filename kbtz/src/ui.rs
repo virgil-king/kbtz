@@ -374,6 +374,10 @@ impl TreeView {
                         self.mode = TreeMode::Search(initial);
                         TreeKeyAction::Continue
                     }
+                    KeyCode::Esc if self.filter.is_some() => {
+                        self.filter = None;
+                        TreeKeyAction::Refresh
+                    }
                     _ => TreeKeyAction::Unhandled,
                 }
             }
@@ -1480,6 +1484,22 @@ mod tests {
         let key = KeyEvent::from(KeyCode::Backspace);
         tv.handle_key(key);
         assert!(tv.filter.is_none());
+    }
+
+    #[test]
+    fn esc_in_normal_clears_active_filter() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.filter = Some("test".into());
+        let key = KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        assert!(tv.filter.is_none());
+    }
+
+    #[test]
+    fn esc_in_normal_without_filter_is_unhandled() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let key = KeyEvent::from(KeyCode::Esc);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Unhandled));
     }
 
     #[test]
