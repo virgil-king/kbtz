@@ -282,15 +282,14 @@ impl TreeView {
         });
     }
 
-    /// Cycle to the next filter state:
-    /// hide both → show paused → show done → show all → hide both
-    pub fn cycle_filter(&mut self) {
-        (self.show_done, self.show_paused) = match (self.show_done, self.show_paused) {
-            (false, false) => (false, true),
-            (false, true) => (true, false),
-            (true, false) => (true, true),
-            (true, true) => (false, false),
-        };
+    /// Toggle visibility of done tasks.
+    pub fn toggle_show_done(&mut self) {
+        self.show_done = !self.show_done;
+    }
+
+    /// Toggle visibility of paused tasks.
+    pub fn toggle_show_paused(&mut self) {
+        self.show_paused = !self.show_paused;
     }
 
     /// Returns a label describing the current filter state, or `None` if
@@ -364,7 +363,11 @@ impl TreeView {
                     }
                     KeyCode::Backspace => {
                         query.pop();
-                        self.filter = if query.is_empty() { None } else { Some(query.clone()) };
+                        self.filter = if query.is_empty() {
+                            None
+                        } else {
+                            Some(query.clone())
+                        };
                         self.mode = TreeMode::Search(query);
                         TreeKeyAction::Refresh
                     }
@@ -402,8 +405,12 @@ impl TreeView {
                             TreeKeyAction::Continue
                         }
                     }
-                    KeyCode::Char('f') => {
-                        self.cycle_filter();
+                    KeyCode::Char('D') => {
+                        self.toggle_show_done();
+                        TreeKeyAction::ToggleShowAll
+                    }
+                    KeyCode::Char('P') => {
+                        self.toggle_show_paused();
                         TreeKeyAction::ToggleShowAll
                     }
                     KeyCode::Char('?') => {
@@ -602,7 +609,12 @@ pub fn filter_rows(rows: &[TreeRow], query: &str) -> Vec<TreeRow> {
     }
 
     // Third pass: rebuild with corrected is_last_at_depth.
-    let kept: Vec<&TreeRow> = rows.iter().zip(&keep).filter(|(_, k)| **k).map(|(r, _)| r).collect();
+    let kept: Vec<&TreeRow> = rows
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(r, _)| r)
+        .collect();
     let mut result = Vec::with_capacity(kept.len());
     for (i, row) in kept.iter().enumerate() {
         let mut new_row = (*row).clone();
@@ -1216,33 +1228,30 @@ mod tests {
     // ── filter ──
 
     #[test]
-    fn handle_key_filter_cycles_states() {
+    fn handle_key_d_toggles_show_done() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
         assert!(!tv.show_done);
-        assert!(!tv.show_paused);
 
-        // hide both → show paused
-        let key = KeyEvent::from(KeyCode::Char('f'));
-        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
-        assert!(!tv.show_done);
-        assert!(tv.show_paused);
-
-        // show paused → show done
-        let key = KeyEvent::from(KeyCode::Char('f'));
+        let key = KeyEvent::from(KeyCode::Char('D'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(tv.show_done);
-        assert!(!tv.show_paused);
 
-        // show done → show all
-        let key = KeyEvent::from(KeyCode::Char('f'));
-        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
-        assert!(tv.show_done);
-        assert!(tv.show_paused);
-
-        // show all → hide both
-        let key = KeyEvent::from(KeyCode::Char('f'));
+        let key = KeyEvent::from(KeyCode::Char('D'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(!tv.show_done);
+    }
+
+    #[test]
+    fn handle_key_p_toggles_show_paused() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        assert!(!tv.show_paused);
+
+        let key = KeyEvent::from(KeyCode::Char('P'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
+        assert!(tv.show_paused);
+
+        let key = KeyEvent::from(KeyCode::Char('P'));
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(!tv.show_paused);
     }
 
@@ -1526,10 +1535,7 @@ mod tests {
 
     #[test]
     fn filter_rows_empty_query_returns_all() {
-        let rows = vec![
-            make_row_with_desc("a", ""),
-            make_row_with_desc("b", ""),
-        ];
+        let rows = vec![make_row_with_desc("a", ""), make_row_with_desc("b", "")];
         let filtered = filter_rows(&rows, "");
         assert_eq!(filtered.len(), 2);
     }
