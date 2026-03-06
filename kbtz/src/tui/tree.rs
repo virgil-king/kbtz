@@ -297,8 +297,12 @@ fn render_help(frame: &mut Frame) {
             Span::raw("Clear search filter"),
         ]),
         Line::from(vec![
-            Span::styled("f       ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle done/paused filter"),
+            Span::styled("D       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle show done tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("P       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle show paused tasks"),
         ]),
         Line::from(vec![
             Span::styled("?       ", Style::default().fg(Color::Cyan)),

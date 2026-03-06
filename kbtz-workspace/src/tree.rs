@@ -124,7 +124,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":collapse  "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(":search  "),
-            Span::styled("f", Style::default().fg(Color::Cyan)),
+            Span::styled("D/P", Style::default().fg(Color::Cyan)),
             Span::raw(":filter  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
@@ -198,8 +198,12 @@ pub fn render_help(frame: &mut Frame) {
             Span::raw("Clear search filter"),
         ]),
         Line::from(vec![
-            Span::styled("  f          ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle done/paused filter"),
+            Span::styled("  D          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle show done tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  P          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle show paused tasks"),
         ]),
         Line::from(vec![
             Span::styled("  q          ", Style::default().fg(Color::Cyan)),
