@@ -363,7 +363,11 @@ impl TreeView {
                     }
                     KeyCode::Backspace => {
                         query.pop();
-                        self.filter = if query.is_empty() { None } else { Some(query.clone()) };
+                        self.filter = if query.is_empty() {
+                            None
+                        } else {
+                            Some(query.clone())
+                        };
                         self.mode = TreeMode::Search(query);
                         TreeKeyAction::Refresh
                     }
@@ -605,7 +609,12 @@ pub fn filter_rows(rows: &[TreeRow], query: &str) -> Vec<TreeRow> {
     }
 
     // Third pass: rebuild with corrected is_last_at_depth.
-    let kept: Vec<&TreeRow> = rows.iter().zip(&keep).filter(|(_, k)| **k).map(|(r, _)| r).collect();
+    let kept: Vec<&TreeRow> = rows
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(r, _)| r)
+        .collect();
     let mut result = Vec::with_capacity(kept.len());
     for (i, row) in kept.iter().enumerate() {
         let mut new_row = (*row).clone();
@@ -1526,10 +1535,7 @@ mod tests {
 
     #[test]
     fn filter_rows_empty_query_returns_all() {
-        let rows = vec![
-            make_row_with_desc("a", ""),
-            make_row_with_desc("b", ""),
-        ];
+        let rows = vec![make_row_with_desc("a", ""), make_row_with_desc("b", "")];
         let filtered = filter_rows(&rows, "");
         assert_eq!(filtered.len(), 2);
     }
