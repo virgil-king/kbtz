@@ -920,6 +920,7 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+ "uuid",
  "vt100",
 ]
 

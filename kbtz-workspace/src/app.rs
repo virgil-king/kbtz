@@ -445,46 +445,52 @@ impl App {
         let session_file = self.claude_sessions_dir.join(&task.name);
 
         // Try to resume a previous Claude session if one exists.
-        let (args, is_resume) =
-            if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-                if let Some(resume_args) =
-                    self.backend.resume_args(protocol_prompt, &stored_uuid)
-                {
+        let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
+            if let Some(resume_args) = self.backend.resume_args(protocol_prompt, &stored_uuid) {
+                kbtz::debug_log::log(&format!(
+                    "spawn_session: resuming {} (claude session {})",
+                    task.name, stored_uuid
+                ));
+                (resume_args, true)
+            } else {
+                // Backend doesn't support resume; start fresh (no tracking).
+                let _ = std::fs::remove_file(&session_file);
+                (
+                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    false,
+                )
+            }
+        } else {
+            // No stored session. Try fresh_args for session tracking, fall back to worker_args.
+            let new_uuid = uuid::Uuid::new_v4().to_string();
+            if let Some(fresh_args) =
+                self.backend
+                    .fresh_args(protocol_prompt, &task_prompt, &new_uuid)
+            {
+                if let Err(e) = std::fs::write(&session_file, &new_uuid) {
                     kbtz::debug_log::log(&format!(
-                        "spawn_session: resuming {} (claude session {})",
-                        task.name, stored_uuid
+                        "spawn_session: failed to write session file for {}: {e}",
+                        task.name
                     ));
-                    (resume_args, true)
+                    // Fall back to worker_args without tracking.
+                    (
+                        self.backend.worker_args(protocol_prompt, &task_prompt),
+                        false,
+                    )
                 } else {
-                    // Backend doesn't support resume; start fresh (no tracking).
-                    let _ = std::fs::remove_file(&session_file);
-                    (self.backend.worker_args(protocol_prompt, &task_prompt), false)
+                    kbtz::debug_log::log(&format!(
+                        "spawn_session: fresh {} (claude session {})",
+                        task.name, new_uuid
+                    ));
+                    (fresh_args, false)
                 }
             } else {
-                // No stored session. Try fresh_args for session tracking, fall back to worker_args.
-                let new_uuid = uuid::Uuid::new_v4().to_string();
-                if let Some(fresh_args) =
-                    self.backend
-                        .fresh_args(protocol_prompt, &task_prompt, &new_uuid)
-                {
-                    if let Err(e) = std::fs::write(&session_file, &new_uuid) {
-                        kbtz::debug_log::log(&format!(
-                            "spawn_session: failed to write session file for {}: {e}",
-                            task.name
-                        ));
-                        // Fall back to worker_args without tracking.
-                        (self.backend.worker_args(protocol_prompt, &task_prompt), false)
-                    } else {
-                        kbtz::debug_log::log(&format!(
-                            "spawn_session: fresh {} (claude session {})",
-                            task.name, new_uuid
-                        ));
-                        (fresh_args, false)
-                    }
-                } else {
-                    (self.backend.worker_args(protocol_prompt, &task_prompt), false)
-                }
-            };
+                (
+                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    false,
+                )
+            }
+        };
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
@@ -1264,7 +1270,10 @@ mod tests {
         let session_file = app.claude_sessions_dir.join("task-a");
         assert!(session_file.exists(), "session file should be created");
         let uuid = std::fs::read_to_string(&session_file).unwrap();
-        assert!(!uuid.trim().is_empty(), "session file should contain a UUID");
+        assert!(
+            !uuid.trim().is_empty(),
+            "session file should contain a UUID"
+        );
     }
 
     #[test]
@@ -1360,10 +1369,7 @@ mod tests {
         app.restart_session("task-a");
 
         // Session file should be deleted (user wants fresh start)
-        assert!(
-            !session_file.exists(),
-            "restart should delete session file"
-        );
+        assert!(!session_file.exists(), "restart should delete session file");
     }
 
     #[test]
