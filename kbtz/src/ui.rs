@@ -127,24 +127,37 @@ pub fn status_style(status: &str) -> Style {
     }
 }
 
-/// Icon for a raw status string.
-pub fn icon_for_status(status: &str) -> &'static str {
-    match status {
-        "done" => "\u{2705} ",           // ✅
-        "active" => "\u{1f7e2} ",        // 🟢
-        "paused" => "\u{23f8}\u{fe0f} ", // ⏸️
-        "blocked" => "\u{1f6a7} ",       // 🚧
-        _ => "\u{26aa} ",                // ⚪
+/// Emoji for a single state dimension (no trailing space).
+fn state_emoji(state: &str) -> &'static str {
+    match state {
+        "done" => "\u{2705}",           // ✅
+        "active" => "\u{1f7e2}",        // 🟢
+        "paused" => "\u{23f8}\u{fe0f}", // ⏸️
+        "blocked" => "\u{1f6a7}",       // 🚧
+        _ => "\u{26aa}",                // ⚪
     }
 }
 
-/// Icon for a task, considering blocking relationships.
-pub fn icon_for_task(row: &TreeRow) -> &'static str {
-    if !row.blocked_by.is_empty() {
-        icon_for_status("blocked")
-    } else {
-        icon_for_status(&row.status)
+/// Icon for a task, combining all non-default orthogonal states.
+///
+/// Dimensions: blocked (default: unblocked), status (default: open).
+/// Each non-default dimension adds its emoji. If all dimensions are default,
+/// the open (⚪) emoji is shown.
+pub fn icon_for_task(row: &TreeRow) -> String {
+    let blocked = !row.blocked_by.is_empty();
+    let non_default_status = row.status != "open";
+    let mut s = String::new();
+    if blocked {
+        s.push_str(state_emoji("blocked"));
     }
+    if non_default_status {
+        s.push_str(state_emoji(&row.status));
+    }
+    if s.is_empty() {
+        s.push_str(state_emoji("open"));
+    }
+    s.push(' ');
+    s
 }
 
 /// Build the tree connector prefix string for a row.
@@ -682,12 +695,8 @@ pub fn build_tree_items(
             let (icon, icon_style) = if let Some((icon, style)) = decoration.icon_override {
                 (icon, style)
             } else {
-                let icon = icon_for_task(row).to_string();
-                let style = if !row.blocked_by.is_empty() {
-                    status_style("blocked")
-                } else {
-                    status_style(&row.status)
-                };
+                let icon = icon_for_task(row);
+                let style = status_style(&row.status);
                 (icon, style)
             };
 
@@ -784,32 +793,59 @@ mod tests {
         }
     }
 
-    // ── icon_for_status ──
+    // ── state_emoji ──
 
     #[test]
-    fn icon_for_each_status() {
-        assert!(icon_for_status("done").contains('\u{2705}'));
-        assert!(icon_for_status("active").contains('\u{1f7e2}'));
-        assert!(icon_for_status("paused").contains('\u{23f8}'));
-        assert!(icon_for_status("blocked").contains('\u{1f6a7}'));
-        assert!(icon_for_status("open").contains('\u{26aa}'));
+    fn state_emoji_for_each_status() {
+        assert!(state_emoji("done").contains('\u{2705}'));
+        assert!(state_emoji("active").contains('\u{1f7e2}'));
+        assert!(state_emoji("paused").contains('\u{23f8}'));
+        assert!(state_emoji("blocked").contains('\u{1f6a7}'));
+        assert!(state_emoji("open").contains('\u{26aa}'));
         // Unknown status gets the default
-        assert!(icon_for_status("whatever").contains('\u{26aa}'));
+        assert!(state_emoji("whatever").contains('\u{26aa}'));
     }
 
     // ── icon_for_task ──
 
     #[test]
-    fn icon_for_task_uses_blocked_when_blockers_exist() {
+    fn icon_for_task_blocked_and_open_shows_blocked_only() {
         let mut row = make_row("t", "open", None);
         row.blocked_by = vec!["other".into()];
-        assert_eq!(icon_for_task(&row), icon_for_status("blocked"));
+        assert!(icon_for_task(&row).contains('\u{1f6a7}'));
+        assert!(!icon_for_task(&row).contains('\u{26aa}'));
     }
 
     #[test]
-    fn icon_for_task_uses_status_when_no_blockers() {
+    fn icon_for_task_blocked_and_paused_shows_both() {
+        let mut row = make_row("t", "paused", None);
+        row.blocked_by = vec!["other".into()];
+        let icon = icon_for_task(&row);
+        assert!(icon.contains('\u{1f6a7}'), "should contain blocked emoji");
+        assert!(icon.contains('\u{23f8}'), "should contain paused emoji");
+    }
+
+    #[test]
+    fn icon_for_task_unblocked_active_shows_active() {
         let row = make_row("t", "active", None);
-        assert_eq!(icon_for_task(&row), icon_for_status("active"));
+        let icon = icon_for_task(&row);
+        assert!(icon.contains('\u{1f7e2}'));
+        assert!(!icon.contains('\u{1f6a7}'));
+    }
+
+    #[test]
+    fn icon_for_task_blocked_and_done_shows_both() {
+        let mut row = make_row("t", "done", None);
+        row.blocked_by = vec!["other".into()];
+        let icon = icon_for_task(&row);
+        assert!(icon.contains('\u{1f6a7}'), "should contain blocked emoji");
+        assert!(icon.contains('\u{2705}'), "should contain done emoji");
+    }
+
+    #[test]
+    fn icon_for_task_open_unblocked_shows_default() {
+        let row = make_row("t", "open", None);
+        assert!(icon_for_task(&row).contains('\u{26aa}'));
     }
 
     // ── tree_prefix ──
