@@ -29,6 +29,28 @@ pub trait Backend: Send + Sync {
         self.worker_args(protocol_prompt, task_prompt)
     }
 
+    /// Build CLI args for a fresh session with a named session ID.
+    ///
+    /// Returns `Some(args)` if the backend supports named sessions (enabling
+    /// future resume). Returns `None` to fall back to `worker_args` without
+    /// session tracking.
+    fn fresh_args(
+        &self,
+        _protocol_prompt: &str,
+        _task_prompt: &str,
+        _session_id: &str,
+    ) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Build CLI args to resume a previous session by ID.
+    ///
+    /// Returns `Some(args)` if the backend supports session resume.
+    /// Returns `None` if resume is not supported (always starts fresh).
+    fn resume_args(&self, _protocol_prompt: &str, _session_id: &str) -> Option<Vec<String>> {
+        None
+    }
+
     /// Request graceful exit from the agent process.
     ///
     /// Implementations must call `session.mark_stopping()` after sending
@@ -59,6 +81,38 @@ impl Backend for Claude {
         ]);
         args.extend(self.extra_args.iter().cloned());
         args
+    }
+
+    fn fresh_args(
+        &self,
+        protocol_prompt: &str,
+        task_prompt: &str,
+        session_id: &str,
+    ) -> Option<Vec<String>> {
+        let mut args = Vec::with_capacity(self.prefix_args.len() + 5 + self.extra_args.len());
+        args.extend(self.prefix_args.iter().cloned());
+        args.extend([
+            "--session-id".into(),
+            session_id.into(),
+            "--append-system-prompt".into(),
+            protocol_prompt.into(),
+            task_prompt.into(),
+        ]);
+        args.extend(self.extra_args.iter().cloned());
+        Some(args)
+    }
+
+    fn resume_args(&self, protocol_prompt: &str, session_id: &str) -> Option<Vec<String>> {
+        let mut args = Vec::with_capacity(self.prefix_args.len() + 4 + self.extra_args.len());
+        args.extend(self.prefix_args.iter().cloned());
+        args.extend([
+            "--resume".into(),
+            session_id.into(),
+            "--append-system-prompt".into(),
+            protocol_prompt.into(),
+        ]);
+        args.extend(self.extra_args.iter().cloned());
+        Some(args)
     }
 
     fn request_exit(&self, session: &mut dyn SessionHandle) {
@@ -195,6 +249,92 @@ mod tests {
                 "--append-system-prompt",
                 "protocol text",
                 "task text",
+                "--verbose",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_fresh_args_includes_session_id() {
+        let backend = Claude {
+            command: "claude".into(),
+            prefix_args: vec![],
+            extra_args: vec![],
+        };
+        let args = backend
+            .fresh_args("protocol text", "task text", "abc-123")
+            .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--session-id",
+                "abc-123",
+                "--append-system-prompt",
+                "protocol text",
+                "task text",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_fresh_args_with_prefix_and_extra() {
+        let backend = Claude {
+            command: "claude".into(),
+            prefix_args: vec!["--flag".into()],
+            extra_args: vec!["--verbose".into()],
+        };
+        let args = backend
+            .fresh_args("protocol text", "task text", "abc-123")
+            .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--flag",
+                "--session-id",
+                "abc-123",
+                "--append-system-prompt",
+                "protocol text",
+                "task text",
+                "--verbose",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_resume_args_uses_resume_flag() {
+        let backend = Claude {
+            command: "claude".into(),
+            prefix_args: vec![],
+            extra_args: vec![],
+        };
+        let args = backend.resume_args("protocol text", "abc-123").unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--resume",
+                "abc-123",
+                "--append-system-prompt",
+                "protocol text",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_resume_args_with_prefix_and_extra() {
+        let backend = Claude {
+            command: "claude".into(),
+            prefix_args: vec!["--flag".into()],
+            extra_args: vec!["--verbose".into()],
+        };
+        let args = backend.resume_args("protocol text", "abc-123").unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--flag",
+                "--resume",
+                "abc-123",
+                "--append-system-prompt",
+                "protocol text",
                 "--verbose",
             ]
         );

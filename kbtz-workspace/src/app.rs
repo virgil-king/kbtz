@@ -33,6 +33,9 @@ pub struct App {
     pub task_to_session: HashMap<String, String>,          // task_name -> session_id
     counter: u64,
     pub status_dir: PathBuf,
+    /// Directory for storing Claude session UUIDs per task, enabling session
+    /// resume when agents exit mid-task.
+    pub claude_sessions_dir: PathBuf,
     /// In auto mode, caps how many sessions lifecycle::tick will auto-spawn.
     /// In manual mode (--manual), this field is ignored — the user controls
     /// spawning via the 's' keybinding with no concurrency limit.
@@ -104,6 +107,9 @@ impl App {
         } else {
             Box::new(PtySpawner)
         };
+        let claude_sessions_dir = status_dir.join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir)
+            .context("failed to create claude-sessions directory")?;
         let mut app = App {
             db_path,
             conn,
@@ -111,6 +117,7 @@ impl App {
             task_to_session: HashMap::new(),
             counter: 0,
             status_dir: status_dir.clone(),
+            claude_sessions_dir,
             max_concurrency,
             manual,
             prefer,
@@ -434,9 +441,57 @@ impl App {
 
     fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Box<dyn SessionHandle>> {
         let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
-        let args = self
-            .backend
-            .worker_args(crate::prompt::AGENT_PROMPT, &task_prompt);
+        let protocol_prompt = crate::prompt::AGENT_PROMPT;
+        let session_file = self.claude_sessions_dir.join(&task.name);
+
+        // Try to resume a previous Claude session if one exists.
+        let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
+            if let Some(resume_args) = self.backend.resume_args(protocol_prompt, &stored_uuid) {
+                kbtz::debug_log::log(&format!(
+                    "spawn_session: resuming {} (claude session {})",
+                    task.name, stored_uuid
+                ));
+                (resume_args, true)
+            } else {
+                // Backend doesn't support resume; start fresh (no tracking).
+                let _ = std::fs::remove_file(&session_file);
+                (
+                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    false,
+                )
+            }
+        } else {
+            // No stored session. Try fresh_args for session tracking, fall back to worker_args.
+            let new_uuid = uuid::Uuid::new_v4().to_string();
+            if let Some(fresh_args) =
+                self.backend
+                    .fresh_args(protocol_prompt, &task_prompt, &new_uuid)
+            {
+                if let Err(e) = std::fs::write(&session_file, &new_uuid) {
+                    kbtz::debug_log::log(&format!(
+                        "spawn_session: failed to write session file for {}: {e}",
+                        task.name
+                    ));
+                    // Fall back to worker_args without tracking.
+                    (
+                        self.backend.worker_args(protocol_prompt, &task_prompt),
+                        false,
+                    )
+                } else {
+                    kbtz::debug_log::log(&format!(
+                        "spawn_session: fresh {} (claude session {})",
+                        task.name, new_uuid
+                    ));
+                    (fresh_args, false)
+                }
+            } else {
+                (
+                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    false,
+                )
+            }
+        };
+
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
         let debug_path = std::env::var("KBTZ_DEBUG").unwrap_or_default();
@@ -449,7 +504,7 @@ impl App {
         if !debug_path.is_empty() {
             env_vars.push(("KBTZ_DEBUG", &debug_path));
         }
-        self.spawner.spawn(
+        let result = self.spawner.spawn(
             self.backend.command(),
             &arg_refs,
             &task.name,
@@ -457,7 +512,28 @@ impl App {
             self.term.rows,
             self.term.cols,
             &env_vars,
-        )
+        );
+
+        // If resume failed, delete the session file so next attempt starts fresh.
+        if is_resume && result.is_err() {
+            kbtz::debug_log::log(&format!(
+                "spawn_session: resume failed for {}, clearing session file",
+                task.name
+            ));
+            let _ = std::fs::remove_file(&session_file);
+        }
+
+        result
+    }
+
+    /// Read a Claude session UUID from a session file, if it exists and is valid.
+    fn read_session_file(path: &std::path::Path) -> Option<String> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_string())
     }
 
     /// Read status files from the status directory and update session statuses.
@@ -482,6 +558,10 @@ impl App {
     }
 
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
+    ///
+    /// The Claude session file is preserved if the task is still active/open,
+    /// allowing future spawns to resume the conversation. It's deleted when
+    /// the task is done or paused (no need to resume completed work).
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
             let task_name = session.task_name().to_string();
@@ -490,6 +570,11 @@ impl App {
                 "remove_session: {sid} (task={task_name}, status={})",
                 session.status().label()
             ));
+            // Check task status before releasing — we need to know if the session
+            // file should be preserved for resume.
+            let task_done = ops::get_task(&self.conn, &task_name)
+                .map(|t| t.status == "done" || t.status == "paused")
+                .unwrap_or(true); // task deleted = treat as done
             let _ = ops::release_task(&self.conn, &task_name, &sid);
             // Only remove the task->session mapping if it still points to this
             // session. A new session may have already claimed the same task
@@ -501,6 +586,12 @@ impl App {
             let _ = std::fs::remove_file(self.status_dir.join(&filename));
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.sock")));
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
+
+            // Delete session file for completed tasks; preserve for active tasks
+            // so the next spawn can resume the Claude conversation.
+            if task_done {
+                let _ = std::fs::remove_file(self.claude_sessions_dir.join(&task_name));
+            }
         }
     }
 
@@ -699,6 +790,9 @@ impl App {
     }
 
     /// Kill and release a session for a task so it can be respawned.
+    ///
+    /// Deletes the Claude session file so the respawn starts a fresh
+    /// conversation rather than resuming.
     pub fn restart_session(&mut self, task_name: &str) {
         if let Some(session_id) = self.task_to_session.get(task_name).cloned() {
             kbtz::debug_log::log(&format!(
@@ -707,6 +801,9 @@ impl App {
             if let Some(session) = self.sessions.get_mut(&session_id) {
                 session.force_kill();
             }
+            // Delete session file before remove_session (which would preserve
+            // it for active tasks). Restart means the user wants fresh.
+            let _ = std::fs::remove_file(self.claude_sessions_dir.join(task_name));
             self.remove_session(&session_id);
         }
     }
@@ -902,6 +999,8 @@ mod tests {
 
     fn test_app() -> (App, TempDir) {
         let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
         let conn = kbtz::db::open_memory().unwrap();
         let app = App {
             db_path: ":memory:".to_string(),
@@ -910,6 +1009,7 @@ mod tests {
             task_to_session: HashMap::new(),
             counter: 0,
             status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
             max_concurrency: 2,
             manual: false,
             prefer: None,
@@ -1103,6 +1203,189 @@ mod tests {
         let task = ops::get_task(&app.conn, "live").unwrap();
         assert_eq!(task.status, "active");
         assert_eq!(task.assignee.as_deref(), Some("ws/1"));
+    }
+
+    // ── Session resume tests ──────────────────────────────────────────
+
+    struct ResumableStubBackend;
+
+    impl Backend for ResumableStubBackend {
+        fn command(&self) -> &str {
+            "true"
+        }
+        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+            vec!["worker".into()]
+        }
+        fn fresh_args(
+            &self,
+            _protocol_prompt: &str,
+            _task_prompt: &str,
+            session_id: &str,
+        ) -> Option<Vec<String>> {
+            Some(vec!["--session-id".into(), session_id.into()])
+        }
+        fn resume_args(&self, _protocol_prompt: &str, session_id: &str) -> Option<Vec<String>> {
+            Some(vec!["--resume".into(), session_id.into()])
+        }
+        fn request_exit(&self, session: &mut dyn SessionHandle) {
+            session.mark_stopping();
+        }
+    }
+
+    fn test_app_resumable() -> (App, TempDir) {
+        let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
+        let conn = kbtz::db::open_memory().unwrap();
+        let app = App {
+            db_path: ":memory:".to_string(),
+            conn,
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backend: Box::new(ResumableStubBackend),
+            spawner: Box::new(StubSpawner),
+            persistent_sessions: false,
+            toplevel: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
+            tree_dirty: false,
+        };
+        (app, status_dir)
+    }
+
+    #[test]
+    fn spawn_session_creates_session_file() {
+        let (app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        let task = ops::get_task(&app.conn, "task-a").unwrap();
+
+        app.spawn_session(&task, "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        assert!(session_file.exists(), "session file should be created");
+        let uuid = std::fs::read_to_string(&session_file).unwrap();
+        assert!(
+            !uuid.trim().is_empty(),
+            "session file should contain a UUID"
+        );
+    }
+
+    #[test]
+    fn spawn_session_resumes_from_existing_file() {
+        let (app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        let task = ops::get_task(&app.conn, "task-a").unwrap();
+
+        // Write a fake UUID to the session file
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "fake-uuid-12345").unwrap();
+
+        // Spawn should read the stored UUID (resume path)
+        let session = app.spawn_session(&task, "ws/1").unwrap();
+        assert_eq!(session.task_name(), "task-a");
+
+        // Session file should still exist with the same UUID
+        let uuid = std::fs::read_to_string(&session_file).unwrap();
+        assert_eq!(uuid, "fake-uuid-12345");
+    }
+
+    #[test]
+    fn remove_session_preserves_file_for_active_task() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        // Write a session file
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        // Session file should be preserved (task is still active -> open after release)
+        assert!(
+            session_file.exists(),
+            "session file should be preserved for active task"
+        );
+    }
+
+    #[test]
+    fn remove_session_deletes_file_for_done_task() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        // Mark the task as done
+        ops::mark_done(&app.conn, "task-a").unwrap();
+
+        // Write a session file
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        // Session file should be deleted (task is done)
+        assert!(
+            !session_file.exists(),
+            "session file should be deleted for done task"
+        );
+    }
+
+    #[test]
+    fn restart_session_deletes_session_file() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        // Write a session file
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", true)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.restart_session("task-a");
+
+        // Session file should be deleted (user wants fresh start)
+        assert!(!session_file.exists(), "restart should delete session file");
+    }
+
+    #[test]
+    fn non_resumable_backend_creates_no_session_file() {
+        // Uses default StubBackend which returns None for fresh_args/resume_args
+        let (app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        let task = ops::get_task(&app.conn, "task-a").unwrap();
+
+        app.spawn_session(&task, "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        assert!(
+            !session_file.exists(),
+            "non-resumable backend should not create session file"
+        );
     }
 
     #[test]
