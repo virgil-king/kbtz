@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn remove_session_cleans_up_mapping() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
         app.sessions.insert(
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn remove_session_preserves_newer_mapping() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
         // Simulate: ws/2 has already claimed the same task and updated the mapping.
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn execute_actions_processes_remove() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
         app.sessions.insert(
@@ -1096,9 +1096,9 @@ mod tests {
     #[test]
     fn execute_actions_remove_then_spawn() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
-        ops::add_task(&app.conn, "task-b", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-b", None, "desc", None, None, false, None).unwrap();
 
         app.sessions.insert(
             "ws/1".to_string(),
@@ -1177,7 +1177,7 @@ mod tests {
     fn release_orphaned_tasks_releases_stale_ws_claims() {
         let (app, _dir) = test_app();
         // Create a task and claim it as if a previous workspace session owned it.
-        ops::add_task(&app.conn, "orphan", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "orphan", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "orphan", "ws/99").unwrap();
 
         // No session exists in app.task_to_session — this is the orphan case.
@@ -1191,7 +1191,7 @@ mod tests {
     #[test]
     fn release_orphaned_tasks_preserves_live_sessions() {
         let (mut app, _dir) = test_app();
-        ops::add_task(&app.conn, "live", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "live", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "live", "ws/1").unwrap();
 
         // Simulate a live session by adding to task_to_session.
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn spawn_session_creates_session_file() {
         let (app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
         app.spawn_session(&task, "ws/1").unwrap();
@@ -1279,7 +1279,7 @@ mod tests {
     #[test]
     fn spawn_session_resumes_from_existing_file() {
         let (app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
         // Write a fake UUID to the session file
@@ -1298,7 +1298,7 @@ mod tests {
     #[test]
     fn remove_session_preserves_file_for_active_task() {
         let (mut app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
         // Write a session file
@@ -1324,7 +1324,7 @@ mod tests {
     #[test]
     fn remove_session_deletes_file_for_done_task() {
         let (mut app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
         // Mark the task as done
         ops::mark_done(&app.conn, "task-a").unwrap();
@@ -1352,7 +1352,7 @@ mod tests {
     #[test]
     fn restart_session_deletes_session_file() {
         let (mut app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
         // Write a session file
@@ -1376,7 +1376,7 @@ mod tests {
     fn non_resumable_backend_creates_no_session_file() {
         // Uses default StubBackend which returns None for fresh_args/resume_args
         let (app, _dir) = test_app();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
         app.spawn_session(&task, "ws/1").unwrap();
@@ -1400,6 +1400,7 @@ mod tests {
             None,
             Some("agent-1"),
             false,
+            None,
         )
         .unwrap();
 

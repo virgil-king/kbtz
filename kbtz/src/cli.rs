@@ -84,6 +84,9 @@ pub enum Command {
         /// Create in paused state (mutually exclusive with --claim)
         #[arg(long)]
         paused: bool,
+        /// Agent type for this task (e.g. claude-sonnet-4-6)
+        #[arg(long)]
+        agent: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
