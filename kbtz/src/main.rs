@@ -56,6 +56,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             note,
             claim,
             paused,
+            agent,
             json,
         } => {
             ops::add_task(
@@ -66,6 +67,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                 note.as_deref(),
                 claim.as_deref(),
                 paused,
+                agent.as_deref(),
             )?;
             if json {
                 let task = ops::get_task(conn, &name)?;
@@ -886,6 +888,7 @@ NOTE
                 note: Some("initial note".into()),
                 claim: None,
                 paused: false,
+                agent: None,
                 json: true,
             },
         )
@@ -908,6 +911,61 @@ NOTE
         run_exec(&conn, input).unwrap();
         let task = ops::get_task(&conn, "my-json-task").unwrap();
         assert_eq!(task.description, "A task");
+    }
+
+    #[test]
+    fn exec_add_with_agent_flag() {
+        let conn = test_conn();
+        let input = "add agent-task \"A task\" --agent claude-sonnet-4-6\n";
+        run_exec(&conn, input).unwrap();
+        let task = ops::get_task(&conn, "agent-task").unwrap();
+        assert_eq!(task.agent.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn show_json_includes_agent_field() {
+        let conn = test_conn();
+        ops::add_task(
+            &conn,
+            "show-agent",
+            None,
+            "desc",
+            None,
+            None,
+            false,
+            Some("claude-opus-4-6"),
+        )
+        .unwrap();
+        let task = ops::get_task(&conn, "show-agent").unwrap();
+        let notes = ops::list_notes(&conn, "show-agent").unwrap();
+        let blockers = ops::get_blockers(&conn, "show-agent").unwrap();
+        let dependents = ops::get_dependents(&conn, "show-agent").unwrap();
+        let detail = output::TaskDetail {
+            task: &task,
+            notes: &notes,
+            blocked_by: &blockers,
+            blocks: &dependents,
+        };
+        let json_str = serde_json::to_string_pretty(&detail).unwrap();
+        assert!(json_str.contains("\"agent\": \"claude-opus-4-6\""));
+    }
+
+    #[test]
+    fn show_json_agent_null_when_not_set() {
+        let conn = test_conn();
+        ops::add_task(&conn, "no-agent", None, "desc", None, None, false, None).unwrap();
+        let task = ops::get_task(&conn, "no-agent").unwrap();
+        let notes = ops::list_notes(&conn, "no-agent").unwrap();
+        let blockers = ops::get_blockers(&conn, "no-agent").unwrap();
+        let dependents = ops::get_dependents(&conn, "no-agent").unwrap();
+        let detail = output::TaskDetail {
+            task: &task,
+            notes: &notes,
+            blocked_by: &blockers,
+            blocks: &dependents,
+        };
+        let json_str = serde_json::to_string_pretty(&detail).unwrap();
+        assert!(json_str.contains("\"agent\": null"));
     }
 
     #[test]
