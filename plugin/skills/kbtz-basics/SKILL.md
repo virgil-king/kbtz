@@ -9,7 +9,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 
 | Command | Description |
 |---------|-------------|
-| `kbtz add <name> <desc> [-p parent] [-c assignee] [-n note] [--paused]` | Create a task |
+| `kbtz add <name> <desc> [-p parent] [-c assignee] [-n note] [--agent type] [--paused]` | Create a task |
 | `kbtz claim <name> <assignee>` | Claim a task |
 | `kbtz claim-next <assignee> [--prefer text]` | Atomically claim the best available task |
 | `kbtz steal <name> <assignee>` | Atomically transfer task ownership (requires user approval) |
@@ -131,6 +131,16 @@ Use `--paused` to create a task that shouldn't be worked on yet:
 ```bash
 kbtz add deferred-task "Not ready yet" --paused
 ```
+
+### Agent types
+
+The workspace supports multiple agent backends (e.g., claude, gemini). Tasks use the workspace default unless overridden with `--agent`:
+
+```bash
+kbtz add gemini-review "Review the design doc." --agent gemini
+```
+
+Only use `--agent` when a task specifically needs a non-default backend.
 
 ### Specifying closure conditions
 
