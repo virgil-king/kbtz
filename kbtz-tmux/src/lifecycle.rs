@@ -13,6 +13,7 @@ pub enum WindowPhase {
 pub struct TaskSnapshot {
     pub status: String,
     pub assignee: Option<String>,
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +86,7 @@ fn should_reap(window: &WindowSnapshot) -> bool {
         None => true,
         Some(task) => match task.status.as_str() {
             "done" | "paused" => true,
-            "active" => task.assignee.as_deref() != Some(&window.session_id),
+            "active" => task.blocked || task.assignee.as_deref() != Some(&window.session_id),
             "open" => true,
             _ => false,
         },
@@ -115,6 +116,7 @@ mod tests {
         Some(TaskSnapshot {
             status: "active".into(),
             assignee: Some(assignee.into()),
+            blocked: false,
         })
     }
 
@@ -122,6 +124,7 @@ mod tests {
         Some(TaskSnapshot {
             status: status.into(),
             assignee: Some("ws/1".into()),
+            blocked: false,
         })
     }
 
@@ -276,6 +279,27 @@ mod tests {
                 "task-a",
                 WindowPhase::Running,
                 active_task("ws/2"),
+            )],
+            2,
+        );
+        let actions = tick(&w);
+        assert!(actions.contains(&Action::RequestExit {
+            session_id: "ws/1".into()
+        }));
+    }
+
+    #[test]
+    fn blocked_task_triggers_request_exit() {
+        let w = world(
+            vec![snapshot(
+                "ws/1",
+                "task-a",
+                WindowPhase::Running,
+                Some(TaskSnapshot {
+                    status: "active".into(),
+                    assignee: Some("ws/1".into()),
+                    blocked: true,
+                }),
             )],
             2,
         );

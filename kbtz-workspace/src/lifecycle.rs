@@ -15,6 +15,7 @@ pub enum SessionPhase {
 pub struct TaskSnapshot {
     pub status: String,
     pub assignee: Option<String>,
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,7 +100,7 @@ fn should_reap_session(session: &SessionSnapshot) -> bool {
 fn should_reap_task(session_id: &str, task: &TaskSnapshot) -> bool {
     match task.status.as_str() {
         "done" | "paused" => true,
-        "active" => task.assignee.as_deref() != Some(session_id),
+        "active" => task.blocked || task.assignee.as_deref() != Some(session_id),
         "open" => true, // agent released it
         _ => false,
     }
@@ -113,6 +114,7 @@ fn reap_reason(session: &SessionSnapshot) -> String {
             "done" => "task done".to_string(),
             "paused" => "task paused".to_string(),
             "open" => "task released (open)".to_string(),
+            "active" if task.blocked => "task blocked".to_string(),
             "active" => format!(
                 "reassigned to {}",
                 task.assignee.as_deref().unwrap_or("nobody")
@@ -142,6 +144,7 @@ mod tests {
         Some(TaskSnapshot {
             status: "active".into(),
             assignee: Some(assignee.into()),
+            blocked: false,
         })
     }
 
@@ -149,6 +152,7 @@ mod tests {
         Some(TaskSnapshot {
             status: status.into(),
             assignee: Some("ws/1".into()),
+            blocked: false,
         })
     }
 
@@ -346,7 +350,26 @@ mod tests {
         );
     }
 
-    // 13. Manual mode still requests exit for done tasks
+    // 13. Blocked task -> RequestExit
+    #[test]
+    fn blocked_task_triggers_request_exit() {
+        let w = world(
+            vec![snapshot(
+                "ws/1",
+                SessionPhase::Running,
+                Some(TaskSnapshot {
+                    status: "active".into(),
+                    assignee: Some("ws/1".into()),
+                    blocked: true,
+                }),
+            )],
+            2,
+        );
+        let actions = tick(&w);
+        assert!(has_request_exit(&actions, "ws/1"));
+    }
+
+    // 14. Manual mode still requests exit for done tasks
     #[test]
     fn manual_mode_still_reaps_done() {
         let w = world(
