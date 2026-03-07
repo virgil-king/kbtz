@@ -100,9 +100,7 @@ fn should_reap_session(session: &SessionSnapshot) -> bool {
 fn should_reap_task(session_id: &str, task: &TaskSnapshot) -> bool {
     match task.status.as_str() {
         "done" | "paused" => true,
-        "active" => {
-            task.blocked || task.assignee.as_deref() != Some(session_id)
-        }
+        "active" => task.blocked || task.assignee.as_deref() != Some(session_id),
         "open" => true, // agent released it
         _ => false,
     }

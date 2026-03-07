@@ -205,10 +205,9 @@ impl App {
 
                 let task = match ops::get_task(&self.conn, session.task_name()) {
                     Ok(t) => {
-                        let blocked =
-                            !ops::get_blockers(&self.conn, session.task_name())
-                                .unwrap_or_default()
-                                .is_empty();
+                        let blocked = !ops::get_blockers(&self.conn, session.task_name())
+                            .unwrap_or_default()
+                            .is_empty();
                         Some(TaskSnapshot {
                             status: t.status,
                             assignee: t.assignee,

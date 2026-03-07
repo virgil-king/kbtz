@@ -136,7 +136,14 @@ impl Orchestrator {
         let mut map = HashMap::new();
         for row in rows {
             let (name, status, assignee, blocked) = row.context("failed to read task row")?;
-            map.insert(name, TaskSnapshot { status, assignee, blocked });
+            map.insert(
+                name,
+                TaskSnapshot {
+                    status,
+                    assignee,
+                    blocked,
+                },
+            );
         }
         Ok(map)
     }

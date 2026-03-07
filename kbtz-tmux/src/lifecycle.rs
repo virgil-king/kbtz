@@ -86,9 +86,7 @@ fn should_reap(window: &WindowSnapshot) -> bool {
         None => true,
         Some(task) => match task.status.as_str() {
             "done" | "paused" => true,
-            "active" => {
-                task.blocked || task.assignee.as_deref() != Some(&window.session_id)
-            }
+            "active" => task.blocked || task.assignee.as_deref() != Some(&window.session_id),
             "open" => true,
             _ => false,
         },
