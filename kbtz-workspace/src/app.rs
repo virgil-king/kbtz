@@ -204,10 +204,17 @@ impl App {
                 };
 
                 let task = match ops::get_task(&self.conn, session.task_name()) {
-                    Ok(t) => Some(TaskSnapshot {
-                        status: t.status,
-                        assignee: t.assignee,
-                    }),
+                    Ok(t) => {
+                        let blocked =
+                            !ops::get_blockers(&self.conn, session.task_name())
+                                .unwrap_or_default()
+                                .is_empty();
+                        Some(TaskSnapshot {
+                            status: t.status,
+                            assignee: t.assignee,
+                            blocked,
+                        })
+                    }
                     Err(_) => None, // task was deleted
                 };
 
@@ -559,9 +566,9 @@ impl App {
 
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     ///
-    /// The Claude session file is preserved if the task is still active/open,
-    /// allowing future spawns to resume the conversation. It's deleted when
-    /// the task is done or paused (no need to resume completed work).
+    /// The Claude session file is deleted only when the task is done. For
+    /// paused, blocked, and other non-done tasks the file is preserved,
+    /// allowing future spawns to resume the conversation.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(session) = self.sessions.remove(session_id) {
             let task_name = session.task_name().to_string();
@@ -573,7 +580,7 @@ impl App {
             // Check task status before releasing — we need to know if the session
             // file should be preserved for resume.
             let task_done = ops::get_task(&self.conn, &task_name)
-                .map(|t| t.status == "done" || t.status == "paused")
+                .map(|t| t.status == "done")
                 .unwrap_or(true); // task deleted = treat as done
             let _ = ops::release_task(&self.conn, &task_name, &sid);
             // Only remove the task->session mapping if it still points to this
@@ -587,8 +594,8 @@ impl App {
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.sock")));
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
 
-            // Delete session file for completed tasks; preserve for active tasks
-            // so the next spawn can resume the Claude conversation.
+            // Delete session file only for done tasks; preserve for paused,
+            // blocked, and other active tasks so the next spawn can resume.
             if task_done {
                 let _ = std::fs::remove_file(self.claude_sessions_dir.join(&task_name));
             }
@@ -1346,6 +1353,31 @@ mod tests {
         assert!(
             !session_file.exists(),
             "session file should be deleted for done task"
+        );
+    }
+
+    #[test]
+    fn remove_session_preserves_file_for_paused_task() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        ops::pause_task(&app.conn, "task-a").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            session_file.exists(),
+            "session file should be preserved for paused task"
         );
     }
 

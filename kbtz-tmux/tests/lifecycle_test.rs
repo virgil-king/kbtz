@@ -28,6 +28,7 @@ fn full_lifecycle_scenario() {
                 task: Some(TaskSnapshot {
                     status: "active".into(),
                     assignee: Some("ws/0".into()),
+                    blocked: false,
                 }),
             },
             WindowSnapshot {
@@ -38,6 +39,7 @@ fn full_lifecycle_scenario() {
                 task: Some(TaskSnapshot {
                     status: "active".into(),
                     assignee: Some("ws/1".into()),
+                    blocked: false,
                 }),
             },
         ],
@@ -58,6 +60,7 @@ fn full_lifecycle_scenario() {
                 task: Some(TaskSnapshot {
                     status: "done".into(),
                     assignee: Some("ws/0".into()),
+                    blocked: false,
                 }),
             },
             WindowSnapshot {
@@ -68,6 +71,7 @@ fn full_lifecycle_scenario() {
                 task: Some(TaskSnapshot {
                     status: "active".into(),
                     assignee: Some("ws/1".into()),
+                    blocked: false,
                 }),
             },
         ],

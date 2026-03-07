@@ -108,8 +108,13 @@ impl Orchestrator {
             .map(|tw| tw.task_name.as_str())
             .collect();
         let placeholders: String = names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql =
-            format!("SELECT name, status, assignee FROM tasks WHERE name IN ({placeholders})");
+        let sql = format!(
+            "SELECT t.name, t.status, t.assignee, \
+                    EXISTS(SELECT 1 FROM task_deps td \
+                           INNER JOIN tasks b ON b.name = td.blocker AND b.status != 'done' \
+                           WHERE td.blocked = t.name) AS blocked \
+             FROM tasks t WHERE t.name IN ({placeholders})"
+        );
         let mut stmt = self
             .conn
             .prepare(&sql)
@@ -124,13 +129,14 @@ impl Orchestrator {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, bool>(3)?,
                 ))
             })
             .context("failed to execute batch task query")?;
         let mut map = HashMap::new();
         for row in rows {
-            let (name, status, assignee) = row.context("failed to read task row")?;
-            map.insert(name, TaskSnapshot { status, assignee });
+            let (name, status, assignee, blocked) = row.context("failed to read task row")?;
+            map.insert(name, TaskSnapshot { status, assignee, blocked });
         }
         Ok(map)
     }
