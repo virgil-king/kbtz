@@ -54,7 +54,9 @@ file exists or no agents are configured, prints nothing (exit 0).
 Any agent name is accepted by `kbtz add --agent <type>`. Agent types that
 have a named Rust backend (e.g., "claude") get type-specific behavior
 (session resume, custom arg injection). All other types use a generic
-backend that passes prompts as positional args and exits via SIGTERM.
+backend that passes the task prompt as a positional arg and exits via
+SIGTERM. The protocol prompt is not passed — it contains kbtz-specific
+instructions that only named backends know how to inject.
 
 ### Backend field
 

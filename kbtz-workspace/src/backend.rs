@@ -126,8 +126,11 @@ impl Backend for Claude {
 
 /// Generic backend for agent types without a named implementation.
 ///
-/// Passes the protocol prompt and task prompt as positional args, uses
-/// SIGTERM for graceful exit, and does not support session resume.
+/// Passes only the task prompt as a positional arg (most coding CLIs
+/// accept `tool <prompt>`). The protocol prompt is not passed — it
+/// contains kbtz-specific instructions that only named backends know
+/// how to inject. Uses SIGTERM for graceful exit and does not support
+/// session resume.
 pub struct Generic {
     command: String,
     prefix_args: Vec<String>,
@@ -139,10 +142,10 @@ impl Backend for Generic {
         &self.command
     }
 
-    fn worker_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
-        let mut args = Vec::with_capacity(self.prefix_args.len() + 2 + self.extra_args.len());
+    fn worker_args(&self, _protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
+        let mut args = Vec::with_capacity(self.prefix_args.len() + 1 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
-        args.extend([protocol_prompt.into(), task_prompt.into()]);
+        args.push(task_prompt.into());
         args.extend(self.extra_args.iter().cloned());
         args
     }
@@ -162,7 +165,8 @@ impl Backend for Generic {
 /// and extra args.
 ///
 /// Named backends (e.g., "claude") get type-specific behavior. All other
-/// names produce a generic backend that passes prompts as positional args.
+/// names produce a generic backend that passes the task prompt as a
+/// positional arg (the protocol prompt is dropped).
 ///
 /// The command override replaces the backend's default binary path.
 /// Prefix args (from array-valued `command` config) are inserted before
@@ -225,14 +229,14 @@ mod tests {
     }
 
     #[test]
-    fn generic_worker_args_passes_prompts_as_positional() {
+    fn generic_worker_args_passes_only_task_prompt() {
         let backend = Generic {
             command: "my-agent".into(),
             prefix_args: vec![],
             extra_args: vec![],
         };
         let args = backend.worker_args("protocol text", "task text");
-        assert_eq!(args, vec!["protocol text", "task text"]);
+        assert_eq!(args, vec!["task text"]);
     }
 
     #[test]
@@ -243,10 +247,7 @@ mod tests {
             extra_args: vec!["--verbose".into()],
         };
         let args = backend.worker_args("protocol text", "task text");
-        assert_eq!(
-            args,
-            vec!["--flag", "protocol text", "task text", "--verbose"]
-        );
+        assert_eq!(args, vec!["--flag", "task text", "--verbose"]);
     }
 
     #[test]
