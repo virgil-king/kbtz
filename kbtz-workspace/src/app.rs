@@ -273,13 +273,13 @@ impl App {
                             ts.handle.task_name(),
                             reason
                         ));
-                        match self.backends.get(&ts.agent_type) {
-                            Some(backend) => backend.request_exit(ts.handle.as_mut()),
-                            None => kbtz::debug_log::log(&format!(
-                                "BUG: no backend '{}' for session {}, cannot request exit",
+                        let backend = self.backends.get(&ts.agent_type).unwrap_or_else(|| {
+                            panic!(
+                                "BUG: no backend '{}' for session {} — backends are immutable after startup",
                                 ts.agent_type, session_id,
-                            )),
-                        }
+                            )
+                        });
+                        backend.request_exit(ts.handle.as_mut());
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
