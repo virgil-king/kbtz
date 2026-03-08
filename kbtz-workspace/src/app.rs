@@ -458,10 +458,10 @@ impl App {
     /// We use PtySpawner (not ShepherdSpawner) because there's no value in
     /// persisting a session that has no task claim and is cheap to recreate.
     fn spawn_toplevel(&mut self) -> Result<()> {
-        let task_prompt =
+        let initial_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
         let backend = self.default_backend();
-        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
+        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, initial_prompt);
         let command = backend.command().to_string();
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = TOPLEVEL_SESSION_ID;
@@ -498,13 +498,13 @@ impl App {
         task: &Task,
         session_id: &str,
     ) -> Result<Box<dyn SessionHandle>> {
-        let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
-        let protocol_prompt = crate::prompt::AGENT_PROMPT;
+        let initial_prompt = format!("Work on task '{}': {}", task.name, task.description);
+        let system_instructions = crate::prompt::AGENT_PROMPT;
         let session_file = self.claude_sessions_dir.join(&task.name);
 
         // Try to resume a previous session if one exists.
         let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-            if let Some(resume_args) = backend.resume_args(protocol_prompt, &stored_uuid) {
+            if let Some(resume_args) = backend.resume_args(system_instructions, &stored_uuid) {
                 kbtz::debug_log::log(&format!(
                     "spawn_session: resuming {} (session {}, agent={})",
                     task.name, stored_uuid, agent_type
@@ -514,7 +514,7 @@ impl App {
                 // Backend doesn't support resume; start fresh (no tracking).
                 let _ = std::fs::remove_file(&session_file);
                 (
-                    backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(system_instructions, &initial_prompt),
                     false,
                 )
             }
@@ -522,7 +522,7 @@ impl App {
             // No stored session. Try fresh_args for session tracking, fall back to worker_args.
             let new_uuid = uuid::Uuid::new_v4().to_string();
             if let Some(fresh_args) =
-                backend.fresh_args(protocol_prompt, &task_prompt, &new_uuid)
+                backend.fresh_args(system_instructions, &initial_prompt, &new_uuid)
             {
                 if let Err(e) = std::fs::write(&session_file, &new_uuid) {
                     kbtz::debug_log::log(&format!(
@@ -531,7 +531,7 @@ impl App {
                     ));
                     // Fall back to worker_args without tracking.
                     (
-                        backend.worker_args(protocol_prompt, &task_prompt),
+                        backend.worker_args(system_instructions, &initial_prompt),
                         false,
                     )
                 } else {
@@ -543,7 +543,7 @@ impl App {
                 }
             } else {
                 (
-                    backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(system_instructions, &initial_prompt),
                     false,
                 )
             }
@@ -1046,7 +1046,7 @@ mod tests {
         fn command(&self) -> &str {
             "true"
         }
-        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+        fn worker_args(&self, _system_instructions: &str, _initial_prompt: &str) -> Vec<String> {
             vec![]
         }
         fn request_exit(&self, session: &mut dyn SessionHandle) {
@@ -1351,18 +1351,18 @@ mod tests {
         fn command(&self) -> &str {
             "true"
         }
-        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+        fn worker_args(&self, _system_instructions: &str, _initial_prompt: &str) -> Vec<String> {
             vec!["worker".into()]
         }
         fn fresh_args(
             &self,
-            _protocol_prompt: &str,
-            _task_prompt: &str,
+            _system_instructions: &str,
+            _initial_prompt: &str,
             session_id: &str,
         ) -> Option<Vec<String>> {
             Some(vec!["--session-id".into(), session_id.into()])
         }
-        fn resume_args(&self, _protocol_prompt: &str, session_id: &str) -> Option<Vec<String>> {
+        fn resume_args(&self, _system_instructions: &str, session_id: &str) -> Option<Vec<String>> {
             Some(vec!["--resume".into(), session_id.into()])
         }
         fn request_exit(&self, session: &mut dyn SessionHandle) {

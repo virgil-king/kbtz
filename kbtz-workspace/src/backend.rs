@@ -3,8 +3,8 @@ use crate::session::SessionHandle;
 /// Defines how kbtz-workspace interacts with a specific coding agent tool.
 ///
 /// Each backend encapsulates the agent-specific details: the binary to run,
-/// how to inject protocol instructions and task prompts via CLI args, and
-/// how to request a graceful exit.
+/// how to inject system instructions and the initial prompt via CLI args,
+/// and how to request a graceful exit.
 ///
 /// Implementations must call `session.mark_stopping()` in `request_exit`
 /// after sending the backend-specific exit signal, so the lifecycle tick
@@ -15,16 +15,18 @@ pub trait Backend: Send + Sync {
 
     /// Build CLI args for a worker session.
     ///
-    /// `protocol_prompt`: kbtz task protocol instructions (from prompt.rs)
-    /// `task_prompt`: the task-specific prompt (e.g., "Work on task 'foo': ...")
-    fn worker_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String>;
+    /// `system_instructions`: kbtz task protocol (from prompt.rs), injected
+    ///     as persistent system-level context where the backend supports it.
+    /// `initial_prompt`: the task-specific prompt (e.g., "Work on task 'foo': ...")
+    ///     that becomes the first user message.
+    fn worker_args(&self, system_instructions: &str, initial_prompt: &str) -> Vec<String>;
 
     /// Build CLI args for the toplevel task management session.
     ///
     /// Defaults to `worker_args`. Override if the backend needs different
     /// arg structure for toplevel vs worker sessions.
-    fn toplevel_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
-        self.worker_args(protocol_prompt, task_prompt)
+    fn toplevel_args(&self, system_instructions: &str, initial_prompt: &str) -> Vec<String> {
+        self.worker_args(system_instructions, initial_prompt)
     }
 
     /// Build CLI args for a fresh session with a named session ID.
@@ -34,8 +36,8 @@ pub trait Backend: Send + Sync {
     /// session tracking.
     fn fresh_args(
         &self,
-        _protocol_prompt: &str,
-        _task_prompt: &str,
+        _system_instructions: &str,
+        _initial_prompt: &str,
         _session_id: &str,
     ) -> Option<Vec<String>> {
         None
@@ -45,7 +47,11 @@ pub trait Backend: Send + Sync {
     ///
     /// Returns `Some(args)` if the backend supports session resume.
     /// Returns `None` if resume is not supported (always starts fresh).
-    fn resume_args(&self, _protocol_prompt: &str, _session_id: &str) -> Option<Vec<String>> {
+    fn resume_args(
+        &self,
+        _system_instructions: &str,
+        _session_id: &str,
+    ) -> Option<Vec<String>> {
         None
     }
 
@@ -56,8 +62,8 @@ pub trait Backend: Send + Sync {
     fn request_exit(&self, session: &mut dyn SessionHandle);
 }
 
-/// Claude Code backend. Injects prompts via `--append-system-prompt` and
-/// exits via SIGTERM.
+/// Claude Code backend. Injects system instructions via
+/// `--append-system-prompt` and exits via SIGTERM.
 pub struct Claude {
     command: String,
     prefix_args: Vec<String>,
@@ -69,13 +75,13 @@ impl Backend for Claude {
         &self.command
     }
 
-    fn worker_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
+    fn worker_args(&self, system_instructions: &str, initial_prompt: &str) -> Vec<String> {
         let mut args = Vec::with_capacity(self.prefix_args.len() + 3 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
         args.extend([
             "--append-system-prompt".into(),
-            protocol_prompt.into(),
-            task_prompt.into(),
+            system_instructions.into(),
+            initial_prompt.into(),
         ]);
         args.extend(self.extra_args.iter().cloned());
         args
@@ -83,8 +89,8 @@ impl Backend for Claude {
 
     fn fresh_args(
         &self,
-        protocol_prompt: &str,
-        task_prompt: &str,
+        system_instructions: &str,
+        initial_prompt: &str,
         session_id: &str,
     ) -> Option<Vec<String>> {
         let mut args = Vec::with_capacity(self.prefix_args.len() + 5 + self.extra_args.len());
@@ -93,21 +99,25 @@ impl Backend for Claude {
             "--session-id".into(),
             session_id.into(),
             "--append-system-prompt".into(),
-            protocol_prompt.into(),
-            task_prompt.into(),
+            system_instructions.into(),
+            initial_prompt.into(),
         ]);
         args.extend(self.extra_args.iter().cloned());
         Some(args)
     }
 
-    fn resume_args(&self, protocol_prompt: &str, session_id: &str) -> Option<Vec<String>> {
+    fn resume_args(
+        &self,
+        system_instructions: &str,
+        session_id: &str,
+    ) -> Option<Vec<String>> {
         let mut args = Vec::with_capacity(self.prefix_args.len() + 4 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
         args.extend([
             "--resume".into(),
             session_id.into(),
             "--append-system-prompt".into(),
-            protocol_prompt.into(),
+            system_instructions.into(),
         ]);
         args.extend(self.extra_args.iter().cloned());
         Some(args)
@@ -126,11 +136,10 @@ impl Backend for Claude {
 
 /// Generic backend for agent types without a named implementation.
 ///
-/// Passes only the task prompt as a positional arg (most coding CLIs
-/// accept `tool <prompt>`). The protocol prompt is not passed — it
-/// contains kbtz-specific instructions that only named backends know
-/// how to inject. Uses SIGTERM for graceful exit and does not support
-/// session resume.
+/// Concatenates system instructions and the initial prompt into a single
+/// positional arg, since most coding CLIs only accept one prompt input
+/// and have no separate system prompt mechanism. Uses SIGTERM for graceful
+/// exit and does not support session resume.
 pub struct Generic {
     command: String,
     prefix_args: Vec<String>,
@@ -142,10 +151,10 @@ impl Backend for Generic {
         &self.command
     }
 
-    fn worker_args(&self, _protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
+    fn worker_args(&self, system_instructions: &str, initial_prompt: &str) -> Vec<String> {
         let mut args = Vec::with_capacity(self.prefix_args.len() + 1 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
-        args.push(task_prompt.into());
+        args.push(format!("{system_instructions}\n\n{initial_prompt}"));
         args.extend(self.extra_args.iter().cloned());
         args
     }
@@ -164,9 +173,9 @@ impl Backend for Generic {
 /// Create a backend by name, with an optional command override, prefix args,
 /// and extra args.
 ///
-/// Named backends (e.g., "claude") get type-specific behavior. All other
-/// names produce a generic backend that passes the task prompt as a
-/// positional arg (the protocol prompt is dropped).
+/// Named backends (e.g., "claude") get type-specific behavior like separate
+/// system prompt injection. All other names produce a generic backend that
+/// concatenates system instructions and initial prompt into a single arg.
 ///
 /// The command override replaces the backend's default binary path.
 /// Prefix args (from array-valued `command` config) are inserted before
@@ -229,14 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn generic_worker_args_passes_only_task_prompt() {
+    fn generic_worker_args_concatenates_instructions_and_prompt() {
         let backend = Generic {
             command: "my-agent".into(),
             prefix_args: vec![],
             extra_args: vec![],
         };
-        let args = backend.worker_args("protocol text", "task text");
-        assert_eq!(args, vec!["task text"]);
+        let args = backend.worker_args("system text", "task text");
+        assert_eq!(args, vec!["system text\n\ntask text"]);
     }
 
     #[test]
@@ -246,8 +255,11 @@ mod tests {
             prefix_args: vec!["--flag".into()],
             extra_args: vec!["--verbose".into()],
         };
-        let args = backend.worker_args("protocol text", "task text");
-        assert_eq!(args, vec!["--flag", "task text", "--verbose"]);
+        let args = backend.worker_args("system text", "task text");
+        assert_eq!(
+            args,
+            vec!["--flag", "system text\n\ntask text", "--verbose"]
+        );
     }
 
     #[test]
@@ -257,7 +269,7 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        assert!(backend.fresh_args("proto", "task", "sess-1").is_none());
+        assert!(backend.fresh_args("sys", "task", "sess-1").is_none());
     }
 
     #[test]
@@ -267,7 +279,7 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        assert!(backend.resume_args("proto", "sess-1").is_none());
+        assert!(backend.resume_args("sys", "sess-1").is_none());
     }
 
     #[test]
@@ -283,10 +295,10 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        let args = backend.worker_args("protocol text", "task text");
+        let args = backend.worker_args("system text", "task text");
         assert_eq!(
             args,
-            vec!["--append-system-prompt", "protocol text", "task text"]
+            vec!["--append-system-prompt", "system text", "task text"]
         );
     }
 
@@ -297,12 +309,12 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec!["--verbose".into(), "--model".into(), "opus".into()],
         };
-        let args = backend.worker_args("protocol text", "task text");
+        let args = backend.worker_args("system text", "task text");
         assert_eq!(
             args,
             vec![
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "task text",
                 "--verbose",
                 "--model",
@@ -318,14 +330,14 @@ mod tests {
             prefix_args: vec!["--flag".into(), "claude".into()],
             extra_args: vec![],
         };
-        let args = backend.worker_args("protocol text", "task text");
+        let args = backend.worker_args("system text", "task text");
         assert_eq!(
             args,
             vec![
                 "--flag",
                 "claude",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "task text",
             ]
         );
@@ -338,13 +350,13 @@ mod tests {
             prefix_args: vec!["--".into()],
             extra_args: vec!["--verbose".into()],
         };
-        let args = backend.worker_args("protocol text", "task text");
+        let args = backend.worker_args("system text", "task text");
         assert_eq!(
             args,
             vec![
                 "--",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "task text",
                 "--verbose",
             ]
@@ -359,7 +371,7 @@ mod tests {
             extra_args: vec![],
         };
         let args = backend
-            .fresh_args("protocol text", "task text", "abc-123")
+            .fresh_args("system text", "task text", "abc-123")
             .unwrap();
         assert_eq!(
             args,
@@ -367,7 +379,7 @@ mod tests {
                 "--session-id",
                 "abc-123",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "task text",
             ]
         );
@@ -381,7 +393,7 @@ mod tests {
             extra_args: vec!["--verbose".into()],
         };
         let args = backend
-            .fresh_args("protocol text", "task text", "abc-123")
+            .fresh_args("system text", "task text", "abc-123")
             .unwrap();
         assert_eq!(
             args,
@@ -390,7 +402,7 @@ mod tests {
                 "--session-id",
                 "abc-123",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "task text",
                 "--verbose",
             ]
@@ -404,14 +416,14 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        let args = backend.resume_args("protocol text", "abc-123").unwrap();
+        let args = backend.resume_args("system text", "abc-123").unwrap();
         assert_eq!(
             args,
             vec![
                 "--resume",
                 "abc-123",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
             ]
         );
     }
@@ -423,7 +435,7 @@ mod tests {
             prefix_args: vec!["--flag".into()],
             extra_args: vec!["--verbose".into()],
         };
-        let args = backend.resume_args("protocol text", "abc-123").unwrap();
+        let args = backend.resume_args("system text", "abc-123").unwrap();
         assert_eq!(
             args,
             vec![
@@ -431,7 +443,7 @@ mod tests {
                 "--resume",
                 "abc-123",
                 "--append-system-prompt",
-                "protocol text",
+                "system text",
                 "--verbose",
             ]
         );
@@ -444,8 +456,8 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        let worker = backend.worker_args("proto", "task");
-        let toplevel = backend.toplevel_args("proto", "task");
+        let worker = backend.worker_args("sys", "task");
+        let toplevel = backend.toplevel_args("sys", "task");
         assert_eq!(worker, toplevel);
     }
 }
