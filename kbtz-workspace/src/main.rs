@@ -318,6 +318,9 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
                     task: &task,
                 };
                 action = passthrough_mode(app, &kind, running)?;
+                if matches!(action, Action::ReturnToTree) {
+                    app.tree.pending_select = Some(task);
+                }
             }
             Action::TopLevel => {
                 action = passthrough_mode(app, &SessionKind::TopLevel, running)?;

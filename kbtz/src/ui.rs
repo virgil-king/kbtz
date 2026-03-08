@@ -239,6 +239,9 @@ pub struct TreeView {
     pub filter: Option<String>,
     pub show_done: bool,
     pub show_paused: bool,
+    /// Task name to select on the next tree refresh (e.g. after returning
+    /// from a zoomed session). Consumed by `clamp_cursor`.
+    pub pending_select: Option<String>,
 }
 
 impl TreeView {
@@ -254,6 +257,7 @@ impl TreeView {
             filter: None,
             show_done: false,
             show_paused: false,
+            pending_select: None,
         }
     }
 
@@ -317,14 +321,24 @@ impl TreeView {
     }
 
     /// Clamp cursor after rows change (e.g. after refresh from DB).
+    ///
+    /// If `pending_select` is set, moves the cursor to that task (if found
+    /// in the current rows) and clears the pending selection. Otherwise
+    /// clamps the current cursor index to remain within bounds.
     pub fn clamp_cursor(&mut self) {
         if self.rows.is_empty() {
             self.cursor = 0;
             self.list_state.select(None);
-        } else {
-            self.cursor = self.cursor.min(self.rows.len() - 1);
-            self.list_state.select(Some(self.cursor));
+            self.pending_select = None;
+            return;
         }
+        if let Some(name) = self.pending_select.take() {
+            if let Some(idx) = self.rows.iter().position(|r| r.name == name) {
+                self.cursor = idx;
+            }
+        }
+        self.cursor = self.cursor.min(self.rows.len() - 1);
+        self.list_state.select(Some(self.cursor));
     }
 
     /// Handle a key press. Returns an action for the caller.
@@ -1067,6 +1081,57 @@ mod tests {
         tv.cursor = 5;
         tv.clamp_cursor();
         assert_eq!(tv.cursor, 0);
+    }
+
+    #[test]
+    fn pending_select_moves_cursor_to_matching_row() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let row = |name: &str| TreeRow {
+            name: name.into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        };
+        tv.rows = vec![row("a"), row("b"), row("c")];
+        tv.cursor = 0;
+        tv.pending_select = Some("c".into());
+        tv.clamp_cursor();
+        assert_eq!(tv.cursor, 2);
+        assert!(tv.pending_select.is_none());
+    }
+
+    #[test]
+    fn pending_select_not_found_keeps_cursor() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let row = |name: &str| TreeRow {
+            name: name.into(),
+            status: "open".into(),
+            description: String::new(),
+            assignee: None,
+            depth: 0,
+            has_children: false,
+            is_last_at_depth: vec![true],
+            blocked_by: vec![],
+        };
+        tv.rows = vec![row("a"), row("b")];
+        tv.cursor = 1;
+        tv.pending_select = Some("missing".into());
+        tv.clamp_cursor();
+        assert_eq!(tv.cursor, 1);
+        assert!(tv.pending_select.is_none());
+    }
+
+    #[test]
+    fn pending_select_cleared_on_empty_tree() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.pending_select = Some("task".into());
+        tv.clamp_cursor();
+        assert_eq!(tv.cursor, 0);
+        assert!(tv.pending_select.is_none());
     }
 
     #[test]
