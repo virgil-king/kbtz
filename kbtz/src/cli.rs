@@ -48,6 +48,7 @@ Viewing:
   list            List tasks
   watch           Launch interactive TUI
   search          Full-text search across tasks and notes
+  agents          List configured agent types
 
 Coordination:
   wait            Wait for database changes (blocks until a change occurs)
@@ -84,6 +85,9 @@ pub enum Command {
         /// Create in paused state (mutually exclusive with --claim)
         #[arg(long)]
         paused: bool,
+        /// Agent type for this task (e.g. claude-sonnet-4-6)
+        #[arg(long)]
+        agent: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -286,6 +290,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// List configured agent types from workspace config
+    Agents,
 
     /// Execute commands from stdin atomically (all-or-nothing transaction)
     ///

@@ -1,3 +1,4 @@
+pub mod config;
 pub mod db;
 pub mod debug_log;
 pub mod model;

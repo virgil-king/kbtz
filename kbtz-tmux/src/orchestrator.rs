@@ -8,7 +8,7 @@ use log::{error, info, warn};
 use rusqlite::Connection;
 
 use kbtz::{db, ops, paths, watch};
-use kbtz_workspace::config::Config;
+use kbtz::config::Config;
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
 use kbtz_tmux::lifecycle::{
