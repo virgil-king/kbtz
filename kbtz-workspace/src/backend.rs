@@ -1,5 +1,3 @@
-use anyhow::{bail, Result};
-
 use crate::session::SessionHandle;
 
 /// Defines how kbtz-workspace interacts with a specific coding agent tool.
@@ -126,11 +124,47 @@ impl Backend for Claude {
     }
 }
 
+/// Generic backend for agent types without a named implementation.
+///
+/// Passes the protocol prompt and task prompt as positional args, uses
+/// SIGTERM for graceful exit, and does not support session resume.
+pub struct Generic {
+    command: String,
+    prefix_args: Vec<String>,
+    extra_args: Vec<String>,
+}
+
+impl Backend for Generic {
+    fn command(&self) -> &str {
+        &self.command
+    }
+
+    fn worker_args(&self, protocol_prompt: &str, task_prompt: &str) -> Vec<String> {
+        let mut args = Vec::with_capacity(self.prefix_args.len() + 2 + self.extra_args.len());
+        args.extend(self.prefix_args.iter().cloned());
+        args.extend([protocol_prompt.into(), task_prompt.into()]);
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+
+    fn request_exit(&self, session: &mut dyn SessionHandle) {
+        if session.stopping_since().is_some() {
+            return;
+        }
+        if let Some(pid) = session.process_id() {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        session.mark_stopping();
+    }
+}
+
 /// Create a backend by name, with an optional command override, prefix args,
 /// and extra args.
 ///
-/// The command override replaces the backend's default binary path
-/// (e.g., `--command /usr/local/bin/claude` with `--backend claude`).
+/// Named backends (e.g., "claude") get type-specific behavior. All other
+/// names produce a generic backend that passes prompts as positional args.
+///
+/// The command override replaces the backend's default binary path.
 /// Prefix args (from array-valued `command` config) are inserted before
 /// kbtz-generated args. Extra args are appended after.
 pub fn from_name(
@@ -138,15 +172,28 @@ pub fn from_name(
     command_override: Option<&str>,
     prefix_args: &[String],
     extra_args: &[String],
-) -> Result<Box<dyn Backend>> {
+) -> Box<dyn Backend> {
     match name {
-        "claude" => Ok(Box::new(Claude {
+        "claude" => Box::new(Claude {
             command: command_override.unwrap_or("claude").to_string(),
             prefix_args: prefix_args.to_vec(),
             extra_args: extra_args.to_vec(),
-        })),
-        _ => bail!("unknown backend '{name}'; available backends: claude"),
+        }),
+        _ => Box::new(Generic {
+            command: command_override.unwrap_or(name).to_string(),
+            prefix_args: prefix_args.to_vec(),
+            extra_args: extra_args.to_vec(),
+        }),
     }
+}
+
+/// Create a generic backend using the agent type name as the command.
+pub fn generic(name: &str) -> Box<dyn Backend> {
+    Box::new(Generic {
+        command: name.to_string(),
+        prefix_args: vec![],
+        extra_args: vec![],
+    })
 }
 
 #[cfg(test)]
@@ -155,28 +202,77 @@ mod tests {
 
     #[test]
     fn from_name_claude_default_command() {
-        let backend = from_name("claude", None, &[], &[]).unwrap();
+        let backend = from_name("claude", None, &[], &[]);
         assert_eq!(backend.command(), "claude");
     }
 
     #[test]
     fn from_name_claude_command_override() {
-        let backend = from_name("claude", Some("/usr/local/bin/claude"), &[], &[]).unwrap();
+        let backend = from_name("claude", Some("/usr/local/bin/claude"), &[], &[]);
         assert_eq!(backend.command(), "/usr/local/bin/claude");
     }
 
     #[test]
-    fn from_name_unknown_backend_fails() {
-        let result = from_name("nonexistent", None, &[], &[]);
-        let err = result
-            .err()
-            .expect("should fail for unknown backend")
-            .to_string();
-        assert!(err.contains("nonexistent"), "error should name the backend");
-        assert!(
-            err.contains("claude"),
-            "error should list available backends"
+    fn from_name_unknown_creates_generic() {
+        let backend = from_name("gemini", None, &[], &[]);
+        assert_eq!(backend.command(), "gemini");
+    }
+
+    #[test]
+    fn from_name_unknown_with_command_override() {
+        let backend = from_name("gemini", Some("/usr/local/bin/gemini-cli"), &[], &[]);
+        assert_eq!(backend.command(), "/usr/local/bin/gemini-cli");
+    }
+
+    #[test]
+    fn generic_worker_args_passes_prompts_as_positional() {
+        let backend = Generic {
+            command: "my-agent".into(),
+            prefix_args: vec![],
+            extra_args: vec![],
+        };
+        let args = backend.worker_args("protocol text", "task text");
+        assert_eq!(args, vec!["protocol text", "task text"]);
+    }
+
+    #[test]
+    fn generic_worker_args_with_prefix_and_extra() {
+        let backend = Generic {
+            command: "wrapper".into(),
+            prefix_args: vec!["--flag".into()],
+            extra_args: vec!["--verbose".into()],
+        };
+        let args = backend.worker_args("protocol text", "task text");
+        assert_eq!(
+            args,
+            vec!["--flag", "protocol text", "task text", "--verbose"]
         );
+    }
+
+    #[test]
+    fn generic_no_fresh_args() {
+        let backend = Generic {
+            command: "my-agent".into(),
+            prefix_args: vec![],
+            extra_args: vec![],
+        };
+        assert!(backend.fresh_args("proto", "task", "sess-1").is_none());
+    }
+
+    #[test]
+    fn generic_no_resume_args() {
+        let backend = Generic {
+            command: "my-agent".into(),
+            prefix_args: vec![],
+            extra_args: vec![],
+        };
+        assert!(backend.resume_args("proto", "sess-1").is_none());
+    }
+
+    #[test]
+    fn generic_factory_uses_name_as_command() {
+        let backend = generic("custom-tool");
+        assert_eq!(backend.command(), "custom-tool");
     }
 
     #[test]

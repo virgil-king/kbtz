@@ -49,22 +49,38 @@ gemini
 Lists the keys from `[agent.*]` sections in the config file. If no config
 file exists or no agents are configured, prints nothing (exit 0).
 
-### Validation on add
+### No validation on add
 
-`kbtz add --agent <type>` validates the type against the config:
+Any agent name is accepted by `kbtz add --agent <type>`. Agent types that
+have a named Rust backend (e.g., "claude") get type-specific behavior
+(session resume, custom arg injection). All other types use a generic
+backend that passes prompts as positional args and exits via SIGTERM.
 
-- If the type is not in `config.agent` keys, error with a message listing
-  available types.
-- If no config file exists, skip validation (standalone usage).
+### Backend field
 
-This catches typos immediately rather than leaving tasks silently unclaimed.
+`AgentConfig` has an optional `backend` field that selects which Rust
+backend implementation to use. This allows multiple agent types to share
+the same backend with different command/args:
 
-## kbtz-workspace: routing with SQL-level filtering
+```toml
+[agent.claude]
+command = "claude"
+args = ["--verbose"]
 
-The workspace passes its configured backend names to `claim_next_task`, which
-filters at the SQL level. Tasks with unconfigured agent types are never
-claimed -- they stay open until a workspace with the right backend picks them
-up.
+[agent.claude-yolo]
+backend = "claude"
+command = "claude"
+args = ["--dangerously-skip-permissions"]
+```
+
+If `backend` is not set, the agent name is used as the backend name.
+
+## kbtz-workspace: routing with generic fallback
+
+The workspace claims any task regardless of its agent type. Backends are
+built at startup from `[agent.*]` config sections. If a task has an agent
+type that doesn't match any configured backend, a generic backend is
+created on-the-fly using the type name as the command.
 
 ### App struct changes
 
@@ -77,9 +93,9 @@ default comes from `workspace.backend` (falling back to "claude" if unset).
 
 ### Spawn logic
 
-1. `claim_next_task` filters by configured agent types at the SQL level.
+1. `claim_next_task` claims any eligible task (no agent type filter).
 2. Read `task.agent` (or use `default_backend` if `NULL`).
-3. Look up the backend in `backends` (guaranteed to exist by SQL filter).
+3. Call `ensure_backend` to create a generic backend if none exists.
 4. Spawn the session with that backend.
 
 ### Config
@@ -174,12 +190,10 @@ Description: Review the design doc.
 
 ## Error handling
 
-- `kbtz add --agent nonexistent`: Fails with error listing available types
-  (if config exists). Succeeds with no validation if no config file exists.
-- Workspace `spawn_up_to`: SQL filter prevents claiming tasks with unconfigured
-  agent types. They stay open for other workspaces.
-- Workspace `spawn_for_task`: Checks backend exists before claiming. Returns
-  error if unconfigured.
+- `kbtz add --agent <name>`: Always succeeds (any agent name is valid).
+- Workspace `spawn_up_to`: Claims any task. If the agent type has no
+  configured backend, a generic backend is created on-the-fly.
+- Workspace `spawn_for_task`: Same generic fallback behavior.
 
 ## Not included (YAGNI)
 

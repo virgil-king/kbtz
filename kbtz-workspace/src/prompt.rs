@@ -287,7 +287,8 @@ Use `--agent <type>` when creating a task that requires a specific backend:
 
 Only use `--agent` when a task specifically needs a non-default backend.
 Omitting it means the workspace default is used, which is correct for
-most tasks. Run `kbtz agents` to see which agent types are configured.
+most tasks. Any agent name works — configured types get their specific
+settings, unconfigured types use the name as the command.
 
 ## Rules
 
