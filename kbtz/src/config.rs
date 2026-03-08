@@ -68,7 +68,7 @@ impl Config {
         Self::load_from(Path::new(&path))
     }
 
-    fn load_from(path: &Path) -> Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         let config: Config = match std::fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents)
                 .with_context(|| format!("failed to parse {}", path.display()))?,
@@ -77,6 +77,28 @@ impl Config {
         };
         config.validate(path)?;
         Ok(config)
+    }
+
+    /// Whether any agent types are configured.
+    pub fn has_agents(&self) -> bool {
+        !self.agent.is_empty()
+    }
+
+    /// Validate that `agent_type` is a configured agent. Skips validation
+    /// if no agents are configured (standalone usage without workspace config).
+    pub fn validate_agent_type(&self, agent_type: &str) -> Result<()> {
+        if !self.has_agents() {
+            return Ok(());
+        }
+        if !self.agent.contains_key(agent_type) {
+            let mut available: Vec<&str> = self.agent.keys().map(|s| s.as_str()).collect();
+            available.sort();
+            bail!(
+                "unknown agent type '{agent_type}'; available types: {}",
+                available.join(", ")
+            );
+        }
+        Ok(())
     }
 
     fn validate(&self, path: &Path) -> Result<()> {
@@ -271,5 +293,65 @@ command = []
             err.contains("at least one element"),
             "error should mention empty array: {err}"
         );
+    }
+
+    #[test]
+    fn validate_agent_type_accepts_configured() {
+        let toml = r#"
+[agent.claude]
+command = "claude"
+[agent.gemini]
+command = "gemini-cli"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        config.validate_agent_type("claude").unwrap();
+        config.validate_agent_type("gemini").unwrap();
+    }
+
+    #[test]
+    fn validate_agent_type_rejects_unknown() {
+        let toml = r#"
+[agent.claude]
+command = "claude"
+[agent.gemini]
+command = "gemini-cli"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let err = config.validate_agent_type("gpt").unwrap_err().to_string();
+        assert!(err.contains("unknown agent type 'gpt'"), "got: {err}");
+        assert!(err.contains("claude"), "should list available: {err}");
+        assert!(err.contains("gemini"), "should list available: {err}");
+    }
+
+    #[test]
+    fn validate_agent_type_skips_when_no_agents() {
+        let config = Config::load_from(Path::new("/nonexistent/workspace.toml")).unwrap();
+        // No config file means no agents — validation is skipped
+        config.validate_agent_type("anything").unwrap();
+    }
+
+    #[test]
+    fn has_agents_true_when_configured() {
+        let toml = r#"
+[agent.claude]
+command = "claude"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.has_agents());
+    }
+
+    #[test]
+    fn has_agents_false_when_empty() {
+        let config = Config::default();
+        assert!(!config.has_agents());
     }
 }

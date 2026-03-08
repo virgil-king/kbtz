@@ -5,7 +5,8 @@ mod session;
 mod shepherd_session;
 mod tree;
 
-use kbtz_workspace::{config, prompt};
+use kbtz::config;
+use kbtz_workspace::prompt;
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
