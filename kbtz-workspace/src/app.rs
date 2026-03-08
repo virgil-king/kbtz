@@ -284,8 +284,12 @@ impl App {
                             session.task_name(),
                             reason
                         ));
-                        if let Some(backend) = self.backends.get(&agent_type) {
-                            backend.request_exit(session.as_mut());
+                        match self.backends.get(&agent_type) {
+                            Some(backend) => backend.request_exit(session.as_mut()),
+                            None => kbtz::debug_log::log(&format!(
+                                "BUG: no backend '{}' for session {}, cannot request exit",
+                                agent_type, session_id,
+                            )),
                         }
                     }
                 }
@@ -924,9 +928,8 @@ impl App {
 
         // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
-            if let Some(backend) = self.backends.get(&self.default_backend) {
-                backend.request_exit(toplevel.as_mut());
-            }
+            // default_backend is validated at construction, so this is safe.
+            self.backends[&self.default_backend].request_exit(toplevel.as_mut());
         }
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
