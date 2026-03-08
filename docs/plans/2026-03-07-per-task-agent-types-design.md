@@ -30,6 +30,33 @@ Add `pub agent: Option<String>` to the `Task` struct. Update
 No changes to `claim-next` -- agent routing happens in the workspace, not in
 the claiming logic.
 
+## Discoverability: kbtz agents command
+
+Move config types from `kbtz-workspace/src/config.rs` to `kbtz/src/config.rs`
+so the kbtz CLI can read `~/.kbtz/workspace.toml`. Both kbtz and kbtz-workspace
+import from `kbtz::config`.
+
+New command:
+
+```
+$ kbtz agents
+claude
+gemini
+```
+
+Lists the keys from `[agent.*]` sections in the config file. If no config
+file exists or no agents are configured, prints nothing (exit 0).
+
+### Validation on add
+
+`kbtz add --agent <type>` validates the type against the config:
+
+- If the type is not in `config.agent` keys, error with a message listing
+  available types.
+- If no config file exists, skip validation (standalone usage).
+
+This catches typos immediately rather than leaving tasks silently unclaimed.
+
 ## kbtz-workspace: routing after claim
 
 The workspace claims the best available task (no agent filtering), then
@@ -96,13 +123,14 @@ Add an "Agent types" section:
 The workspace supports multiple agent backends (e.g., claude, gemini).
 Tasks default to the workspace's default backend unless overridden.
 
-Use `--agent <type>` when creating a task that requires a specific backend:
+Run `kbtz agents` to see available agent types. Use `--agent <type>` when
+creating a task that requires a specific backend:
 
     kbtz add gemini-review "Review the design doc." --agent gemini
 
 Only use `--agent` when a task specifically needs a non-default backend.
 Omitting it means the workspace default is used, which is correct for
-most tasks. Available agent types depend on the workspace configuration.
+most tasks.
 ```
 
 ### AGENT_PROMPT
@@ -143,8 +171,8 @@ Description: Review the design doc.
 
 ## Error handling
 
-- `kbtz add --agent nonexistent`: Succeeds. kbtz is config-agnostic; the task
-  stays open until a workspace with that agent type runs.
+- `kbtz add --agent nonexistent`: Fails with error listing available types
+  (if config exists). Succeeds with no validation if no config file exists.
 - Workspace claims a task with unconfigured agent type: Releases the task and
   logs a warning.
 
@@ -152,5 +180,4 @@ Description: Review the design doc.
 
 - No inheritance from parent tasks.
 - No per-agent-type concurrency limits (global concurrency shared).
-- No runtime agent-type validation in kbtz against workspace config.
 - No `--agent` flag on `claim-next`.
