@@ -212,7 +212,8 @@ impl Orchestrator {
         let slot = self.next_free_slot();
         let session_id = format!("ws/{slot}");
 
-        let task_name = ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())?
+        let task_name =
+            ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref(), None)?
             .context("no tasks available")?;
 
         let task = ops::get_task(&self.conn, &task_name)?;

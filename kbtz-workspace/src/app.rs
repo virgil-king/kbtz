@@ -23,14 +23,19 @@ pub struct TermSize {
     pub cols: u16,
 }
 
+pub struct TrackedSession {
+    pub handle: Box<dyn SessionHandle>,
+    pub agent_type: String,
+}
+
 pub struct App {
     // kbtz state
     pub db_path: String,
     pub conn: Connection,
 
     // Session management
-    pub sessions: HashMap<String, Box<dyn SessionHandle>>, // session_id -> session
-    pub task_to_session: HashMap<String, String>,          // task_name -> session_id
+    pub sessions: HashMap<String, TrackedSession>,    // session_id -> tracked session
+    pub task_to_session: HashMap<String, String>,     // task_name -> session_id
     counter: u64,
     pub status_dir: PathBuf,
     /// Directory for storing Claude session UUIDs per task, enabling session
@@ -42,7 +47,8 @@ pub struct App {
     pub max_concurrency: usize,
     pub manual: bool,
     pub prefer: Option<String>,
-    pub backend: Box<dyn Backend>,
+    pub backends: HashMap<String, Box<dyn Backend>>,
+    pub default_backend: String,
     pub spawner: Box<dyn SessionSpawner>,
     pub persistent_sessions: bool,
 
@@ -87,7 +93,8 @@ impl App {
         max_concurrency: usize,
         manual: bool,
         prefer: Option<String>,
-        backend: Box<dyn Backend>,
+        backends: HashMap<String, Box<dyn Backend>>,
+        default_backend: String,
         term: TermSize,
         persistent_sessions: bool,
     ) -> Result<Self> {
@@ -110,6 +117,12 @@ impl App {
         let claude_sessions_dir = status_dir.join("claude-sessions");
         std::fs::create_dir_all(&claude_sessions_dir)
             .context("failed to create claude-sessions directory")?;
+        if !backends.contains_key(&default_backend) {
+            bail!(
+                "default backend '{}' not found in configured backends",
+                default_backend
+            );
+        }
         let mut app = App {
             db_path,
             conn,
@@ -121,7 +134,8 @@ impl App {
             max_concurrency,
             manual,
             prefer,
-            backend,
+            backends,
+            default_backend,
             spawner,
             persistent_sessions,
             toplevel: None,
@@ -144,7 +158,7 @@ impl App {
         if session_id == TOPLEVEL_SESSION_ID {
             self.toplevel.as_ref().map(|s| s.as_ref())
         } else {
-            self.sessions.get(session_id).map(|s| s.as_ref())
+            self.sessions.get(session_id).map(|ts| ts.handle.as_ref())
         }
     }
 
@@ -157,7 +171,7 @@ impl App {
             }
         } else {
             match self.sessions.get_mut(session_id) {
-                Some(s) => Some(&mut **s),
+                Some(ts) => Some(&mut *ts.handle),
                 None => None,
             }
         }
@@ -178,15 +192,31 @@ impl App {
 
     // ── Lifecycle state machine ────────────────────────────────────────
 
+    /// Resolve the agent type for a task: use the task's `agent` field,
+    /// falling back to `self.default_backend`.
+    fn resolve_agent_type<'a>(&'a self, task: &'a Task) -> &'a str {
+        task.agent.as_deref().unwrap_or(&self.default_backend)
+    }
+
+    /// Look up the backend for a given agent type name.
+    fn get_backend(&self, agent_type: &str) -> Option<&dyn Backend> {
+        self.backends.get(agent_type).map(|b| b.as_ref())
+    }
+
+    /// Get the default backend (used for toplevel session and request_exit fallback).
+    fn default_backend(&self) -> &dyn Backend {
+        self.backends[&self.default_backend].as_ref()
+    }
+
     /// Build a snapshot of the current world for the pure tick function.
     fn snapshot(&mut self) -> WorldSnapshot {
         let sessions = self
             .sessions
             .iter_mut()
-            .map(|(session_id, session)| {
-                let phase = if !session.is_alive() {
+            .map(|(session_id, ts)| {
+                let phase = if !ts.handle.is_alive() {
                     SessionPhase::Exited
-                } else if !session.reader_alive() {
+                } else if !ts.handle.reader_alive() {
                     // Reader thread died while child is still alive.
                     // The session is frozen (no output forwarding).
                     // Kill the child so the lifecycle can reap and
@@ -195,15 +225,15 @@ impl App {
                         "snapshot({session_id}): reader thread dead, child alive — \
                          killing frozen session"
                     ));
-                    session.force_kill();
+                    ts.handle.force_kill();
                     SessionPhase::Exited
-                } else if let Some(since) = session.stopping_since() {
+                } else if let Some(since) = ts.handle.stopping_since() {
                     SessionPhase::Stopping { since }
                 } else {
                     SessionPhase::Running
                 };
 
-                let task = match ops::get_task(&self.conn, session.task_name()) {
+                let task = match ops::get_task(&self.conn, ts.handle.task_name()) {
                     Ok(t) => Some(TaskSnapshot {
                         status: t.status,
                         assignee: t.assignee,
@@ -236,30 +266,36 @@ impl App {
         for action in actions {
             match action {
                 SessionAction::RequestExit { session_id, reason } => {
-                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                    if let Some(ts) = self.sessions.get_mut(&session_id) {
                         kbtz::debug_log::log(&format!(
                             "action: request_exit {} (task={}, reason={})",
                             session_id,
-                            session.task_name(),
+                            ts.handle.task_name(),
                             reason
                         ));
-                        self.backend.request_exit(session.as_mut());
+                        match self.backends.get(&ts.agent_type) {
+                            Some(backend) => backend.request_exit(ts.handle.as_mut()),
+                            None => kbtz::debug_log::log(&format!(
+                                "BUG: no backend '{}' for session {}, cannot request exit",
+                                ts.agent_type, session_id,
+                            )),
+                        }
                     }
                 }
                 SessionAction::ForceKill { session_id } => {
-                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                    if let Some(ts) = self.sessions.get_mut(&session_id) {
                         kbtz::debug_log::log(&format!(
                             "action: force_kill {} (task={})",
                             session_id,
-                            session.task_name()
+                            ts.handle.task_name()
                         ));
-                        session.force_kill();
+                        ts.handle.force_kill();
                         descriptions.push(format!("{session_id} killed"));
                     }
                 }
                 SessionAction::Remove { session_id } => {
                     if self.sessions.contains_key(&session_id) {
-                        let task = self.sessions[&session_id].task_name().to_string();
+                        let task = self.sessions[&session_id].handle.task_name().to_string();
                         kbtz::debug_log::log(&format!(
                             "action: remove {} (task={})",
                             session_id, task
@@ -308,11 +344,17 @@ impl App {
 
     /// Spawn sessions for claimable tasks, up to `count` new sessions.
     fn spawn_up_to(&mut self, count: usize) -> Result<()> {
+        let valid_types: Vec<&str> = self.backends.keys().map(|s| s.as_str()).collect();
         for _ in 0..count {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            let claim = match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())
+            let claim = match ops::claim_next_task(
+                &self.conn,
+                &session_id,
+                self.prefer.as_deref(),
+                Some(&valid_types),
+            )
             {
                 Ok(v) => v,
                 Err(e) if is_db_busy(&e) => {
@@ -326,14 +368,29 @@ impl App {
                 Some(task_name) => {
                     kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
                     let task = ops::get_task(&self.conn, &task_name)?;
-                    match self.spawn_session(&task, &session_id) {
-                        Ok(session) => {
+                    let agent_type = self.resolve_agent_type(&task).to_string();
+
+                    // claim_next_task filters by configured agent types,
+                    // so the backend must exist here.
+                    let backend = self.get_backend(&agent_type).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: claimed task '{}' with agent type '{}' \
+                             but no matching backend",
+                            task_name, agent_type
+                        )
+                    });
+
+                    match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
+                        Ok(handle) => {
                             kbtz::debug_log::log(&format!(
-                                "spawn: session started for {task_name} ({session_id})"
+                                "spawn: session started for {task_name} ({session_id}, agent={agent_type})"
                             ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions.insert(session_id, session);
+                            self.sessions.insert(session_id, TrackedSession {
+                                handle,
+                                agent_type,
+                            });
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -362,6 +419,21 @@ impl App {
             bail!("task already has an active session");
         }
 
+        // Check agent type before claiming so the task stays open on error.
+        let task = ops::get_task(&self.conn, task_name)?;
+        let agent_type = self.resolve_agent_type(&task).to_string();
+        if !self.backends.contains_key(&agent_type) {
+            kbtz::debug_log::log(&format!(
+                "spawn_for_task: unconfigured agent type '{}' for task {}",
+                agent_type, task_name
+            ));
+            bail!(
+                "task '{}' requires unconfigured agent type '{}'",
+                task_name,
+                agent_type
+            );
+        }
+
         self.counter += 1;
         let session_id = format!("ws/{}", self.counter);
 
@@ -370,23 +442,18 @@ impl App {
         ));
         ops::claim_task(&self.conn, task_name, &session_id)?;
 
-        let task = match ops::get_task(&self.conn, task_name) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = ops::release_task(&self.conn, task_name, &session_id);
-                self.counter -= 1;
-                return Err(e);
-            }
-        };
-
-        match self.spawn_session(&task, &session_id) {
-            Ok(session) => {
+        let backend = self.backends[&agent_type].as_ref();
+        match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
+            Ok(handle) => {
                 kbtz::debug_log::log(&format!(
-                    "spawn_for_task: session started for {task_name} ({session_id})"
+                    "spawn_for_task: session started for {task_name} ({session_id}, agent={agent_type})"
                 ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions.insert(session_id, session);
+                self.sessions.insert(session_id, TrackedSession {
+                    handle,
+                    agent_type,
+                });
                 Ok(())
             }
             Err(e) => {
@@ -408,14 +475,14 @@ impl App {
     fn spawn_toplevel(&mut self) -> Result<()> {
         let task_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
-        let args = self
-            .backend
-            .toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
+        let backend = self.default_backend();
+        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
+        let command = backend.command().to_string();
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = TOPLEVEL_SESSION_ID;
         let env_vars: Vec<(&str, &str)> = vec![("KBTZ_DB", &self.db_path)];
         let session = PtySpawner.spawn(
-            self.backend.command(),
+            &command,
             &arg_refs,
             "toplevel",
             session_id,
@@ -439,24 +506,30 @@ impl App {
         Ok(())
     }
 
-    fn spawn_session(&self, task: &Task, session_id: &str) -> Result<Box<dyn SessionHandle>> {
+    fn spawn_session_with(
+        &self,
+        backend: &dyn Backend,
+        agent_type: &str,
+        task: &Task,
+        session_id: &str,
+    ) -> Result<Box<dyn SessionHandle>> {
         let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
         let protocol_prompt = crate::prompt::AGENT_PROMPT;
         let session_file = self.claude_sessions_dir.join(&task.name);
 
-        // Try to resume a previous Claude session if one exists.
+        // Try to resume a previous session if one exists.
         let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-            if let Some(resume_args) = self.backend.resume_args(protocol_prompt, &stored_uuid) {
+            if let Some(resume_args) = backend.resume_args(protocol_prompt, &stored_uuid) {
                 kbtz::debug_log::log(&format!(
-                    "spawn_session: resuming {} (claude session {})",
-                    task.name, stored_uuid
+                    "spawn_session: resuming {} (session {}, agent={})",
+                    task.name, stored_uuid, agent_type
                 ));
                 (resume_args, true)
             } else {
                 // Backend doesn't support resume; start fresh (no tracking).
                 let _ = std::fs::remove_file(&session_file);
                 (
-                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(protocol_prompt, &task_prompt),
                     false,
                 )
             }
@@ -464,8 +537,7 @@ impl App {
             // No stored session. Try fresh_args for session tracking, fall back to worker_args.
             let new_uuid = uuid::Uuid::new_v4().to_string();
             if let Some(fresh_args) =
-                self.backend
-                    .fresh_args(protocol_prompt, &task_prompt, &new_uuid)
+                backend.fresh_args(protocol_prompt, &task_prompt, &new_uuid)
             {
                 if let Err(e) = std::fs::write(&session_file, &new_uuid) {
                     kbtz::debug_log::log(&format!(
@@ -474,25 +546,26 @@ impl App {
                     ));
                     // Fall back to worker_args without tracking.
                     (
-                        self.backend.worker_args(protocol_prompt, &task_prompt),
+                        backend.worker_args(protocol_prompt, &task_prompt),
                         false,
                     )
                 } else {
                     kbtz::debug_log::log(&format!(
-                        "spawn_session: fresh {} (claude session {})",
-                        task.name, new_uuid
+                        "spawn_session: fresh {} (session {}, agent={})",
+                        task.name, new_uuid, agent_type
                     ));
                     (fresh_args, false)
                 }
             } else {
                 (
-                    self.backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(protocol_prompt, &task_prompt),
                     false,
                 )
             }
         };
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let command = backend.command();
         let status_dir_str = self.status_dir.to_string_lossy().to_string();
         let debug_path = std::env::var("KBTZ_DEBUG").unwrap_or_default();
         let mut env_vars: Vec<(&str, &str)> = vec![
@@ -500,12 +573,13 @@ impl App {
             ("KBTZ_SESSION_ID", session_id),
             ("KBTZ_TASK", &task.name),
             ("KBTZ_WORKSPACE_DIR", &status_dir_str),
+            ("KBTZ_AGENT_TYPE", agent_type),
         ];
         if !debug_path.is_empty() {
             env_vars.push(("KBTZ_DEBUG", &debug_path));
         }
         let result = self.spawner.spawn(
-            self.backend.command(),
+            command,
             &arg_refs,
             &task.name,
             session_id,
@@ -538,20 +612,20 @@ impl App {
 
     /// Read status files from the status directory and update session statuses.
     pub fn read_status_files(&mut self) -> Result<()> {
-        for (session_id, session) in &mut self.sessions {
+        for (session_id, ts) in &mut self.sessions {
             let path = self.status_dir.join(session_id_to_filename(session_id));
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let new_status = SessionStatus::from_str(&content);
-                if *session.status() != new_status {
+                if *ts.handle.status() != new_status {
                     kbtz::debug_log::log(&format!(
                         "status: {} {} -> {} (task={})",
                         session_id,
-                        session.status().label(),
+                        ts.handle.status().label(),
                         new_status.label(),
-                        session.task_name()
+                        ts.handle.task_name()
                     ));
                 }
-                session.set_status(new_status);
+                ts.handle.set_status(new_status);
             }
         }
         Ok(())
@@ -563,12 +637,12 @@ impl App {
     /// allowing future spawns to resume the conversation. It's deleted when
     /// the task is done or paused (no need to resume completed work).
     fn remove_session(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.remove(session_id) {
-            let task_name = session.task_name().to_string();
-            let sid = session.session_id().to_string();
+        if let Some(ts) = self.sessions.remove(session_id) {
+            let task_name = ts.handle.task_name().to_string();
+            let sid = ts.handle.session_id().to_string();
             kbtz::debug_log::log(&format!(
                 "remove_session: {sid} (task={task_name}, status={})",
-                session.status().label()
+                ts.handle.status().label()
             ));
             // Check task status before releasing — we need to know if the session
             // file should be preserved for resume.
@@ -645,8 +719,15 @@ impl App {
                         self.term.cols,
                     ) {
                         Ok(session) => {
+                            // Resolve agent type from the task's agent field.
+                            let agent_type = ops::get_task(&self.conn, &task_name)
+                                .map(|t| {
+                                    t.agent
+                                        .unwrap_or_else(|| self.default_backend.clone())
+                                })
+                                .unwrap_or_else(|_| self.default_backend.clone());
                             kbtz::debug_log::log(&format!(
-                                "reconnect: adopted {session_id} (task={task_name})"
+                                "reconnect: adopted {session_id} (task={task_name}, agent={agent_type})"
                             ));
                             if let Some(n) = session_id
                                 .strip_prefix("ws/")
@@ -654,8 +735,12 @@ impl App {
                             {
                                 self.counter = self.counter.max(n);
                             }
-                            self.task_to_session.insert(task_name, session_id.clone());
-                            self.sessions.insert(session_id, Box::new(session));
+                            self.task_to_session
+                                .insert(task_name, session_id.clone());
+                            self.sessions.insert(session_id, TrackedSession {
+                                handle: Box::new(session),
+                                agent_type,
+                            });
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -728,8 +813,8 @@ impl App {
     /// Propagate terminal resize to all PTYs.
     pub fn handle_resize(&mut self, cols: u16, rows: u16) {
         self.term = TermSize { rows, cols };
-        for session in self.sessions.values() {
-            let _ = session.resize(rows, cols);
+        for ts in self.sessions.values() {
+            let _ = ts.handle.resize(rows, cols);
         }
         if let Some(ref toplevel) = self.toplevel {
             let _ = toplevel.resize(rows, cols);
@@ -765,7 +850,7 @@ impl App {
         let next_sid = &ids[next_idx];
         self.sessions
             .get(next_sid)
-            .map(|s| s.task_name().to_string())
+            .map(|ts| ts.handle.task_name().to_string())
     }
 
     /// Find the next session with NeedsInput status, cycling from current_task.
@@ -777,7 +862,7 @@ impl App {
             .filter(|id| {
                 self.sessions
                     .get(*id)
-                    .is_some_and(|s| *s.status() == SessionStatus::NeedsInput)
+                    .is_some_and(|ts| *ts.handle.status() == SessionStatus::NeedsInput)
             })
             .collect();
         if needs_input.is_empty() {
@@ -786,7 +871,7 @@ impl App {
         let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
         let idx = cycle_after(&needs_input, current_sid.as_ref());
         let sid = needs_input[idx];
-        self.sessions.get(sid).map(|s| s.task_name().to_string())
+        self.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())
     }
 
     /// Kill and release a session for a task so it can be respawned.
@@ -798,8 +883,8 @@ impl App {
             kbtz::debug_log::log(&format!(
                 "restart_session: killing {session_id} (task={task_name})"
             ));
-            if let Some(session) = self.sessions.get_mut(&session_id) {
-                session.force_kill();
+            if let Some(ts) = self.sessions.get_mut(&session_id) {
+                ts.handle.force_kill();
             }
             // Delete session file before remove_session (which would preserve
             // it for active tasks). Restart means the user wants fresh.
@@ -821,7 +906,7 @@ impl App {
         ));
         if self.persistent_sessions {
             // Persistent mode: detach from sockets, leave shepherds running.
-            for (_, _session) in self.sessions.drain() {}
+            for (_, _ts) in self.sessions.drain() {}
             self.task_to_session.clear();
         } else {
             // Non-persistent mode: kill workers and release claims.
@@ -833,7 +918,8 @@ impl App {
 
         // Kill the toplevel session (it's ephemeral, not persistent).
         if let Some(ref mut toplevel) = self.toplevel {
-            self.backend.request_exit(toplevel.as_mut());
+            // default_backend is validated at construction, so this is safe.
+            self.backends[&self.default_backend].request_exit(toplevel.as_mut());
         }
         let deadline = std::time::Instant::now() + GRACEFUL_TIMEOUT;
         loop {
@@ -997,11 +1083,62 @@ mod tests {
         }
     }
 
+    type CapturedEnv = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
+    /// Spawner that captures env vars for test assertions.
+    struct CapturingSpawner {
+        captured_env: CapturedEnv,
+    }
+
+    impl CapturingSpawner {
+        fn new() -> (Self, CapturedEnv) {
+            let captured: CapturedEnv =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let spawner = Self {
+                captured_env: captured.clone(),
+            };
+            (spawner, captured)
+        }
+    }
+
+    fn env_for_task(captured: &CapturedEnv, task_name: &str) -> Vec<(String, String)> {
+        let data = captured.lock().unwrap();
+        data.iter()
+            .find(|(name, _)| name == task_name)
+            .map(|(_, env)| env.clone())
+            .unwrap_or_default()
+    }
+
+    impl SessionSpawner for CapturingSpawner {
+        fn spawn(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            task_name: &str,
+            session_id: &str,
+            _rows: u16,
+            _cols: u16,
+            env_vars: &[(&str, &str)],
+        ) -> Result<Box<dyn SessionHandle>> {
+            let env: Vec<(String, String)> = env_vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            self.captured_env
+                .lock()
+                .unwrap()
+                .push((task_name.to_string(), env));
+            Ok(Box::new(StubSession::new(task_name, session_id, true)))
+        }
+    }
+
     fn test_app() -> (App, TempDir) {
         let status_dir = TempDir::new().unwrap();
         let claude_sessions_dir = status_dir.path().join("claude-sessions");
         std::fs::create_dir_all(&claude_sessions_dir).unwrap();
         let conn = kbtz::db::open_memory().unwrap();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(StubBackend));
         let app = App {
             db_path: ":memory:".to_string(),
             conn,
@@ -1013,7 +1150,8 @@ mod tests {
             max_concurrency: 2,
             manual: false,
             prefer: None,
-            backend: Box::new(StubBackend),
+            backends,
+            default_backend: "claude".to_string(),
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             toplevel: None,
@@ -1032,7 +1170,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1055,7 +1196,10 @@ mod tests {
         // But ws/1 is still in the sessions map (hasn't been cleaned up yet).
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
 
         app.remove_session("ws/1");
@@ -1077,7 +1221,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1102,7 +1249,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1121,7 +1271,7 @@ mod tests {
         assert!(!app.sessions.contains_key("ws/1"));
         // A new session ws/2 was spawned for a claimable task
         assert!(app.sessions.contains_key("ws/2"));
-        let new_task = app.sessions.get("ws/2").unwrap().task_name().to_string();
+        let new_task = app.sessions.get("ws/2").unwrap().handle.task_name().to_string();
         assert_eq!(
             app.task_to_session.get(&new_task).map(String::as_str),
             Some("ws/2")
@@ -1237,6 +1387,8 @@ mod tests {
         let claude_sessions_dir = status_dir.path().join("claude-sessions");
         std::fs::create_dir_all(&claude_sessions_dir).unwrap();
         let conn = kbtz::db::open_memory().unwrap();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(ResumableStubBackend));
         let app = App {
             db_path: ":memory:".to_string(),
             conn,
@@ -1248,7 +1400,8 @@ mod tests {
             max_concurrency: 2,
             manual: false,
             prefer: None,
-            backend: Box::new(ResumableStubBackend),
+            backends,
+            default_backend: "claude".to_string(),
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             toplevel: None,
@@ -1265,7 +1418,9 @@ mod tests {
         ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
-        app.spawn_session(&task, "ws/1").unwrap();
+        let backend = app.default_backend();
+        app.spawn_session_with(backend, "claude", &task, "ws/1")
+            .unwrap();
 
         let session_file = app.claude_sessions_dir.join("task-a");
         assert!(session_file.exists(), "session file should be created");
@@ -1287,7 +1442,10 @@ mod tests {
         std::fs::write(&session_file, "fake-uuid-12345").unwrap();
 
         // Spawn should read the stored UUID (resume path)
-        let session = app.spawn_session(&task, "ws/1").unwrap();
+        let backend = app.default_backend();
+        let session = app
+            .spawn_session_with(backend, "claude", &task, "ws/1")
+            .unwrap();
         assert_eq!(session.task_name(), "task-a");
 
         // Session file should still exist with the same UUID
@@ -1307,7 +1465,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1335,7 +1496,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1361,7 +1525,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", true)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", true)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
@@ -1379,13 +1546,241 @@ mod tests {
         ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
-        app.spawn_session(&task, "ws/1").unwrap();
+        let backend = app.default_backend();
+        app.spawn_session_with(backend, "claude", &task, "ws/1")
+            .unwrap();
 
         let session_file = app.claude_sessions_dir.join("task-a");
         assert!(
             !session_file.exists(),
             "non-resumable backend should not create session file"
         );
+    }
+
+    /// Create a test app with multiple backends: "claude" (default) and "gemini".
+    fn test_app_multi_backend() -> (App, TempDir) {
+        let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
+        let conn = kbtz::db::open_memory().unwrap();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(StubBackend));
+        backends.insert("gemini".to_string(), Box::new(StubBackend));
+        let app = App {
+            db_path: ":memory:".to_string(),
+            conn,
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backends,
+            default_backend: "claude".to_string(),
+            spawner: Box::new(StubSpawner),
+            persistent_sessions: false,
+            toplevel: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
+            tree_dirty: false,
+        };
+        (app, status_dir)
+    }
+
+    #[test]
+    fn spawn_uses_correct_backend_for_task_with_agent() {
+        let (mut app, _dir) = test_app_multi_backend();
+        ops::add_task(
+            &app.conn,
+            "gemini-task",
+            None,
+            "test gemini",
+            None,
+            None,
+            false,
+            Some("gemini"),
+        )
+        .unwrap();
+
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        let session_id = app.task_to_session.get("gemini-task").unwrap();
+        assert_eq!(
+            app.sessions.get(session_id).map(|ts| ts.agent_type.as_str()),
+            Some("gemini")
+        );
+    }
+
+    #[test]
+    fn spawn_uses_default_backend_for_task_without_agent() {
+        let (mut app, _dir) = test_app_multi_backend();
+        ops::add_task(
+            &app.conn,
+            "plain-task",
+            None,
+            "no agent specified",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        let session_id = app.task_to_session.get("plain-task").unwrap();
+        assert_eq!(
+            app.sessions.get(session_id).map(|ts| ts.agent_type.as_str()),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn spawn_skips_task_with_unconfigured_agent() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(
+            &app.conn,
+            "bad-task",
+            None,
+            "test unknown agent",
+            None,
+            None,
+            false,
+            Some("nonexistent"),
+        )
+        .unwrap();
+
+        app.spawn_up_to(1).unwrap();
+
+        // No session should be created — claim_next_task filters it out.
+        assert!(app.sessions.is_empty());
+        assert!(app.task_to_session.is_empty());
+        // Task should remain open (never claimed).
+        let task = ops::get_task(&app.conn, "bad-task").unwrap();
+        assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn spawn_for_task_with_unconfigured_agent_returns_error() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(
+            &app.conn,
+            "bad-task",
+            None,
+            "test unknown agent",
+            None,
+            None,
+            false,
+            Some("nonexistent"),
+        )
+        .unwrap();
+
+        let result = app.spawn_for_task("bad-task");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+
+        // Task should be released
+        let task = ops::get_task(&app.conn, "bad-task").unwrap();
+        assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn spawn_sets_kbtz_agent_type_env_var() {
+        let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
+        let conn = kbtz::db::open_memory().unwrap();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(StubBackend));
+        backends.insert("gemini".to_string(), Box::new(StubBackend));
+        let (spawner, captured) = CapturingSpawner::new();
+        let mut app = App {
+            db_path: ":memory:".to_string(),
+            conn,
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backends,
+            default_backend: "claude".to_string(),
+            spawner: Box::new(spawner),
+            persistent_sessions: false,
+            toplevel: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
+            tree_dirty: false,
+        };
+
+        // Create a task with agent="gemini" and one with no agent.
+        ops::add_task(
+            &app.conn,
+            "gemini-task",
+            None,
+            "uses gemini",
+            None,
+            None,
+            false,
+            Some("gemini"),
+        )
+        .unwrap();
+        ops::add_task(
+            &app.conn,
+            "default-task",
+            None,
+            "uses default",
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        app.spawn_up_to(2).unwrap();
+
+        let gemini_env = env_for_task(&captured, "gemini-task");
+        let agent_type = gemini_env
+            .iter()
+            .find(|(k, _)| k == "KBTZ_AGENT_TYPE")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(agent_type, Some("gemini"));
+
+        let default_env = env_for_task(&captured, "default-task");
+        let agent_type = default_env
+            .iter()
+            .find(|(k, _)| k == "KBTZ_AGENT_TYPE")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(agent_type, Some("claude"));
+    }
+
+    #[test]
+    fn remove_session_cleans_up_tracked_session() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(!app.sessions.contains_key("ws/1"));
+        assert!(!app.task_to_session.contains_key("task-a"));
     }
 
     #[test]
