@@ -116,7 +116,7 @@ EOF
 
 Use `--agent <type>` only when a subtask specifically needs a non-default
 backend (e.g. `--agent gemini`). Omit it for tasks that should use the
-workspace default.
+workspace default. Run `kbtz agents` to see available types.
 
 Subtasks can also depend on each other. For example, to define
 interfaces first and then run tests and implementation in parallel:
@@ -252,6 +252,7 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz reparent <task> <new-parent>` — move a task under a new parent
 - `kbtz reparent <task> --root` — move a task to the root level
 - `kbtz edit <name> "<new-description>"` — change a task's description
+- `kbtz agents` — list configured agent types
 
 ## Task creation guidelines
 
@@ -286,7 +287,7 @@ Use `--agent <type>` when creating a task that requires a specific backend:
 
 Only use `--agent` when a task specifically needs a non-default backend.
 Omitting it means the workspace default is used, which is correct for
-most tasks. Available agent types depend on the workspace configuration.
+most tasks. Run `kbtz agents` to see which agent types are configured.
 
 ## Rules
 
