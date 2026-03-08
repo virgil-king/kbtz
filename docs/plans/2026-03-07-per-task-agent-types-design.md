@@ -27,8 +27,10 @@ Add `pub agent: Option<String>` to the `Task` struct. Update
 - `kbtz list --json`: Include agent field.
 - `kbtz exec`: Support `--agent` in `add` commands within exec blocks.
 
-No changes to `claim-next` -- agent routing happens in the workspace, not in
-the claiming logic.
+`claim_next_task` accepts an optional `agent_types: Option<&[&str]>` filter.
+When provided, only tasks with `agent IS NULL` or `agent IN (...)` are
+eligible. This prevents claim-release spin loops on tasks with unconfigured
+agent types. The kbtz CLI and kbtz-tmux pass `None` (no filtering).
 
 ## Discoverability: kbtz agents command
 
@@ -57,27 +59,28 @@ file exists or no agents are configured, prints nothing (exit 0).
 
 This catches typos immediately rather than leaving tasks silently unclaimed.
 
-## kbtz-workspace: routing after claim
+## kbtz-workspace: routing with SQL-level filtering
 
-The workspace claims the best available task (no agent filtering), then
-routes to the right backend based on the task's `agent` field.
+The workspace passes its configured backend names to `claim_next_task`, which
+filters at the SQL level. Tasks with unconfigured agent types are never
+claimed -- they stay open until a workspace with the right backend picks them
+up.
 
 ### App struct changes
 
 `backend: Box<dyn Backend>` becomes `backends: HashMap<String, Box<dyn Backend>>`
-plus `default_backend: String`.
+plus `default_backend: String`. A `session_backends: HashMap<String, String>`
+tracks which backend each session was spawned with (for `request_exit` routing).
 
 At startup, build the backends map from `[agent.*]` config sections. The
 default comes from `workspace.backend` (falling back to "claude" if unset).
 
 ### Spawn logic
 
-After `claim_next_task()` returns a task:
-
-1. Read `task.agent` (or use `default_backend` if `NULL`).
-2. Look up the backend in `backends`.
-3. If found, spawn the session with that backend.
-4. If not found, release the task and log a warning.
+1. `claim_next_task` filters by configured agent types at the SQL level.
+2. Read `task.agent` (or use `default_backend` if `NULL`).
+3. Look up the backend in `backends` (guaranteed to exist by SQL filter).
+4. Spawn the session with that backend.
 
 ### Config
 
@@ -173,8 +176,10 @@ Description: Review the design doc.
 
 - `kbtz add --agent nonexistent`: Fails with error listing available types
   (if config exists). Succeeds with no validation if no config file exists.
-- Workspace claims a task with unconfigured agent type: Releases the task and
-  logs a warning.
+- Workspace `spawn_up_to`: SQL filter prevents claiming tasks with unconfigured
+  agent types. They stay open for other workspaces.
+- Workspace `spawn_for_task`: Checks backend exists before claiming. Returns
+  error if unconfigured.
 
 ## Not included (YAGNI)
 
