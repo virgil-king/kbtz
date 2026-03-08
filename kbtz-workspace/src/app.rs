@@ -345,11 +345,17 @@ impl App {
 
     /// Spawn sessions for claimable tasks, up to `count` new sessions.
     fn spawn_up_to(&mut self, count: usize) -> Result<()> {
+        let valid_types: Vec<&str> = self.backends.keys().map(|s| s.as_str()).collect();
         for _ in 0..count {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            let claim = match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())
+            let claim = match ops::claim_next_task(
+                &self.conn,
+                &session_id,
+                self.prefer.as_deref(),
+                Some(&valid_types),
+            )
             {
                 Ok(v) => v,
                 Err(e) if is_db_busy(&e) => {
@@ -365,22 +371,15 @@ impl App {
                     let task = ops::get_task(&self.conn, &task_name)?;
                     let agent_type = self.resolve_agent_type(&task).to_string();
 
-                    let backend = match self.get_backend(&agent_type) {
-                        Some(b) => b,
-                        None => {
-                            kbtz::debug_log::log(&format!(
-                                "spawn: unconfigured agent type '{}' for task {}, releasing",
-                                agent_type, task_name
-                            ));
-                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
-                            self.counter -= 1;
-                            self.tree.error = Some(format!(
-                                "task '{}' requires unconfigured agent type '{}'",
-                                task_name, agent_type
-                            ));
-                            break;
-                        }
-                    };
+                    // claim_next_task filters by configured agent types,
+                    // so the backend must exist here.
+                    let backend = self.get_backend(&agent_type).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: claimed task '{}' with agent type '{}' \
+                             but no matching backend",
+                            task_name, agent_type
+                        )
+                    });
 
                     match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
                         Ok(session) => {
@@ -420,6 +419,21 @@ impl App {
             bail!("task already has an active session");
         }
 
+        // Check agent type before claiming so the task stays open on error.
+        let task = ops::get_task(&self.conn, task_name)?;
+        let agent_type = self.resolve_agent_type(&task).to_string();
+        if !self.backends.contains_key(&agent_type) {
+            kbtz::debug_log::log(&format!(
+                "spawn_for_task: unconfigured agent type '{}' for task {}",
+                agent_type, task_name
+            ));
+            bail!(
+                "task '{}' requires unconfigured agent type '{}'",
+                task_name,
+                agent_type
+            );
+        }
+
         self.counter += 1;
         let session_id = format!("ws/{}", self.counter);
 
@@ -428,33 +442,7 @@ impl App {
         ));
         ops::claim_task(&self.conn, task_name, &session_id)?;
 
-        let task = match ops::get_task(&self.conn, task_name) {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = ops::release_task(&self.conn, task_name, &session_id);
-                self.counter -= 1;
-                return Err(e);
-            }
-        };
-
-        let agent_type = self.resolve_agent_type(&task).to_string();
-        let backend = match self.get_backend(&agent_type) {
-            Some(b) => b,
-            None => {
-                kbtz::debug_log::log(&format!(
-                    "spawn_for_task: unconfigured agent type '{}' for task {}, releasing",
-                    agent_type, task_name
-                ));
-                let _ = ops::release_task(&self.conn, task_name, &session_id);
-                self.counter -= 1;
-                bail!(
-                    "task '{}' requires unconfigured agent type '{}'",
-                    task_name,
-                    agent_type
-                );
-            }
-        };
-
+        let backend = self.backends[&agent_type].as_ref();
         match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
             Ok(session) => {
                 kbtz::debug_log::log(&format!(
@@ -1635,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_releases_task_with_unconfigured_agent() {
+    fn spawn_skips_task_with_unconfigured_agent() {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
@@ -1651,15 +1639,12 @@ mod tests {
 
         app.spawn_up_to(1).unwrap();
 
-        // No session should be created
+        // No session should be created — claim_next_task filters it out.
         assert!(app.sessions.is_empty());
         assert!(app.task_to_session.is_empty());
-        // Task should be released back to open
+        // Task should remain open (never claimed).
         let task = ops::get_task(&app.conn, "bad-task").unwrap();
         assert_eq!(task.status, "open");
-        // Error should be set in tree
-        assert!(app.tree.error.is_some());
-        assert!(app.tree.error.as_ref().unwrap().contains("nonexistent"));
     }
 
     #[test]

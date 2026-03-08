@@ -107,7 +107,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             assignee,
             prefer,
             json,
-        } => match ops::claim_next_task(conn, &assignee, prefer.as_deref())? {
+        } => match ops::claim_next_task(conn, &assignee, prefer.as_deref(), None)? {
             Some(name) => {
                 let task = ops::get_task(conn, &name)?;
                 let notes = ops::list_notes(conn, &name)?;

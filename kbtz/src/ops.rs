@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
-use rusqlite::OptionalExtension;
 
 use crate::model::{Note, SearchResult, Task};
 use crate::validate::{detect_dep_cycle, detect_parent_cycle, validate_name};
@@ -200,6 +199,7 @@ fn sanitize_fts_query(text: &str) -> Option<String> {
     Some(words.join(" OR "))
 }
 
+/// `{AGENT_FILTER}` is replaced at runtime with the agent type filter clause.
 const CLAIM_NEXT_WITH_PREFER: &str = "
 SELECT t.name FROM tasks t
 LEFT JOIN (
@@ -221,6 +221,7 @@ LEFT JOIN (
     GROUP BY td.blocker
 ) uc ON uc.blocker = t.name
 WHERE t.status = 'open'
+  {AGENT_FILTER}
   AND NOT EXISTS (
       SELECT 1 FROM task_deps td2
       INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.status NOT IN ('done')
@@ -234,6 +235,7 @@ ORDER BY
 LIMIT 1
 ";
 
+/// `{AGENT_FILTER}` is replaced at runtime with the agent type filter clause.
 const CLAIM_NEXT_NO_PREFER: &str = "
 SELECT t.name FROM tasks t
 LEFT JOIN (
@@ -242,6 +244,7 @@ LEFT JOIN (
     GROUP BY td.blocker
 ) uc ON uc.blocker = t.name
 WHERE t.status = 'open'
+  {AGENT_FILTER}
   AND NOT EXISTS (
       SELECT 1 FROM task_deps td2
       INNER JOIN tasks bt2 ON bt2.name = td2.blocker AND bt2.status NOT IN ('done')
@@ -253,10 +256,15 @@ ORDER BY
 LIMIT 1
 ";
 
+/// Atomically claim the next available open task.
+///
+/// `agent_types`: when `Some`, only claim tasks whose `agent` field is NULL
+/// or matches one of the given types. When `None`, all tasks are eligible.
 pub fn claim_next_task(
     conn: &Connection,
     assignee: &str,
     prefer: Option<&str>,
+    agent_types: Option<&[&str]>,
 ) -> Result<Option<String>> {
     // Use SAVEPOINT instead of BEGIN IMMEDIATE so this works both standalone
     // and nested inside an existing transaction (e.g. `exec` batch).
@@ -265,13 +273,57 @@ pub fn claim_next_task(
     let result = (|| -> Result<Option<String>> {
         let fts_query = prefer.and_then(sanitize_fts_query);
 
+        // Build the agent type filter clause if agent_types is provided.
+        let agent_filter = agent_types.map(|types| {
+            if types.is_empty() {
+                // No configured backends — only match NULL agent.
+                "AND t.agent IS NULL".to_string()
+            } else {
+                let placeholders: Vec<String> = types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 10))
+                    .collect();
+                format!(
+                    "AND (t.agent IS NULL OR t.agent IN ({}))",
+                    placeholders.join(", ")
+                )
+            }
+        });
+        let filter = agent_filter.as_deref().unwrap_or("");
+
         let task_name: Option<String> = match fts_query {
-            Some(ref q) => conn
-                .query_row(CLAIM_NEXT_WITH_PREFER, [q], |row| row.get(0))
-                .optional()?,
-            None => conn
-                .query_row(CLAIM_NEXT_NO_PREFER, [], |row| row.get(0))
-                .optional()?,
+            Some(ref q) => {
+                let sql = CLAIM_NEXT_WITH_PREFER.replace("{AGENT_FILTER}", filter);
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.raw_bind_parameter(1, q)?;
+                if let Some(types) = agent_types {
+                    for (i, t) in types.iter().enumerate() {
+                        stmt.raw_bind_parameter(i + 10, *t)?;
+                    }
+                }
+                let result = stmt
+                    .raw_query()
+                    .next()?
+                    .map(|row| row.get(0))
+                    .transpose()?;
+                result
+            }
+            None => {
+                let sql = CLAIM_NEXT_NO_PREFER.replace("{AGENT_FILTER}", filter);
+                let mut stmt = conn.prepare(&sql)?;
+                if let Some(types) = agent_types {
+                    for (i, t) in types.iter().enumerate() {
+                        stmt.raw_bind_parameter(i + 10, *t)?;
+                    }
+                }
+                let result = stmt
+                    .raw_query()
+                    .next()?
+                    .map(|row| row.get(0))
+                    .transpose()?;
+                result
+            }
         };
 
         let Some(name) = task_name else {
@@ -1121,7 +1173,7 @@ mod tests {
     #[test]
     fn claim_next_no_tasks() {
         let conn = db::open_memory().unwrap();
-        assert_eq!(claim_next_task(&conn, "agent", None).unwrap(), None);
+        assert_eq!(claim_next_task(&conn, "agent", None, None).unwrap(), None);
     }
 
     #[test]
@@ -1130,7 +1182,7 @@ mod tests {
         add_task(&conn, "second", None, "", None, None, false, None).unwrap();
         add_task(&conn, "third", None, "", None, None, false, None).unwrap();
         // "second" has lower id, should be picked first
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("second"));
     }
 
@@ -1143,7 +1195,7 @@ mod tests {
         claim_task(&conn, "claimed-task", "other-agent").unwrap();
         add_task(&conn, "available", None, "", None, None, false, None).unwrap();
 
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("available"));
     }
 
@@ -1155,7 +1207,7 @@ mod tests {
         add_block(&conn, "blocker", "blocked").unwrap();
 
         // "blocked" has undone blocker, so only "blocker" is available
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("blocker"));
     }
 
@@ -1168,7 +1220,7 @@ mod tests {
         add_task(&conn, "downstream", None, "", None, None, false, None).unwrap();
         add_block(&conn, "unblocker", "downstream").unwrap();
 
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("unblocker"));
     }
 
@@ -1199,7 +1251,7 @@ mod tests {
         )
         .unwrap();
 
-        let picked = claim_next_task(&conn, "agent", Some("UI components")).unwrap();
+        let picked = claim_next_task(&conn, "agent", Some("UI components"), None).unwrap();
         assert_eq!(picked.as_deref(), Some("frontend"));
     }
 
@@ -1220,7 +1272,7 @@ mod tests {
         .unwrap();
         add_note(&conn, "task-b", "needs database migration work").unwrap();
 
-        let picked = claim_next_task(&conn, "agent", Some("database migration")).unwrap();
+        let picked = claim_next_task(&conn, "agent", Some("database migration"), None).unwrap();
         assert_eq!(picked.as_deref(), Some("task-b"));
     }
 
@@ -1230,7 +1282,7 @@ mod tests {
         // No task matches the preference, but tasks should still be returned
         add_task(&conn, "only-task", None, "some work", None, None, false, None).unwrap();
 
-        let picked = claim_next_task(&conn, "agent", Some("nonexistent-xyz")).unwrap();
+        let picked = claim_next_task(&conn, "agent", Some("nonexistent-xyz"), None).unwrap();
         assert_eq!(picked.as_deref(), Some("only-task"));
     }
 
@@ -1239,7 +1291,7 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "t", None, "", None, None, false, None).unwrap();
 
-        let picked = claim_next_task(&conn, "my-agent", None).unwrap();
+        let picked = claim_next_task(&conn, "my-agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("t"));
 
         let task = get_task(&conn, "t").unwrap();
@@ -1352,7 +1404,7 @@ mod tests {
         pause_task(&conn, "paused-task").unwrap();
         add_task(&conn, "available", None, "", None, None, false, None).unwrap();
 
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("available"));
     }
 
@@ -1566,7 +1618,7 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(&conn, "paused-task", None, "", None, None, true, None).unwrap();
         add_task(&conn, "open-task", None, "", None, None, false, None).unwrap();
-        let picked = claim_next_task(&conn, "agent", None).unwrap();
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("open-task"));
     }
 
@@ -1866,5 +1918,118 @@ mod tests {
         let tasks = list_tasks(&conn, None, false, None, Some("agent-1"), Some(false)).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "a");
+    }
+
+    #[test]
+    fn claim_next_agent_filter_skips_wrong_type() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "gemini-task", None, "", None, None, false, Some("gemini")).unwrap();
+        add_task(&conn, "claude-task", None, "", None, None, false, Some("claude")).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None, Some(&["claude"])).unwrap();
+        assert_eq!(picked.as_deref(), Some("claude-task"));
+
+        // gemini-task should still be open (not claimed)
+        let task = get_task(&conn, "gemini-task").unwrap();
+        assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn claim_next_agent_filter_claims_null_agent() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "default-task", None, "", None, None, false, None).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None, Some(&["claude"])).unwrap();
+        assert_eq!(picked.as_deref(), Some("default-task"));
+    }
+
+    #[test]
+    fn claim_next_agent_filter_multiple_types() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "gemini-task", None, "", None, None, false, Some("gemini")).unwrap();
+        add_task(&conn, "claude-task", None, "", None, None, false, Some("claude")).unwrap();
+        add_task(&conn, "other-task", None, "", None, None, false, Some("gpt")).unwrap();
+
+        // With both claude and gemini allowed, should pick gemini-task (oldest)
+        let picked =
+            claim_next_task(&conn, "agent", None, Some(&["claude", "gemini"])).unwrap();
+        assert_eq!(picked.as_deref(), Some("gemini-task"));
+
+        // gpt-task should still be open
+        let task = get_task(&conn, "other-task").unwrap();
+        assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn claim_next_agent_filter_none_claims_all() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "gemini-task", None, "", None, None, false, Some("gemini")).unwrap();
+
+        // None means no filtering — backward compatible
+        let picked = claim_next_task(&conn, "agent", None, None).unwrap();
+        assert_eq!(picked.as_deref(), Some("gemini-task"));
+    }
+
+    #[test]
+    fn claim_next_agent_filter_no_match_returns_none() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "gemini-task", None, "", None, None, false, Some("gemini")).unwrap();
+
+        let picked = claim_next_task(&conn, "agent", None, Some(&["claude"])).unwrap();
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn claim_next_agent_filter_empty_slice_only_null() {
+        let conn = db::open_memory().unwrap();
+        add_task(&conn, "typed-task", None, "", None, None, false, Some("claude")).unwrap();
+        add_task(&conn, "default-task", None, "", None, None, false, None).unwrap();
+
+        // Empty slice = no configured backends, only NULL agent tasks
+        let picked = claim_next_task(&conn, "agent", None, Some(&[])).unwrap();
+        assert_eq!(picked.as_deref(), Some("default-task"));
+    }
+
+    #[test]
+    fn claim_next_agent_filter_with_prefer() {
+        let conn = db::open_memory().unwrap();
+        add_task(
+            &conn,
+            "gemini-ui",
+            None,
+            "UI components",
+            None,
+            None,
+            false,
+            Some("gemini"),
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            "claude-ui",
+            None,
+            "UI components",
+            None,
+            None,
+            false,
+            Some("claude"),
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            "claude-api",
+            None,
+            "API endpoints",
+            None,
+            None,
+            false,
+            Some("claude"),
+        )
+        .unwrap();
+
+        // Prefer "UI" but only claude backends
+        let picked =
+            claim_next_task(&conn, "agent", Some("UI components"), Some(&["claude"])).unwrap();
+        assert_eq!(picked.as_deref(), Some("claude-ui"));
     }
 }
