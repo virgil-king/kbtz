@@ -8,7 +8,7 @@ use clap::Parser;
 use rusqlite::Connection;
 
 use cli::{Cli, Command};
-use kbtz::{db, ops, output, tui, watch};
+use kbtz::{config, db, ops, output, tui, watch};
 use ops::StatusFilter;
 
 fn default_db_path() -> Result<PathBuf> {
@@ -45,6 +45,11 @@ fn open_db(db_path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
+fn validate_agent_type(agent_type: &str) -> Result<()> {
+    let cfg = config::Config::load()?;
+    cfg.validate_agent_type(agent_type)
+}
+
 /// Dispatch a single parsed command against an open database connection.
 /// Used both for direct invocations and within `exec` batches.
 fn dispatch(conn: &Connection, command: Command) -> Result<()> {
@@ -59,6 +64,9 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             agent,
             json,
         } => {
+            if let Some(ref agent_type) = agent {
+                validate_agent_type(agent_type)?;
+            }
             ops::add_task(
                 conn,
                 &name,
@@ -296,6 +304,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             }
         }
 
+        Command::Agents => bail!("agents cannot be used inside exec"),
         Command::Watch { .. } => bail!("watch cannot be used inside exec"),
         Command::Wait => bail!("wait cannot be used inside exec"),
         Command::Exec => bail!("exec cannot be nested"),
@@ -480,6 +489,7 @@ fn run_exec(conn: &Connection, input: &str) -> Result<()> {
         let command = parse_exec_tokens(tokens, line).with_context(|| format!("line {lineno}"))?;
         // Reject commands that don't belong in a batch
         match &command {
+            Command::Agents => bail!("line {lineno}: agents cannot be used inside exec"),
             Command::Exec => bail!("line {lineno}: exec cannot be nested"),
             Command::Watch { .. } => bail!("line {lineno}: watch cannot be used inside exec"),
             Command::Wait => bail!("line {lineno}: wait cannot be used inside exec"),
@@ -541,6 +551,16 @@ fn run() -> Result<()> {
     ensure_db_dir(&db_path)?;
 
     match cli.command {
+        Command::Agents => {
+            let cfg = config::Config::load()?;
+            let mut names: Vec<&str> = cfg.agent.keys().map(|s| s.as_str()).collect();
+            names.sort();
+            for name in names {
+                println!("{name}");
+            }
+            return Ok(());
+        }
+
         Command::Exec => {
             let conn = open_db(&db_path)?;
             let mut input = String::new();
@@ -1246,5 +1266,14 @@ EOF
         // Quote opened but never closed across all remaining lines
         let input = "add my-task \"A task\"\nnote my-task \"oops\n";
         assert!(run_exec(&conn, input).is_err());
+    }
+
+    #[test]
+    fn exec_rejects_agents() {
+        let conn = test_conn();
+        let input = "agents\n";
+        let result = run_exec(&conn, input);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agents"));
     }
 }

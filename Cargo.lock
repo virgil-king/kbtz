@@ -885,6 +885,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -917,9 +918,7 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "rusqlite",
- "serde",
  "tempfile",
- "toml",
  "uuid",
  "vt100",
 ]
