@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
 
-use crate::app::App;
-use crate::session::SessionHandle;
+use crate::app::{App, TrackedSession};
 use kbtz::ui;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -19,17 +18,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 struct SessionDecorator<'a> {
     task_to_session: &'a HashMap<String, String>,
-    sessions: &'a HashMap<String, Box<dyn SessionHandle>>,
+    sessions: &'a HashMap<String, TrackedSession>,
 }
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
     fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
         // Workspace session: 🤖 + status indicator + session ID
         if let Some(sid) = self.task_to_session.get(&row.name) {
-            if let Some(session) = self.sessions.get(sid) {
+            if let Some(ts) = self.sessions.get(sid) {
                 return ui::RowDecoration {
                     icon_override: Some((
-                        format!("\u{1f916}{} ", session.status().indicator()),
+                        format!("\u{1f916}{} ", ts.handle.status().indicator()),
                         ui::status_style(&row.status),
                     )),
                     after_name: vec![Span::styled(

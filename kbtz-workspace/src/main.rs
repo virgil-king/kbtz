@@ -641,7 +641,7 @@ fn handle_prefix_command(
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .first()
-                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+                    .and_then(|sid| app.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())),
             };
             if let Some(next_task) = next_task {
                 if scroll.active {
@@ -658,7 +658,7 @@ fn handle_prefix_command(
                 SessionKind::TopLevel => app
                     .session_ids_ordered()
                     .last()
-                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+                    .and_then(|sid| app.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())),
             };
             if let Some(prev_task) = prev_task {
                 if scroll.active {
@@ -1051,8 +1051,8 @@ fn passthrough_loop(
         // Redraw status bar when status or debug info changes.
         let mut redraw = false;
         if let SessionKind::Worker { session_id, .. } = kind {
-            if let Some(session) = app.sessions.get(*session_id) {
-                let status = session.status().clone();
+            if let Some(ts) = app.sessions.get(*session_id) {
+                let status = ts.handle.status().clone();
                 if status != last_status {
                     last_status = status;
                     redraw = true;
