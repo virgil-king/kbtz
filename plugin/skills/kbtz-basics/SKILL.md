@@ -27,6 +27,7 @@ description: This skill should be used when the user asks about "kbtz commands",
 | `kbtz notes <name> [--json]` | List notes for a task |
 | `kbtz block <blocker> <blocked>` | Set dependency (blocker must finish before blocked can start) |
 | `kbtz unblock <blocker> <blocked>` | Remove a blocking relationship |
+| `kbtz agents` | List configured agent types |
 | `kbtz watch [--root name]` | Launch interactive TUI |
 | `kbtz wait` | Block until database changes |
 
@@ -137,6 +138,7 @@ kbtz add deferred-task "Not ready yet" --paused
 The workspace supports multiple agent backends (e.g., claude, gemini). Tasks use the workspace default unless overridden with `--agent`:
 
 ```bash
+kbtz agents                    # list available agent types
 kbtz add gemini-review "Review the design doc." --agent gemini
 ```
 
