@@ -224,28 +224,57 @@ fn run() -> Result<()> {
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
     let manual = cli.manual || ws.manual.unwrap_or(false);
     let prefer = cli.prefer.or(ws.prefer);
-    let backend_name = cli
+    let default_backend = cli
         .backend
         .or(ws.backend)
         .unwrap_or_else(|| "claude".into());
     let persistent_sessions = cli.persistent_sessions || ws.persistent_sessions.unwrap_or(false);
 
-    let agent_config = config.agent.get(&backend_name);
-    let command_override = cli
+    // Build all configured backends. The default backend is always included;
+    // additional backends come from [agent.*] config sections.
+    let mut backends = std::collections::HashMap::new();
+
+    // Build the default backend (with CLI --command override if provided).
+    let default_agent_config = config.agent.get(&default_backend);
+    let default_command_override = cli
         .command
         .as_deref()
-        .or_else(|| agent_config.and_then(|a| a.binary()));
-    // CLI --command is a plain string override with no prefix args.
-    let prefix_args: Vec<String> = if cli.command.is_some() {
+        .or_else(|| default_agent_config.and_then(|a| a.binary()));
+    let default_prefix_args: Vec<String> = if cli.command.is_some() {
         vec![]
     } else {
-        agent_config
+        default_agent_config
             .map(|a| a.prefix_args().to_vec())
             .unwrap_or_default()
     };
-    let extra_args: Vec<String> = agent_config.map(|a| a.args.clone()).unwrap_or_default();
+    let default_extra_args: Vec<String> = default_agent_config
+        .map(|a| a.args.clone())
+        .unwrap_or_default();
+    backends.insert(
+        default_backend.clone(),
+        backend::from_name(
+            &default_backend,
+            default_command_override,
+            &default_prefix_args,
+            &default_extra_args,
+        )?,
+    );
 
-    let backend = backend::from_name(&backend_name, command_override, &prefix_args, &extra_args)?;
+    // Build backends for all other configured agent types.
+    for (name, agent_cfg) in &config.agent {
+        if backends.contains_key(name) {
+            continue; // already built (e.g. the default backend)
+        }
+        backends.insert(
+            name.clone(),
+            backend::from_name(
+                name,
+                agent_cfg.binary(),
+                &agent_cfg.prefix_args().to_vec(),
+                &agent_cfg.args,
+            )?,
+        );
+    }
 
     let mut app = App::new(
         db_path,
@@ -253,7 +282,8 @@ fn run() -> Result<()> {
         concurrency,
         manual,
         prefer,
-        backend,
+        backends,
+        default_backend,
         app::TermSize { rows, cols },
         persistent_sessions,
     )?;
