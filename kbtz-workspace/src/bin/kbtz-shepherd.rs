@@ -74,16 +74,32 @@ impl ClientConn {
         }
     }
 
-    /// Write a message using blocking mode to avoid partial writes from
-    /// WouldBlock on the non-blocking socket.  A 5-second timeout prevents
+    /// Write a complete message on the non-blocking socket, polling for
+    /// writability on WouldBlock.  Times out after 5 seconds to avoid
     /// indefinite stalls if the workspace stops reading.
     fn write_message(&mut self, msg: &Message) -> anyhow::Result<()> {
-        self.stream.set_nonblocking(false)?;
-        self.stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
-        let result = protocol::write_message(&mut self.stream, msg);
-        self.stream.set_nonblocking(true)?;
-        result
+        let data = protocol::encode(msg);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut written = 0;
+        while written < data.len() {
+            match self.stream.write(&data[written..]) {
+                Ok(n) => written += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!("write timed out");
+                    }
+                    let mut pfd = libc::pollfd {
+                        fd: self.stream.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut pfd, 1, 100) };
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
     }
 }
 
