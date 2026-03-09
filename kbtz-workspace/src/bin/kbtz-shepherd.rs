@@ -140,9 +140,14 @@ fn main() {
     }
 }
 
+fn child_pid_path(pid_file: &Path) -> PathBuf {
+    pid_file.with_extension("child-pid")
+}
+
 fn cleanup(socket_path: &Path, pid_file: &Path) {
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_file(pid_file);
+    let _ = std::fs::remove_file(child_pid_path(pid_file));
 }
 
 fn run(
@@ -210,6 +215,11 @@ fn run(
     drop(pair.slave);
 
     let child_pid = child.process_id();
+
+    // Write child PID so force_kill() can kill the agent, not just the shepherd.
+    if let Some(pid) = child_pid {
+        std::fs::write(child_pid_path(pid_file), format!("{pid}"))?;
+    }
 
     let mut pty_writer = pair
         .master
