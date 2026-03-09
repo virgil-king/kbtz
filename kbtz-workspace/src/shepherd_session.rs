@@ -17,6 +17,7 @@ pub struct ShepherdSession {
     task_name: String,
     session_id: String,
     shepherd_pid: u32,
+    child_pid: Option<u32>,
     stopping_since: Option<Instant>,
 }
 
@@ -35,6 +36,10 @@ impl ShepherdSession {
             .trim()
             .parse()
             .with_context(|| format!("invalid PID in {}: {:?}", pid_path.display(), pid_str))?;
+
+        let child_pid: Option<u32> = std::fs::read_to_string(pid_path.with_extension("child-pid"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
 
         let stream = UnixStream::connect(socket_path).with_context(|| {
             format!("failed to connect to shepherd at {}", socket_path.display())
@@ -96,6 +101,7 @@ impl ShepherdSession {
             task_name: task_name.to_string(),
             session_id: session_id.to_string(),
             shepherd_pid,
+            child_pid,
             stopping_since: None,
         })
     }
@@ -169,8 +175,15 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn force_kill(&mut self) {
+        // Kill the child's process group first so the agent and its
+        // descendants don't become orphans when the shepherd dies.
+        if let Some(pid) = self.child_pid {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
         unsafe {
-            libc::kill(self.shepherd_pid as i32, libc::SIGKILL);
+            libc::kill(self.shepherd_pid as libc::pid_t, libc::SIGKILL);
         }
     }
 
@@ -331,6 +344,7 @@ mod tests {
             task_name: "test-task".to_string(),
             session_id: "test-session".to_string(),
             shepherd_pid: std::process::id(),
+            child_pid: None,
             stopping_since: None,
         };
 
@@ -354,6 +368,7 @@ mod tests {
             task_name: "test".to_string(),
             session_id: "test-id".to_string(),
             shepherd_pid: std::process::id(),
+            child_pid: None,
             stopping_since: None,
         };
 
