@@ -236,6 +236,9 @@ fn run() -> Result<()> {
 
     // Build the default backend (with CLI --command override if provided).
     let default_agent_config = config.agent.get(&default_backend);
+    let default_backend_impl = default_agent_config
+        .and_then(|a| a.backend.as_deref())
+        .unwrap_or(&default_backend);
     let default_command_override = cli
         .command
         .as_deref()
@@ -253,11 +256,11 @@ fn run() -> Result<()> {
     backends.insert(
         default_backend.clone(),
         backend::from_name(
-            &default_backend,
+            default_backend_impl,
             default_command_override,
             &default_prefix_args,
             &default_extra_args,
-        )?,
+        ),
     );
 
     // Build backends for all other configured agent types.
@@ -265,14 +268,15 @@ fn run() -> Result<()> {
         if backends.contains_key(name) {
             continue; // already built (e.g. the default backend)
         }
+        let backend_impl = agent_cfg.backend.as_deref().unwrap_or(name);
         backends.insert(
             name.clone(),
             backend::from_name(
-                name,
+                backend_impl,
                 agent_cfg.binary(),
                 &agent_cfg.prefix_args().to_vec(),
                 &agent_cfg.args,
-            )?,
+            ),
         );
     }
 

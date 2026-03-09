@@ -45,11 +45,6 @@ fn open_db(db_path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-fn validate_agent_type(agent_type: &str) -> Result<()> {
-    let cfg = config::Config::load()?;
-    cfg.validate_agent_type(agent_type)
-}
-
 /// Dispatch a single parsed command against an open database connection.
 /// Used both for direct invocations and within `exec` batches.
 fn dispatch(conn: &Connection, command: Command) -> Result<()> {
@@ -64,9 +59,6 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             agent,
             json,
         } => {
-            if let Some(ref agent_type) = agent {
-                validate_agent_type(agent_type)?;
-            }
             ops::add_task(
                 conn,
                 &name,
@@ -555,9 +547,19 @@ fn run() -> Result<()> {
             let cfg = config::Config::load()?;
             let mut names: Vec<&str> = cfg.agent.keys().map(|s| s.as_str()).collect();
             names.sort();
-            for name in names {
-                println!("{name}");
+            if names.is_empty() {
+                eprintln!("No agent types configured in ~/.kbtz/workspace.toml");
+            } else {
+                for name in &names {
+                    let agent = &cfg.agent[*name];
+                    if let Some(ref backend) = agent.backend {
+                        println!("{name} (backend: {backend})");
+                    } else {
+                        println!("{name}");
+                    }
+                }
             }
+            eprintln!("Unconfigured types use the agent name as the command.");
             return Ok(());
         }
 

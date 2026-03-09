@@ -198,9 +198,14 @@ impl App {
         task.agent.as_deref().unwrap_or(&self.default_backend)
     }
 
-    /// Look up the backend for a given agent type name.
-    fn get_backend(&self, agent_type: &str) -> Option<&dyn Backend> {
-        self.backends.get(agent_type).map(|b| b.as_ref())
+    /// Ensure a backend exists for the given agent type. If no configured
+    /// backend matches, creates and caches a generic backend using the
+    /// type name as the command.
+    fn ensure_backend(&mut self, agent_type: &str) {
+        if !self.backends.contains_key(agent_type) {
+            self.backends
+                .insert(agent_type.to_string(), crate::backend::generic(agent_type));
+        }
     }
 
     /// Get the default backend (used for toplevel session and request_exit fallback).
@@ -281,7 +286,7 @@ impl App {
                         ));
                         let backend = self.backends.get(&ts.agent_type).unwrap_or_else(|| {
                             panic!(
-                                "BUG: no backend '{}' for session {} — backends are immutable after startup",
+                                "BUG: no backend '{}' for session {} — ensure_backend was not called before session insertion",
                                 ts.agent_type, session_id,
                             )
                         });
@@ -350,7 +355,6 @@ impl App {
 
     /// Spawn sessions for claimable tasks, up to `count` new sessions.
     fn spawn_up_to(&mut self, count: usize) -> Result<()> {
-        let valid_types: Vec<&str> = self.backends.keys().map(|s| s.as_str()).collect();
         for _ in 0..count {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
@@ -359,7 +363,7 @@ impl App {
                 &self.conn,
                 &session_id,
                 self.prefer.as_deref(),
-                Some(&valid_types),
+                None,
             )
             {
                 Ok(v) => v,
@@ -375,16 +379,8 @@ impl App {
                     kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
                     let task = ops::get_task(&self.conn, &task_name)?;
                     let agent_type = self.resolve_agent_type(&task).to_string();
-
-                    // claim_next_task filters by configured agent types,
-                    // so the backend must exist here.
-                    let backend = self.get_backend(&agent_type).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: claimed task '{}' with agent type '{}' \
-                             but no matching backend",
-                            task_name, agent_type
-                        )
-                    });
+                    self.ensure_backend(&agent_type);
+                    let backend = self.backends[&agent_type].as_ref();
 
                     match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
                         Ok(handle) => {
@@ -425,20 +421,8 @@ impl App {
             bail!("task already has an active session");
         }
 
-        // Check agent type before claiming so the task stays open on error.
         let task = ops::get_task(&self.conn, task_name)?;
         let agent_type = self.resolve_agent_type(&task).to_string();
-        if !self.backends.contains_key(&agent_type) {
-            kbtz::debug_log::log(&format!(
-                "spawn_for_task: unconfigured agent type '{}' for task {}",
-                agent_type, task_name
-            ));
-            bail!(
-                "task '{}' requires unconfigured agent type '{}'",
-                task_name,
-                agent_type
-            );
-        }
 
         self.counter += 1;
         let session_id = format!("ws/{}", self.counter);
@@ -448,6 +432,7 @@ impl App {
         ));
         ops::claim_task(&self.conn, task_name, &session_id)?;
 
+        self.ensure_backend(&agent_type);
         let backend = self.backends[&agent_type].as_ref();
         match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
             Ok(handle) => {
@@ -479,10 +464,10 @@ impl App {
     /// We use PtySpawner (not ShepherdSpawner) because there's no value in
     /// persisting a session that has no task claim and is cheap to recreate.
     fn spawn_toplevel(&mut self) -> Result<()> {
-        let task_prompt =
+        let initial_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
         let backend = self.default_backend();
-        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, task_prompt);
+        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, initial_prompt);
         let command = backend.command().to_string();
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = TOPLEVEL_SESSION_ID;
@@ -519,13 +504,13 @@ impl App {
         task: &Task,
         session_id: &str,
     ) -> Result<Box<dyn SessionHandle>> {
-        let task_prompt = format!("Work on task '{}': {}", task.name, task.description);
-        let protocol_prompt = crate::prompt::AGENT_PROMPT;
+        let initial_prompt = format!("Work on task '{}': {}", task.name, task.description);
+        let system_instructions = crate::prompt::AGENT_PROMPT;
         let session_file = self.claude_sessions_dir.join(&task.name);
 
         // Try to resume a previous session if one exists.
         let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-            if let Some(resume_args) = backend.resume_args(protocol_prompt, &stored_uuid) {
+            if let Some(resume_args) = backend.resume_args(system_instructions, &stored_uuid) {
                 kbtz::debug_log::log(&format!(
                     "spawn_session: resuming {} (session {}, agent={})",
                     task.name, stored_uuid, agent_type
@@ -535,7 +520,7 @@ impl App {
                 // Backend doesn't support resume; start fresh (no tracking).
                 let _ = std::fs::remove_file(&session_file);
                 (
-                    backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(system_instructions, &initial_prompt),
                     false,
                 )
             }
@@ -543,7 +528,7 @@ impl App {
             // No stored session. Try fresh_args for session tracking, fall back to worker_args.
             let new_uuid = uuid::Uuid::new_v4().to_string();
             if let Some(fresh_args) =
-                backend.fresh_args(protocol_prompt, &task_prompt, &new_uuid)
+                backend.fresh_args(system_instructions, &initial_prompt, &new_uuid)
             {
                 if let Err(e) = std::fs::write(&session_file, &new_uuid) {
                     kbtz::debug_log::log(&format!(
@@ -552,7 +537,7 @@ impl App {
                     ));
                     // Fall back to worker_args without tracking.
                     (
-                        backend.worker_args(protocol_prompt, &task_prompt),
+                        backend.worker_args(system_instructions, &initial_prompt),
                         false,
                     )
                 } else {
@@ -564,7 +549,7 @@ impl App {
                 }
             } else {
                 (
-                    backend.worker_args(protocol_prompt, &task_prompt),
+                    backend.worker_args(system_instructions, &initial_prompt),
                     false,
                 )
             }
@@ -732,6 +717,9 @@ impl App {
                                         .unwrap_or_else(|| self.default_backend.clone())
                                 })
                                 .unwrap_or_else(|_| self.default_backend.clone());
+                            // Ensure a backend exists for this agent type so
+                            // execute_actions can find it at exit time.
+                            self.ensure_backend(&agent_type);
                             kbtz::debug_log::log(&format!(
                                 "reconnect: adopted {session_id} (task={task_name}, agent={agent_type})"
                             ));
@@ -1064,7 +1052,7 @@ mod tests {
         fn command(&self) -> &str {
             "true"
         }
-        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+        fn worker_args(&self, _system_instructions: &str, _initial_prompt: &str) -> Vec<String> {
             vec![]
         }
         fn request_exit(&self, session: &mut dyn SessionHandle) {
@@ -1369,18 +1357,18 @@ mod tests {
         fn command(&self) -> &str {
             "true"
         }
-        fn worker_args(&self, _protocol_prompt: &str, _task_prompt: &str) -> Vec<String> {
+        fn worker_args(&self, _system_instructions: &str, _initial_prompt: &str) -> Vec<String> {
             vec!["worker".into()]
         }
         fn fresh_args(
             &self,
-            _protocol_prompt: &str,
-            _task_prompt: &str,
+            _system_instructions: &str,
+            _initial_prompt: &str,
             session_id: &str,
         ) -> Option<Vec<String>> {
             Some(vec!["--session-id".into(), session_id.into()])
         }
-        fn resume_args(&self, _protocol_prompt: &str, session_id: &str) -> Option<Vec<String>> {
+        fn resume_args(&self, _system_instructions: &str, session_id: &str) -> Option<Vec<String>> {
             Some(vec!["--resume".into(), session_id.into()])
         }
         fn request_exit(&self, session: &mut dyn SessionHandle) {
@@ -1671,53 +1659,51 @@ mod tests {
     }
 
     #[test]
-    fn spawn_skips_task_with_unconfigured_agent() {
+    fn unconfigured_agent_creates_generic_backend_on_spawn_up_to() {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
-            "bad-task",
+            "custom-task",
             None,
-            "test unknown agent",
+            "test custom agent",
             None,
             None,
             false,
-            Some("nonexistent"),
+            Some("custom-tool"),
         )
         .unwrap();
+
+        // Before spawn, no backend for "custom-tool".
+        assert!(!app.backends.contains_key("custom-tool"));
 
         app.spawn_up_to(1).unwrap();
 
-        // No session should be created — claim_next_task filters it out.
-        assert!(app.sessions.is_empty());
-        assert!(app.task_to_session.is_empty());
-        // Task should remain open (never claimed).
-        let task = ops::get_task(&app.conn, "bad-task").unwrap();
-        assert_eq!(task.status, "open");
+        // After spawn, a generic backend should have been created.
+        assert!(app.backends.contains_key("custom-tool"));
     }
 
     #[test]
-    fn spawn_for_task_with_unconfigured_agent_returns_error() {
+    fn unconfigured_agent_creates_generic_backend_on_spawn_for_task() {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
-            "bad-task",
+            "custom-task",
             None,
-            "test unknown agent",
+            "test custom agent",
             None,
             None,
             false,
-            Some("nonexistent"),
+            Some("custom-tool"),
         )
         .unwrap();
 
-        let result = app.spawn_for_task("bad-task");
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("nonexistent"));
+        assert!(!app.backends.contains_key("custom-tool"));
 
-        // Task should be released
-        let task = ops::get_task(&app.conn, "bad-task").unwrap();
-        assert_eq!(task.status, "open");
+        // spawn_for_task may fail (command doesn't exist) but should
+        // still create the generic backend before attempting spawn.
+        let _ = app.spawn_for_task("custom-task");
+        assert!(app.backends.contains_key("custom-tool"));
+        assert_eq!(app.backends["custom-tool"].command(), "custom-tool");
     }
 
     #[test]
