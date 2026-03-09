@@ -74,8 +74,16 @@ impl ClientConn {
         }
     }
 
+    /// Write a message using blocking mode to avoid partial writes from
+    /// WouldBlock on the non-blocking socket.  A 5-second timeout prevents
+    /// indefinite stalls if the workspace stops reading.
     fn write_message(&mut self, msg: &Message) -> anyhow::Result<()> {
-        protocol::write_message(&mut self.stream, msg)
+        self.stream.set_nonblocking(false)?;
+        self.stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let result = protocol::write_message(&mut self.stream, msg);
+        self.stream.set_nonblocking(true)?;
+        result
     }
 }
 

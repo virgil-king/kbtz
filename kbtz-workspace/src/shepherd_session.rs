@@ -1,6 +1,7 @@
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -18,6 +19,11 @@ pub struct ShepherdSession {
     session_id: String,
     shepherd_pid: u32,
     stopping_since: Option<Instant>,
+    /// Set to false by the reader thread when it exits.  Mirrors the
+    /// `reader_alive` flag on `Session` — a dead reader with a live
+    /// shepherd means the socket connection broke and the session is
+    /// frozen (no output forwarding, input silently dropped).
+    reader_alive: Arc<AtomicBool>,
 }
 
 impl ShepherdSession {
@@ -86,7 +92,10 @@ impl ShepherdSession {
 
         // Spawn reader thread
         let pt_clone = Arc::clone(&passthrough);
-        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
+        let reader_alive = Arc::new(AtomicBool::new(true));
+        let ra = Arc::clone(&reader_alive);
+        let reader_sid = session_id.to_string();
+        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone, ra, reader_sid));
 
         Ok(ShepherdSession {
             socket_path: socket_path.to_path_buf(),
@@ -97,19 +106,27 @@ impl ShepherdSession {
             session_id: session_id.to_string(),
             shepherd_pid,
             stopping_since: None,
+            reader_alive,
         })
     }
 }
 
 // Note: EINTR is handled internally by `read_exact` (which `protocol::read_message`
 // uses), so unlike the PTY reader thread we don't need explicit EINTR retry here.
-fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mutex<Passthrough>>) {
+fn shepherd_reader_thread(
+    mut reader: BufReader<UnixStream>,
+    passthrough: Arc<Mutex<Passthrough>>,
+    alive_flag: Arc<AtomicBool>,
+    session_id: String,
+) {
     let stdout = std::io::stdout();
 
+    let exit_reason;
     loop {
         match protocol::read_message(&mut reader) {
             Ok(Some(Message::PtyOutput(data))) => {
                 let Ok(mut pt) = passthrough.lock() else {
+                    exit_reason = "mutex poisoned";
                     break;
                 };
                 pt.process(&data);
@@ -120,10 +137,22 @@ fn shepherd_reader_thread(mut reader: BufReader<UnixStream>, passthrough: Arc<Mu
                     let _ = out.flush();
                 }
             }
-            Ok(Some(_)) => {}           // Ignore unexpected messages
-            Ok(None) | Err(_) => break, // EOF or error
+            Ok(Some(_)) => {} // Ignore unexpected messages
+            Ok(None) => {
+                exit_reason = "EOF";
+                break;
+            }
+            Err(_) => {
+                exit_reason = "error";
+                break;
+            }
         }
     }
+
+    alive_flag.store(false, Ordering::Release);
+    kbtz::debug_log::log(&format!(
+        "shepherd_reader_thread({session_id}): exited ({exit_reason})"
+    ));
 }
 
 fn is_broken_pipe(e: &anyhow::Error) -> bool {
@@ -276,10 +305,7 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn reader_alive(&self) -> bool {
-        // Shepherd sessions use a Unix socket protocol reader.  Liveness is
-        // tracked via is_alive() (process + socket existence), so the reader
-        // thread state is not independently monitored here.
-        true
+        self.reader_alive.load(Ordering::Acquire)
     }
 }
 
@@ -321,7 +347,11 @@ mod tests {
         let passthrough = Arc::new(Mutex::new(pt));
 
         let pt_clone = Arc::clone(&passthrough);
-        std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone));
+        let reader_alive = Arc::new(AtomicBool::new(true));
+        let ra = Arc::clone(&reader_alive);
+        std::thread::spawn(move || {
+            shepherd_reader_thread(reader, pt_clone, ra, "test-session".to_string())
+        });
 
         let session = ShepherdSession {
             socket_path: socket_path.to_path_buf(),
@@ -332,6 +362,7 @@ mod tests {
             session_id: "test-session".to_string(),
             shepherd_pid: std::process::id(),
             stopping_since: None,
+            reader_alive,
         };
 
         let server_reader = BufReader::new(server_stream);
@@ -355,6 +386,7 @@ mod tests {
             session_id: "test-id".to_string(),
             shepherd_pid: std::process::id(),
             stopping_since: None,
+            reader_alive: Arc::new(AtomicBool::new(true)),
         };
 
         // is_alive takes &mut self
@@ -397,5 +429,25 @@ mod tests {
 
         let msg = protocol::read_message(&mut server_reader).unwrap().unwrap();
         assert_eq!(msg, Message::Resize { rows: 24, cols: 80 });
+    }
+
+    #[test]
+    fn reader_alive_false_after_server_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let (session, server_reader) = make_test_session(&socket_path);
+        assert!(session.reader_alive(), "reader should be alive initially");
+
+        // Drop the server side — the reader thread sees EOF and exits.
+        drop(server_reader);
+        // Give the reader thread time to detect EOF and set the flag.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(
+            !session.reader_alive(),
+            "reader should be dead after server closes"
+        );
     }
 }
