@@ -74,8 +74,32 @@ impl ClientConn {
         }
     }
 
+    /// Write a complete message on the non-blocking socket, polling for
+    /// writability on WouldBlock.  Times out after 5 seconds to avoid
+    /// indefinite stalls if the workspace stops reading.
     fn write_message(&mut self, msg: &Message) -> anyhow::Result<()> {
-        protocol::write_message(&mut self.stream, msg)
+        let data = protocol::encode(msg);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut written = 0;
+        while written < data.len() {
+            match self.stream.write(&data[written..]) {
+                Ok(n) => written += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!("write timed out");
+                    }
+                    let mut pfd = libc::pollfd {
+                        fd: self.stream.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut pfd, 1, 100) };
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -572,6 +596,16 @@ mod tests {
         let mut reader = std::io::BufReader::new(server);
         let received = protocol::read_message(&mut reader).unwrap().unwrap();
         assert_eq!(received, msg);
+    }
+
+    #[test]
+    fn write_message_to_closed_peer_fails() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+        drop(server);
+
+        let msg = Message::PtyOutput(b"data".to_vec());
+        assert!(cc.write_message(&msg).is_err());
     }
 
     #[test]
