@@ -18,6 +18,7 @@ pub struct ShepherdSession {
     task_name: String,
     session_id: String,
     shepherd_pid: u32,
+    child_pid: Option<u32>,
     stopping_since: Option<Instant>,
     /// Set to false by the reader thread when it exits.  Mirrors the
     /// `reader_alive` flag on `Session` — a dead reader with a live
@@ -41,6 +42,10 @@ impl ShepherdSession {
             .trim()
             .parse()
             .with_context(|| format!("invalid PID in {}: {:?}", pid_path.display(), pid_str))?;
+
+        let child_pid: Option<u32> = std::fs::read_to_string(pid_path.with_extension("child-pid"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
 
         let stream = UnixStream::connect(socket_path).with_context(|| {
             format!("failed to connect to shepherd at {}", socket_path.display())
@@ -105,6 +110,7 @@ impl ShepherdSession {
             task_name: task_name.to_string(),
             session_id: session_id.to_string(),
             shepherd_pid,
+            child_pid,
             stopping_since: None,
             reader_alive,
         })
@@ -198,8 +204,15 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn force_kill(&mut self) {
+        // Kill the child's process group before the shepherd so the agent
+        // and its descendants don't become orphans.
+        if let Some(pid) = self.child_pid {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
         unsafe {
-            libc::kill(self.shepherd_pid as i32, libc::SIGKILL);
+            libc::kill(self.shepherd_pid as libc::pid_t, libc::SIGKILL);
         }
     }
 
@@ -313,6 +326,7 @@ impl SessionHandle for ShepherdSession {
 mod tests {
     use super::*;
     use std::io::BufReader;
+    use std::os::unix::process::CommandExt;
 
     /// Helper: create a ShepherdSession with one end of a UnixStream pair,
     /// simulating the size-first handshake.
@@ -361,6 +375,7 @@ mod tests {
             task_name: "test-task".to_string(),
             session_id: "test-session".to_string(),
             shepherd_pid: std::process::id(),
+            child_pid: None,
             stopping_since: None,
             reader_alive,
         };
@@ -385,6 +400,7 @@ mod tests {
             task_name: "test".to_string(),
             session_id: "test-id".to_string(),
             shepherd_pid: std::process::id(),
+            child_pid: None,
             stopping_since: None,
             reader_alive: Arc::new(AtomicBool::new(true)),
         };
@@ -479,6 +495,88 @@ mod tests {
         assert!(
             !session.reader_alive(),
             "reader should be dead after server closes"
+        );
+    }
+
+    /// Spawn a `sleep` process in its own process group so tests can
+    /// safely kill it (or its group) without affecting the test runner.
+    fn spawn_isolated_sleep() -> std::process::Child {
+        unsafe {
+            std::process::Command::new("sleep")
+                .arg("999")
+                .pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                })
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn force_kill_kills_child_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let mut child = spawn_isolated_sleep();
+        let child_pid = child.id();
+        let mut shepherd = spawn_isolated_sleep();
+        let shepherd_pid = shepherd.id();
+
+        let mut session = ShepherdSession {
+            socket_path,
+            writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
+            passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
+            status: SessionStatus::Starting,
+            task_name: "test".to_string(),
+            session_id: "test-id".to_string(),
+            shepherd_pid,
+            child_pid: Some(child_pid),
+            stopping_since: None,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+        };
+
+        session.force_kill();
+
+        // try_wait reaps the zombie and confirms the process exited.
+        let child_exited = child.wait().unwrap().code().is_none(); // killed by signal → no code
+        let shepherd_exited = shepherd.wait().unwrap().code().is_none();
+        assert!(child_exited, "child should have been killed by signal");
+        assert!(
+            shepherd_exited,
+            "shepherd should have been killed by signal"
+        );
+    }
+
+    #[test]
+    fn force_kill_without_child_pid_only_kills_shepherd() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let mut shepherd = spawn_isolated_sleep();
+        let shepherd_pid = shepherd.id();
+
+        let mut session = ShepherdSession {
+            socket_path,
+            writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
+            passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
+            status: SessionStatus::Starting,
+            task_name: "test".to_string(),
+            session_id: "test-id".to_string(),
+            shepherd_pid,
+            child_pid: None,
+            stopping_since: None,
+            reader_alive: Arc::new(AtomicBool::new(true)),
+        };
+
+        session.force_kill();
+
+        let shepherd_exited = shepherd.wait().unwrap().code().is_none();
+        assert!(
+            shepherd_exited,
+            "shepherd should have been killed by signal"
         );
     }
 }
