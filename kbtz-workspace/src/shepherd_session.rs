@@ -300,6 +300,7 @@ impl SessionHandle for ShepherdSession {
 mod tests {
     use super::*;
     use std::io::BufReader;
+    use std::os::unix::process::CommandExt;
 
     /// Helper: create a ShepherdSession with one end of a UnixStream pair,
     /// simulating the size-first handshake.
@@ -412,5 +413,85 @@ mod tests {
 
         let msg = protocol::read_message(&mut server_reader).unwrap().unwrap();
         assert_eq!(msg, Message::Resize { rows: 24, cols: 80 });
+    }
+
+    /// Spawn a `sleep` process in its own process group so tests can
+    /// safely kill it (or its group) without affecting the test runner.
+    fn spawn_isolated_sleep() -> std::process::Child {
+        unsafe {
+            std::process::Command::new("sleep")
+                .arg("999")
+                .pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                })
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn force_kill_kills_child_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let mut child = spawn_isolated_sleep();
+        let child_pid = child.id();
+        let mut shepherd = spawn_isolated_sleep();
+        let shepherd_pid = shepherd.id();
+
+        let mut session = ShepherdSession {
+            socket_path,
+            writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
+            passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
+            status: SessionStatus::Starting,
+            task_name: "test".to_string(),
+            session_id: "test-id".to_string(),
+            shepherd_pid,
+            child_pid: Some(child_pid),
+            stopping_since: None,
+        };
+
+        session.force_kill();
+
+        // try_wait reaps the zombie and confirms the process exited.
+        let child_exited = child.wait().unwrap().code().is_none(); // killed by signal → no code
+        let shepherd_exited = shepherd.wait().unwrap().code().is_none();
+        assert!(child_exited, "child should have been killed by signal");
+        assert!(
+            shepherd_exited,
+            "shepherd should have been killed by signal"
+        );
+    }
+
+    #[test]
+    fn force_kill_without_child_pid_only_kills_shepherd() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let mut shepherd = spawn_isolated_sleep();
+        let shepherd_pid = shepherd.id();
+
+        let mut session = ShepherdSession {
+            socket_path,
+            writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
+            passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
+            status: SessionStatus::Starting,
+            task_name: "test".to_string(),
+            session_id: "test-id".to_string(),
+            shepherd_pid,
+            child_pid: None,
+            stopping_since: None,
+        };
+
+        session.force_kill();
+
+        let shepherd_exited = shepherd.wait().unwrap().code().is_none();
+        assert!(
+            shepherd_exited,
+            "shepherd should have been killed by signal"
+        );
     }
 }

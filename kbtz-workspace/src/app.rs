@@ -1407,6 +1407,69 @@ mod tests {
     }
 
     #[test]
+    fn remove_session_cleans_up_child_pid_file() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        // Create the child-pid file that the shepherd would write.
+        let filename = session_id_to_filename("ws/1");
+        let child_pid_file = app.status_dir.join(format!("{filename}.child-pid"));
+        std::fs::write(&child_pid_file, "12345").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            Box::new(StubSession::new("task-a", "ws/1", false)),
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            !child_pid_file.exists(),
+            ".child-pid file should be removed"
+        );
+    }
+
+    #[test]
+    fn kill_child_from_pid_file_missing_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("nonexistent.pid");
+        // Should not panic when the file doesn't exist.
+        kill_child_from_pid_file(&pid_path);
+    }
+
+    #[test]
+    fn kill_child_from_pid_file_kills_process_group() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("test.pid");
+
+        // Spawn a sleep in its own process group.
+        let mut child = unsafe {
+            std::process::Command::new("sleep")
+                .arg("999")
+                .pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                })
+                .spawn()
+                .unwrap()
+        };
+        let child_pid = child.id();
+
+        std::fs::write(pid_path.with_extension("child-pid"), format!("{child_pid}")).unwrap();
+
+        kill_child_from_pid_file(&pid_path);
+
+        // wait() reaps the zombie and confirms the process exited.
+        let exited = child.wait().unwrap().code().is_none(); // killed by signal → no code
+        assert!(exited, "child should have been killed by signal");
+    }
+
+    #[test]
     fn release_orphaned_tasks_ignores_non_ws_assignees() {
         let (app, _dir) = test_app();
         // Task claimed by an external agent, not a workspace session.

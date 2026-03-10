@@ -585,6 +585,14 @@ mod tests {
     }
 
     #[test]
+    fn child_pid_path_derives_extension() {
+        assert_eq!(
+            child_pid_path(Path::new("/tmp/ws-1.pid")),
+            PathBuf::from("/tmp/ws-1.child-pid")
+        );
+    }
+
+    #[test]
     fn partial_message_across_two_fills() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let msg = Message::PtyInput(b"split".to_vec());
