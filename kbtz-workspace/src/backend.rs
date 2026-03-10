@@ -47,11 +47,7 @@ pub trait Backend: Send + Sync {
     ///
     /// Returns `Some(args)` if the backend supports session resume.
     /// Returns `None` if resume is not supported (always starts fresh).
-    fn resume_args(
-        &self,
-        _system_instructions: &str,
-        _session_id: &str,
-    ) -> Option<Vec<String>> {
+    fn resume_args(&self, _system_instructions: &str, _session_id: &str) -> Option<Vec<String>> {
         None
     }
 
@@ -106,11 +102,7 @@ impl Backend for Claude {
         Some(args)
     }
 
-    fn resume_args(
-        &self,
-        system_instructions: &str,
-        session_id: &str,
-    ) -> Option<Vec<String>> {
+    fn resume_args(&self, system_instructions: &str, session_id: &str) -> Option<Vec<String>> {
         let mut args = Vec::with_capacity(self.prefix_args.len() + 4 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
         args.extend([

@@ -34,8 +34,8 @@ pub struct App {
     pub conn: Connection,
 
     // Session management
-    pub sessions: HashMap<String, TrackedSession>,    // session_id -> tracked session
-    pub task_to_session: HashMap<String, String>,     // task_name -> session_id
+    pub sessions: HashMap<String, TrackedSession>, // session_id -> tracked session
+    pub task_to_session: HashMap<String, String>,  // task_name -> session_id
     counter: u64,
     pub status_dir: PathBuf,
     /// Directory for storing Claude session UUIDs per task, enabling session
@@ -359,21 +359,16 @@ impl App {
             self.counter += 1;
             let session_id = format!("ws/{}", self.counter);
 
-            let claim = match ops::claim_next_task(
-                &self.conn,
-                &session_id,
-                self.prefer.as_deref(),
-                None,
-            )
-            {
-                Ok(v) => v,
-                Err(e) if is_db_busy(&e) => {
-                    // Transient lock contention — skip this tick, try again next time.
-                    self.counter -= 1;
-                    break;
-                }
-                Err(e) => return Err(e),
-            };
+            let claim =
+                match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref(), None) {
+                    Ok(v) => v,
+                    Err(e) if is_db_busy(&e) => {
+                        // Transient lock contention — skip this tick, try again next time.
+                        self.counter -= 1;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                };
             match claim {
                 Some(task_name) => {
                     kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
@@ -389,10 +384,8 @@ impl App {
                             ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions.insert(session_id, TrackedSession {
-                                handle,
-                                agent_type,
-                            });
+                            self.sessions
+                                .insert(session_id, TrackedSession { handle, agent_type });
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -441,10 +434,8 @@ impl App {
                 ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions.insert(session_id, TrackedSession {
-                    handle,
-                    agent_type,
-                });
+                self.sessions
+                    .insert(session_id, TrackedSession { handle, agent_type });
                 Ok(())
             }
             Err(e) => {
@@ -712,10 +703,7 @@ impl App {
                         Ok(session) => {
                             // Resolve agent type from the task's agent field.
                             let agent_type = ops::get_task(&self.conn, &task_name)
-                                .map(|t| {
-                                    t.agent
-                                        .unwrap_or_else(|| self.default_backend.clone())
-                                })
+                                .map(|t| t.agent.unwrap_or_else(|| self.default_backend.clone()))
                                 .unwrap_or_else(|_| self.default_backend.clone());
                             // Ensure a backend exists for this agent type so
                             // execute_actions can find it at exit time.
@@ -729,12 +717,14 @@ impl App {
                             {
                                 self.counter = self.counter.max(n);
                             }
-                            self.task_to_session
-                                .insert(task_name, session_id.clone());
-                            self.sessions.insert(session_id, TrackedSession {
-                                handle: Box::new(session),
-                                agent_type,
-                            });
+                            self.task_to_session.insert(task_name, session_id.clone());
+                            self.sessions.insert(
+                                session_id,
+                                TrackedSession {
+                                    handle: Box::new(session),
+                                    agent_type,
+                                },
+                            );
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -865,7 +855,9 @@ impl App {
         let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
         let idx = cycle_after(&needs_input, current_sid.as_ref());
         let sid = needs_input[idx];
-        self.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())
+        self.sessions
+            .get(sid)
+            .map(|ts| ts.handle.task_name().to_string())
     }
 
     /// Kill and release a session for a task so it can be respawned.
@@ -1086,8 +1078,7 @@ mod tests {
 
     impl CapturingSpawner {
         fn new() -> (Self, CapturedEnv) {
-            let captured: CapturedEnv =
-                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured: CapturedEnv = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let spawner = Self {
                 captured_env: captured.clone(),
             };
@@ -1265,7 +1256,13 @@ mod tests {
         assert!(!app.sessions.contains_key("ws/1"));
         // A new session ws/2 was spawned for a claimable task
         assert!(app.sessions.contains_key("ws/2"));
-        let new_task = app.sessions.get("ws/2").unwrap().handle.task_name().to_string();
+        let new_task = app
+            .sessions
+            .get("ws/2")
+            .unwrap()
+            .handle
+            .task_name()
+            .to_string();
         assert_eq!(
             app.task_to_session.get(&new_task).map(String::as_str),
             Some("ws/2")
@@ -1631,7 +1628,9 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         let session_id = app.task_to_session.get("gemini-task").unwrap();
         assert_eq!(
-            app.sessions.get(session_id).map(|ts| ts.agent_type.as_str()),
+            app.sessions
+                .get(session_id)
+                .map(|ts| ts.agent_type.as_str()),
             Some("gemini")
         );
     }
@@ -1656,7 +1655,9 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         let session_id = app.task_to_session.get("plain-task").unwrap();
         assert_eq!(
-            app.sessions.get(session_id).map(|ts| ts.agent_type.as_str()),
+            app.sessions
+                .get(session_id)
+                .map(|ts| ts.agent_type.as_str()),
             Some("claude")
         );
     }

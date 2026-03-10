@@ -449,10 +449,8 @@ mod tests {
     #[test]
     fn migrate_v2_to_v3_adds_agent_column() {
         let conn = open_v2_memory();
-        conn.execute_batch(
-            "INSERT INTO tasks (name, description) VALUES ('test', 'a task');",
-        )
-        .unwrap();
+        conn.execute_batch("INSERT INTO tasks (name, description) VALUES ('test', 'a task');")
+            .unwrap();
 
         init(&conn).unwrap();
 

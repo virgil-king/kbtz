@@ -274,7 +274,7 @@ fn run() -> Result<()> {
             backend::from_name(
                 backend_impl,
                 agent_cfg.binary(),
-                &agent_cfg.prefix_args().to_vec(),
+                agent_cfg.prefix_args(),
                 &agent_cfg.args,
             ),
         );
@@ -645,10 +645,11 @@ fn handle_prefix_command(
         b'n' => {
             let next_task = match kind {
                 SessionKind::Worker { task, .. } => app.cycle_session(&Action::NextSession, task),
-                SessionKind::TopLevel => app
-                    .session_ids_ordered()
-                    .first()
-                    .and_then(|sid| app.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())),
+                SessionKind::TopLevel => app.session_ids_ordered().first().and_then(|sid| {
+                    app.sessions
+                        .get(sid)
+                        .map(|ts| ts.handle.task_name().to_string())
+                }),
             };
             if let Some(next_task) = next_task {
                 if scroll.active {
@@ -662,10 +663,11 @@ fn handle_prefix_command(
         b'p' => {
             let prev_task = match kind {
                 SessionKind::Worker { task, .. } => app.cycle_session(&Action::PrevSession, task),
-                SessionKind::TopLevel => app
-                    .session_ids_ordered()
-                    .last()
-                    .and_then(|sid| app.sessions.get(sid).map(|ts| ts.handle.task_name().to_string())),
+                SessionKind::TopLevel => app.session_ids_ordered().last().and_then(|sid| {
+                    app.sessions
+                        .get(sid)
+                        .map(|ts| ts.handle.task_name().to_string())
+                }),
             };
             if let Some(prev_task) = prev_task {
                 if scroll.active {
