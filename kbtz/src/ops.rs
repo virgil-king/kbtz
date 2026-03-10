@@ -115,6 +115,7 @@ SET parent = ?1,
 WHERE name = ?2
 ";
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_task(
     conn: &Connection,
     name: &str,
