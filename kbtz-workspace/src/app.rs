@@ -1510,7 +1510,7 @@ mod tests {
     #[test]
     fn remove_session_preserves_file_for_paused_task() {
         let (mut app, _dir) = test_app_resumable();
-        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false).unwrap();
+        ops::add_task(&app.conn, "task-a", None, "desc", None, None, false, None).unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
         ops::pause_task(&app.conn, "task-a").unwrap();
 
@@ -1519,7 +1519,10 @@ mod tests {
 
         app.sessions.insert(
             "ws/1".to_string(),
-            Box::new(StubSession::new("task-a", "ws/1", false)),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+            },
         );
         app.task_to_session
             .insert("task-a".to_string(), "ws/1".to_string());
