@@ -39,6 +39,9 @@ pub fn format_task_detail(
     if let Some(ref assignee) = task.assignee {
         out.push_str(&format!("Assignee:    {}\n", assignee));
     }
+    if let Some(ref agent) = task.agent {
+        out.push_str(&format!("Agent:       {}\n", agent));
+    }
     if let Some(ref status_changed_at) = task.status_changed_at {
         out.push_str(&format!("Status changed: {}\n", status_changed_at));
     }
@@ -206,6 +209,7 @@ mod tests {
             description: desc.to_string(),
             status: status.to_string(),
             assignee: assignee.map(|s| s.to_string()),
+            agent: None,
             status_changed_at: assignee.map(|_| "2025-01-01T00:00:00Z".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),

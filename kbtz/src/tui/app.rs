@@ -181,6 +181,7 @@ impl App {
             note.as_deref(),
             None,
             false,
+            None,
         ) {
             Ok(()) => {
                 self.add_form = None;

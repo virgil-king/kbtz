@@ -5,7 +5,8 @@ mod session;
 mod shepherd_session;
 mod tree;
 
-use kbtz_workspace::{config, prompt};
+use kbtz::config;
+use kbtz_workspace::prompt;
 
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -223,28 +224,61 @@ fn run() -> Result<()> {
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
     let manual = cli.manual || ws.manual.unwrap_or(false);
     let prefer = cli.prefer.or(ws.prefer);
-    let backend_name = cli
+    let default_backend = cli
         .backend
         .or(ws.backend)
         .unwrap_or_else(|| "claude".into());
     let persistent_sessions = cli.persistent_sessions || ws.persistent_sessions.unwrap_or(false);
 
-    let agent_config = config.agent.get(&backend_name);
-    let command_override = cli
+    // Build all configured backends. The default backend is always included;
+    // additional backends come from [agent.*] config sections.
+    let mut backends = std::collections::HashMap::new();
+
+    // Build the default backend (with CLI --command override if provided).
+    let default_agent_config = config.agent.get(&default_backend);
+    let default_backend_impl = default_agent_config
+        .and_then(|a| a.backend.as_deref())
+        .unwrap_or(&default_backend);
+    let default_command_override = cli
         .command
         .as_deref()
-        .or_else(|| agent_config.and_then(|a| a.binary()));
-    // CLI --command is a plain string override with no prefix args.
-    let prefix_args: Vec<String> = if cli.command.is_some() {
+        .or_else(|| default_agent_config.and_then(|a| a.binary()));
+    let default_prefix_args: Vec<String> = if cli.command.is_some() {
         vec![]
     } else {
-        agent_config
+        default_agent_config
             .map(|a| a.prefix_args().to_vec())
             .unwrap_or_default()
     };
-    let extra_args: Vec<String> = agent_config.map(|a| a.args.clone()).unwrap_or_default();
+    let default_extra_args: Vec<String> = default_agent_config
+        .map(|a| a.args.clone())
+        .unwrap_or_default();
+    backends.insert(
+        default_backend.clone(),
+        backend::from_name(
+            default_backend_impl,
+            default_command_override,
+            &default_prefix_args,
+            &default_extra_args,
+        ),
+    );
 
-    let backend = backend::from_name(&backend_name, command_override, &prefix_args, &extra_args)?;
+    // Build backends for all other configured agent types.
+    for (name, agent_cfg) in &config.agent {
+        if backends.contains_key(name) {
+            continue; // already built (e.g. the default backend)
+        }
+        let backend_impl = agent_cfg.backend.as_deref().unwrap_or(name);
+        backends.insert(
+            name.clone(),
+            backend::from_name(
+                backend_impl,
+                agent_cfg.binary(),
+                agent_cfg.prefix_args(),
+                &agent_cfg.args,
+            ),
+        );
+    }
 
     let mut app = App::new(
         db_path,
@@ -252,7 +286,8 @@ fn run() -> Result<()> {
         concurrency,
         manual,
         prefer,
-        backend,
+        backends,
+        default_backend,
         app::TermSize { rows, cols },
         persistent_sessions,
     )?;
@@ -610,10 +645,11 @@ fn handle_prefix_command(
         b'n' => {
             let next_task = match kind {
                 SessionKind::Worker { task, .. } => app.cycle_session(&Action::NextSession, task),
-                SessionKind::TopLevel => app
-                    .session_ids_ordered()
-                    .first()
-                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+                SessionKind::TopLevel => app.session_ids_ordered().first().and_then(|sid| {
+                    app.sessions
+                        .get(sid)
+                        .map(|ts| ts.handle.task_name().to_string())
+                }),
             };
             if let Some(next_task) = next_task {
                 if scroll.active {
@@ -627,10 +663,11 @@ fn handle_prefix_command(
         b'p' => {
             let prev_task = match kind {
                 SessionKind::Worker { task, .. } => app.cycle_session(&Action::PrevSession, task),
-                SessionKind::TopLevel => app
-                    .session_ids_ordered()
-                    .last()
-                    .and_then(|sid| app.sessions.get(sid).map(|s| s.task_name().to_string())),
+                SessionKind::TopLevel => app.session_ids_ordered().last().and_then(|sid| {
+                    app.sessions
+                        .get(sid)
+                        .map(|ts| ts.handle.task_name().to_string())
+                }),
             };
             if let Some(prev_task) = prev_task {
                 if scroll.active {
@@ -1023,8 +1060,8 @@ fn passthrough_loop(
         // Redraw status bar when status or debug info changes.
         let mut redraw = false;
         if let SessionKind::Worker { session_id, .. } = kind {
-            if let Some(session) = app.sessions.get(*session_id) {
-                let status = session.status().clone();
+            if let Some(ts) = app.sessions.get(*session_id) {
+                let status = ts.handle.status().clone();
                 if status != last_status {
                     last_status = status;
                     redraw = true;

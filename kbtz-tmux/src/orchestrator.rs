@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use log::{error, info, warn};
 use rusqlite::Connection;
 
+use kbtz::config::Config;
 use kbtz::{db, ops, paths, watch};
-use kbtz_workspace::config::Config;
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
 use kbtz_tmux::lifecycle::{
@@ -225,8 +225,9 @@ impl Orchestrator {
         let slot = self.next_free_slot();
         let session_id = format!("ws/{slot}");
 
-        let task_name = ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref())?
-            .context("no tasks available")?;
+        let task_name =
+            ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref(), None)?
+                .context("no tasks available")?;
 
         let task = ops::get_task(&self.conn, &task_name)?;
 

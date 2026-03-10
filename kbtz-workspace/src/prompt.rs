@@ -14,6 +14,7 @@ a specific task. Follow these rules exactly.
 - $KBTZ_DB — path to the SQLite task database
 - $KBTZ_TASK — name of your assigned task
 - $KBTZ_SESSION_ID — your session ID (e.g. "ws/3")
+- $KBTZ_AGENT_TYPE — the agent backend type for this session (e.g. "claude")
 
 ## Completing your task
 
@@ -107,11 +108,15 @@ note so the task and its context are created atomically.
 ```
 kbtz exec <<'EOF'
 add <subtask-1> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context, requirements, and any other information needed to complete the task."
-add <subtask-2> "Short one-sentence description." -p $KBTZ_TASK -n "Detailed context for subtask 2."
+add <subtask-2> "Short one-sentence description." -p $KBTZ_TASK [--agent type] -n "Detailed context for subtask 2."
 block <subtask-1> $KBTZ_TASK
 block <subtask-2> $KBTZ_TASK
 EOF
 ```
+
+Use `--agent <type>` only when a subtask specifically needs a non-default
+backend (e.g. `--agent gemini`). Omit it for tasks that should use the
+workspace default. Run `kbtz agents` to see available types.
 
 Subtasks can also depend on each other. For example, to define
 interfaces first and then run tests and implementation in parallel:
@@ -120,7 +125,7 @@ interfaces first and then run tests and implementation in parallel:
 kbtz exec <<'EOF'
 add feat-interfaces "Define interfaces." -p $KBTZ_TASK -n "Detailed context for interfaces."
 add feat-tests "Add tests." -p $KBTZ_TASK -n "Detailed context for tests."
-add feat-impl "Implement interfaces." -p $KBTZ_TASK -n "Detailed context for implementation."
+add feat-impl "Implement interfaces." -p $KBTZ_TASK --agent gemini -n "Detailed context for implementation."
 block feat-interfaces feat-tests
 block feat-interfaces feat-impl
 block feat-interfaces $KBTZ_TASK
@@ -236,7 +241,7 @@ unblocking, pausing, and organizing work.
 Use the `kbtz` CLI to manipulate tasks:
 
 - `kbtz list --tree` — show the full task tree
-- `kbtz add <name> "<description>" [-p parent] [-n note]` — create a task
+- `kbtz add <name> "<description>" [-p parent] [-n note] [--agent type]` — create a task
 - `kbtz show <name>` — show task details and notes
 - `kbtz note <name> "<text>"` — add a note to a task
 - `kbtz done <name>` — mark a task done (requires user approval first)
@@ -247,6 +252,7 @@ Use the `kbtz` CLI to manipulate tasks:
 - `kbtz reparent <task> <new-parent>` — move a task under a new parent
 - `kbtz reparent <task> --root` — move a task to the root level
 - `kbtz edit <name> "<new-description>"` — change a task's description
+- `kbtz agents` — list configured agent types
 
 ## Task creation guidelines
 
@@ -269,6 +275,20 @@ add child-two "Second subtask." -p parent -n "Details for second subtask."
 block child-one child-two
 EOF
 ```
+
+## Agent types
+
+The workspace supports multiple agent backends (e.g., claude, gemini).
+Tasks default to the workspace's default backend unless overridden.
+
+Use `--agent <type>` when creating a task that requires a specific backend:
+
+    kbtz add gemini-review "Review the design doc." --agent gemini
+
+Only use `--agent` when a task specifically needs a non-default backend.
+Omitting it means the workspace default is used, which is correct for
+most tasks. Any agent name works — configured types get their specific
+settings, unconfigured types use the name as the command.
 
 ## Rules
 

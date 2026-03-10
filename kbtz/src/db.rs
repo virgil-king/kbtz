@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     description        TEXT NOT NULL DEFAULT '',
     status             TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'paused', 'active', 'done')),
     assignee           TEXT,
+    agent              TEXT,
     status_changed_at  TEXT,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -92,10 +93,13 @@ pub fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');
              INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
-             PRAGMA user_version = 2;",
+             PRAGMA user_version = 3;",
         )?;
     } else if version < 2 {
         migrate_v1_to_v2(conn)?;
+        migrate_v2_to_v3(conn)?;
+    } else if version < 3 {
+        migrate_v2_to_v3(conn)?;
     }
 
     Ok(())
@@ -174,6 +178,14 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE tasks ADD COLUMN agent TEXT;
+         PRAGMA user_version = 3;",
+    )?;
+    Ok(())
+}
+
 /// Open an in-memory database for tests. Available to all crate targets.
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -241,7 +253,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -363,18 +375,18 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_gets_version_2() {
+    fn fresh_db_gets_version_3() {
         let conn = Connection::open_in_memory().unwrap();
         set_pragmas(&conn).unwrap();
         init(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
-    fn idempotent_init_on_v2() {
+    fn idempotent_init_on_v3() {
         let conn = Connection::open_in_memory().unwrap();
         set_pragmas(&conn).unwrap();
         init(&conn).unwrap();
@@ -383,6 +395,86 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+    }
+
+    /// Create an in-memory v2 database (no agent column).
+    fn open_v2_memory() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        set_pragmas(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                id                 INTEGER PRIMARY KEY,
+                name               TEXT NOT NULL UNIQUE CHECK(name GLOB '[a-zA-Z0-9_-]*' AND length(name) > 0),
+                parent             TEXT REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE RESTRICT,
+                description        TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'paused', 'active', 'done')),
+                assignee           TEXT,
+                status_changed_at  TEXT,
+                created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                CHECK((status = 'active') = (assignee IS NOT NULL))
+            );
+
+            CREATE TABLE notes (
+                id         INTEGER PRIMARY KEY,
+                task       TEXT NOT NULL REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE CASCADE,
+                content    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            );
+
+            CREATE TABLE task_deps (
+                blocker TEXT NOT NULL REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE CASCADE,
+                blocked TEXT NOT NULL REFERENCES tasks(name) ON UPDATE CASCADE ON DELETE CASCADE,
+                PRIMARY KEY (blocker, blocked),
+                CHECK (blocker != blocked)
+            );
+
+            CREATE VIRTUAL TABLE tasks_fts USING fts5(
+                name, description,
+                content='tasks', content_rowid='id'
+            );
+
+            CREATE VIRTUAL TABLE notes_fts USING fts5(
+                content,
+                content='notes', content_rowid='id'
+            );
+
+            PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_adds_agent_column() {
+        let conn = open_v2_memory();
+        conn.execute_batch("INSERT INTO tasks (name, description) VALUES ('test', 'a task');")
+            .unwrap();
+
+        init(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // agent column exists and is NULL for existing rows
+        let agent: Option<String> = conn
+            .query_row("SELECT agent FROM tasks WHERE name = 'test'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(agent.is_none());
+    }
+
+    #[test]
+    fn migrate_v2_empty() {
+        let conn = open_v2_memory();
+        init(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
     }
 }

@@ -35,6 +35,10 @@ pub enum AgentCommand {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
+    /// Which Rust backend implementation to use (e.g., "claude").
+    /// Defaults to the agent name. Allows multiple agent types to share
+    /// the same backend with different command/args.
+    pub backend: Option<String>,
     pub command: Option<AgentCommand>,
     #[serde(default)]
     pub args: Vec<String>,
@@ -68,7 +72,7 @@ impl Config {
         Self::load_from(Path::new(&path))
     }
 
-    fn load_from(path: &Path) -> Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         let config: Config = match std::fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents)
                 .with_context(|| format!("failed to parse {}", path.display()))?,
@@ -271,5 +275,37 @@ command = []
             err.contains("at least one element"),
             "error should mention empty array: {err}"
         );
+    }
+
+    #[test]
+    fn parse_backend_field() {
+        let toml = r#"
+[agent.claude-yolo]
+backend = "claude"
+command = "claude"
+args = ["--dangerously-skip-permissions"]
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let agent = config.agent.get("claude-yolo").unwrap();
+        assert_eq!(agent.backend.as_deref(), Some("claude"));
+        assert_eq!(agent.binary(), Some("claude"));
+        assert_eq!(agent.args, vec!["--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn backend_field_defaults_to_none() {
+        let toml = r#"
+[agent.gemini]
+command = "gemini-cli"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let agent = config.agent.get("gemini").unwrap();
+        assert!(agent.backend.is_none());
     }
 }

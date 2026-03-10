@@ -788,6 +788,7 @@ mod tests {
             description: String::new(),
             status: status.to_string(),
             assignee: None,
+            agent: None,
             status_changed_at: None,
             created_at: String::new(),
             updated_at: String::new(),
@@ -953,8 +954,8 @@ mod tests {
     #[test]
     fn flatten_tree_with_blockers() {
         let conn = db::open_memory().unwrap();
-        ops::add_task(&conn, "blocker", None, "", None, None, false).unwrap();
-        ops::add_task(&conn, "blocked", None, "", None, None, false).unwrap();
+        ops::add_task(&conn, "blocker", None, "", None, None, false, None).unwrap();
+        ops::add_task(&conn, "blocked", None, "", None, None, false, None).unwrap();
         ops::add_block(&conn, "blocker", "blocked").unwrap();
 
         let tasks = vec![
