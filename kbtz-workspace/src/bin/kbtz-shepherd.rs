@@ -599,6 +599,16 @@ mod tests {
     }
 
     #[test]
+    fn write_message_to_closed_peer_fails() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut cc = ClientConn::new(client).unwrap();
+        drop(server);
+
+        let msg = Message::PtyOutput(b"data".to_vec());
+        assert!(cc.write_message(&msg).is_err());
+    }
+
+    #[test]
     fn partial_message_across_two_fills() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let msg = Message::PtyInput(b"split".to_vec());

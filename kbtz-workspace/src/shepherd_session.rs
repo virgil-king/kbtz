@@ -432,6 +432,37 @@ mod tests {
     }
 
     #[test]
+    fn write_input_ok_after_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let (mut session, server_reader) = make_test_session(&socket_path);
+
+        // Drop the server — subsequent writes hit a broken pipe.
+        drop(server_reader);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // write_input should swallow the broken pipe and return Ok.
+        assert!(session.write_input(b"hello").is_ok());
+    }
+
+    #[test]
+    fn resize_ok_after_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        std::fs::write(&socket_path, "").unwrap();
+
+        let (session, server_reader) = make_test_session(&socket_path);
+
+        drop(server_reader);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // resize should swallow the broken pipe and return Ok.
+        assert!(session.resize(25, 80).is_ok());
+    }
+
+    #[test]
     fn reader_alive_false_after_server_closes() {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("test.sock");
