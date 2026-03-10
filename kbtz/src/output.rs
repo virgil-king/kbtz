@@ -42,6 +42,9 @@ pub fn format_task_detail(
     if let Some(ref agent) = task.agent {
         out.push_str(&format!("Agent:       {}\n", agent));
     }
+    if let Some(ref directory) = task.directory {
+        out.push_str(&format!("Directory:   {}\n", directory));
+    }
     if let Some(ref status_changed_at) = task.status_changed_at {
         out.push_str(&format!("Status changed: {}\n", status_changed_at));
     }
@@ -210,6 +213,7 @@ mod tests {
             status: status.to_string(),
             assignee: assignee.map(|s| s.to_string()),
             agent: None,
+            directory: None,
             status_changed_at: assignee.map(|_| "2025-01-01T00:00:00Z".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -253,5 +257,13 @@ mod tests {
         let out = format_task_list(&tasks);
         assert!(out.contains("* a  desc A")); // active = *
         assert!(out.contains(". b")); // open = .
+    }
+
+    #[test]
+    fn show_includes_directory() {
+        let mut task = make_task("t", None, "open", None, "desc");
+        task.directory = Some("/work/dir".to_string());
+        let out = format_task_detail(&task, &[], &[], &[]);
+        assert!(out.contains("Directory:   /work/dir"));
     }
 }

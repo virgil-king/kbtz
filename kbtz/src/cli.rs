@@ -88,6 +88,9 @@ pub enum Command {
         /// Agent type for this task (e.g. claude-sonnet-4-6)
         #[arg(long)]
         agent: Option<String>,
+        /// Working directory for the agent session
+        #[arg(short, long)]
+        directory: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,

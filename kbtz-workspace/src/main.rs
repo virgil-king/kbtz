@@ -280,6 +280,12 @@ fn run() -> Result<()> {
         );
     }
 
+    // Default working directory for agent sessions: config > workspace cwd
+    let default_directory = ws
+        .directory
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+
     let mut app = App::new(
         db_path,
         status_dir,
@@ -290,6 +296,7 @@ fn run() -> Result<()> {
         default_backend,
         app::TermSize { rows, cols },
         persistent_sessions,
+        default_directory,
     )?;
 
     // Initial session spawning

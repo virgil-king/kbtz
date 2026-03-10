@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status             TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'paused', 'active', 'done')),
     assignee           TEXT,
     agent              TEXT,
+    directory          TEXT,
     status_changed_at  TEXT,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -93,13 +94,17 @@ pub fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');
              INSERT INTO notes_fts(notes_fts) VALUES('rebuild');
-             PRAGMA user_version = 3;",
+             PRAGMA user_version = 4;",
         )?;
     } else if version < 2 {
         migrate_v1_to_v2(conn)?;
         migrate_v2_to_v3(conn)?;
+        migrate_v3_to_v4(conn)?;
     } else if version < 3 {
         migrate_v2_to_v3(conn)?;
+        migrate_v3_to_v4(conn)?;
+    } else if version < 4 {
+        migrate_v3_to_v4(conn)?;
     }
 
     Ok(())
@@ -186,6 +191,14 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE tasks ADD COLUMN directory TEXT;
+         PRAGMA user_version = 4;",
+    )?;
+    Ok(())
+}
+
 /// Open an in-memory database for tests. Available to all crate targets.
 pub fn open_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
@@ -253,7 +266,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -375,18 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_gets_version_3() {
+    fn fresh_db_gets_version_4() {
         let conn = Connection::open_in_memory().unwrap();
         set_pragmas(&conn).unwrap();
         init(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
-    fn idempotent_init_on_v3() {
+    fn idempotent_init() {
         let conn = Connection::open_in_memory().unwrap();
         set_pragmas(&conn).unwrap();
         init(&conn).unwrap();
@@ -395,10 +408,10 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
-    /// Create an in-memory v2 database (no agent column).
+    /// Create an in-memory v2 database (no agent or directory columns).
     fn open_v2_memory() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         set_pragmas(&conn).unwrap();
@@ -446,18 +459,24 @@ mod tests {
         conn
     }
 
+    /// Create an in-memory v3 database (has agent column, no directory column).
+    fn open_v3_memory() -> Connection {
+        let conn = open_v2_memory();
+        migrate_v2_to_v3(&conn).unwrap();
+        conn
+    }
+
     #[test]
-    fn migrate_v2_to_v3_adds_agent_column() {
+    fn migrate_v2_adds_agent_column() {
         let conn = open_v2_memory();
         conn.execute_batch("INSERT INTO tasks (name, description) VALUES ('test', 'a task');")
             .unwrap();
 
         init(&conn).unwrap();
-
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         // agent column exists and is NULL for existing rows
         let agent: Option<String> = conn
@@ -475,6 +494,32 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    #[test]
+    fn migrate_v3_to_v4_adds_directory_column() {
+        let conn = open_v3_memory();
+        conn.execute_batch("INSERT INTO tasks (name, description) VALUES ('test', 'a task');")
+            .unwrap();
+
+        init(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        // directory column exists and is nullable
+        conn.execute(
+            "INSERT INTO tasks (name, description, directory) VALUES ('t', 'desc', '/tmp')",
+            [],
+        )
+        .unwrap();
+        let dir: Option<String> = conn
+            .query_row("SELECT directory FROM tasks WHERE name = 't'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(dir.as_deref(), Some("/tmp"));
     }
 }

@@ -49,6 +49,7 @@ pub trait SessionSpawner: Send {
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
+        cwd: &std::path::Path,
     ) -> Result<Box<dyn SessionHandle>>;
 }
 
@@ -64,9 +65,12 @@ impl SessionSpawner for PtySpawner {
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
+        cwd: &std::path::Path,
     ) -> Result<Box<dyn SessionHandle>> {
-        Session::spawn(command, args, task_name, session_id, rows, cols, env_vars)
-            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+        Session::spawn(
+            command, args, task_name, session_id, rows, cols, env_vars, cwd,
+        )
+        .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }
 
@@ -84,6 +88,7 @@ impl SessionSpawner for ShepherdSpawner {
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
+        cwd: &std::path::Path,
     ) -> Result<Box<dyn SessionHandle>> {
         let filename = session_id.replace('/', "-");
         let socket_path = self.status_dir.join(format!("{filename}.sock"));
@@ -107,6 +112,7 @@ impl SessionSpawner for ShepherdSpawner {
             .arg(cols.to_string())
             .arg(command)
             .args(args);
+        cmd.current_dir(cwd);
         for (k, v) in env_vars {
             cmd.env(k, v);
         }
@@ -570,6 +576,7 @@ impl SessionHandle for Session {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         command: &str,
         args: &[&str],
@@ -578,6 +585,7 @@ impl Session {
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
+        cwd: &std::path::Path,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pty_rows = rows.saturating_sub(1); // leave room for status bar
@@ -593,7 +601,7 @@ impl Session {
 
         let mut cmd = CommandBuilder::new(command);
         cmd.args(args);
-        cmd.cwd(std::env::current_dir().context("failed to get current directory")?);
+        cmd.cwd(cwd);
         for (k, v) in env_vars {
             cmd.env(k, v);
         }

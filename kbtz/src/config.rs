@@ -21,6 +21,7 @@ pub struct WorkspaceConfig {
     pub backend: Option<String>,
     pub persistent_sessions: Option<bool>,
     pub workspace_dir: Option<String>,
+    pub directory: Option<String>,
 }
 
 /// The `command` field in agent config: either a plain string or an array
@@ -120,6 +121,7 @@ manual = true
 prefer = "frontend"
 backend = "claude"
 workspace_dir = "/tmp/my-workspace"
+directory = "/home/user/projects"
 
 [agent.claude]
 command = "/usr/local/bin/claude"
@@ -140,6 +142,10 @@ args = ["--model", "gemini-2.5-pro"]
         assert_eq!(
             config.workspace.workspace_dir.as_deref(),
             Some("/tmp/my-workspace")
+        );
+        assert_eq!(
+            config.workspace.directory.as_deref(),
+            Some("/home/user/projects")
         );
 
         let claude = config.agent.get("claude").unwrap();
