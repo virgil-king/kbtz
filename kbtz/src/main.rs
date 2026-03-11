@@ -57,6 +57,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
             claim,
             paused,
             agent,
+            directory,
             json,
         } => {
             ops::add_task(
@@ -68,6 +69,7 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
                 claim.as_deref(),
                 paused,
                 agent.as_deref(),
+                directory.as_deref(),
             )?;
             if json {
                 let task = ops::get_task(conn, &name)?;
@@ -911,6 +913,7 @@ NOTE
                 claim: None,
                 paused: false,
                 agent: None,
+                directory: None,
                 json: true,
             },
         )
@@ -956,6 +959,7 @@ NOTE
             None,
             false,
             Some("claude-opus-4-6"),
+            None,
         )
         .unwrap();
         let task = ops::get_task(&conn, "show-agent").unwrap();
@@ -975,7 +979,10 @@ NOTE
     #[test]
     fn show_json_agent_null_when_not_set() {
         let conn = test_conn();
-        ops::add_task(&conn, "no-agent", None, "desc", None, None, false, None).unwrap();
+        ops::add_task(
+            &conn, "no-agent", None, "desc", None, None, false, None, None,
+        )
+        .unwrap();
         let task = ops::get_task(&conn, "no-agent").unwrap();
         let notes = ops::list_notes(&conn, "no-agent").unwrap();
         let blockers = ops::get_blockers(&conn, "no-agent").unwrap();

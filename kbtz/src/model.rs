@@ -9,6 +9,7 @@ pub struct Task {
     pub status: String,
     pub assignee: Option<String>,
     pub agent: Option<String>,
+    pub directory: Option<String>,
     pub status_changed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
