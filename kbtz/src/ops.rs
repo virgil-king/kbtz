@@ -116,43 +116,52 @@ SET parent = ?1,
 WHERE name = ?2
 ";
 
-#[allow(clippy::too_many_arguments)]
-pub fn add_task(
-    conn: &Connection,
-    name: &str,
-    parent: Option<&str>,
-    description: &str,
-    note: Option<&str>,
-    claim: Option<&str>,
-    paused: bool,
-    agent: Option<&str>,
-    directory: Option<&str>,
-) -> Result<()> {
-    validate_name(name)?;
-    if paused && claim.is_some() {
+#[derive(Default)]
+pub struct AddTaskParams<'a> {
+    pub name: &'a str,
+    pub parent: Option<&'a str>,
+    pub description: &'a str,
+    pub note: Option<&'a str>,
+    pub claim: Option<&'a str>,
+    pub paused: bool,
+    pub agent: Option<&'a str>,
+    pub directory: Option<&'a str>,
+}
+
+pub fn add_task(conn: &Connection, params: AddTaskParams) -> Result<()> {
+    validate_name(params.name)?;
+    if params.paused && params.claim.is_some() {
         bail!("--paused and --claim are mutually exclusive");
     }
-    if task_exists(conn, name)? {
-        bail!("task '{name}' already exists");
+    if task_exists(conn, params.name)? {
+        bail!("task '{}' already exists", params.name);
     }
-    if let Some(p) = parent {
+    if let Some(p) = params.parent {
         require_task(conn, p)?;
     }
-    let status = if paused {
+    let status = if params.paused {
         "paused"
-    } else if claim.is_some() {
+    } else if params.claim.is_some() {
         "active"
     } else {
         "open"
     };
     conn.execute(
         INSERT_TASK,
-        rusqlite::params![name, parent, description, status, claim, agent, directory],
+        rusqlite::params![
+            params.name,
+            params.parent,
+            params.description,
+            status,
+            params.claim,
+            params.agent,
+            params.directory
+        ],
     )?;
-    if let Some(content) = note {
+    if let Some(content) = params.note {
         conn.execute(
             "INSERT INTO notes (task, content) VALUES (?1, ?2)",
-            rusqlite::params![name, content],
+            rusqlite::params![params.name, content],
         )?;
     }
     Ok(())
@@ -803,14 +812,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "test-task",
-            None,
-            "A test",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "test-task",
+                description: "A test",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = get_task(&conn, "test-task").unwrap();
@@ -827,14 +833,12 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "agent-task",
-            None,
-            "needs specific agent",
-            None,
-            None,
-            false,
-            Some("claude-sonnet-4-6"),
-            None,
+            AddTaskParams {
+                name: "agent-task",
+                description: "needs specific agent",
+                agent: Some("claude-sonnet-4-6"),
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = get_task(&conn, "agent-task").unwrap();
@@ -846,14 +850,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "no-agent",
-            None,
-            "default agent",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "no-agent",
+                description: "default agent",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = get_task(&conn, "no-agent").unwrap();
@@ -865,14 +866,12 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "dir-task",
-            None,
-            "desc",
-            None,
-            None,
-            false,
-            None,
-            Some("/tmp/work"),
+            AddTaskParams {
+                name: "dir-task",
+                description: "desc",
+                directory: Some("/tmp/work"),
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = get_task(&conn, "dir-task").unwrap();
@@ -882,24 +881,42 @@ mod tests {
     #[test]
     fn add_duplicate_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "dup", None, "", None, None, false, None, None).unwrap();
-        assert!(add_task(&conn, "dup", None, "", None, None, false, None, None).is_err());
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "dup",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(add_task(
+            &conn,
+            AddTaskParams {
+                name: "dup",
+                ..Default::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
     fn add_with_parent() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child",
-            Some("parent"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "parent",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child",
+                parent: Some("parent"),
+                ..Default::default()
+            },
         )
         .unwrap();
         let child = get_task(&conn, "child").unwrap();
@@ -911,14 +928,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         assert!(add_task(
             &conn,
-            "child",
-            Some("nonexistent"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child",
+                parent: Some("nonexistent"),
+                ..Default::default()
+            }
         )
         .is_err());
     }
@@ -926,7 +940,14 @@ mod tests {
     #[test]
     fn claim_and_release() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Initially unassigned
         let task = get_task(&conn, "t").unwrap();
@@ -952,7 +973,14 @@ mod tests {
     #[test]
     fn done_and_reopen() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent").unwrap();
 
         // Mark done clears assignee
@@ -970,7 +998,14 @@ mod tests {
     #[test]
     fn mark_done_already_done_warns() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "t").unwrap();
 
         let err = mark_done(&conn, "t").unwrap_err();
@@ -983,7 +1018,14 @@ mod tests {
     #[test]
     fn mark_done_already_done_does_not_bump_timestamp() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "t").unwrap();
         let task_before = get_task(&conn, "t").unwrap();
 
@@ -997,7 +1039,14 @@ mod tests {
     #[test]
     fn reopen_open_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let err = reopen_task(&conn, "t").unwrap_err();
         assert!(
             err.to_string().contains("not done"),
@@ -1008,7 +1057,14 @@ mod tests {
     #[test]
     fn reopen_active_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent").unwrap();
         let err = reopen_task(&conn, "t").unwrap_err();
         assert!(
@@ -1020,7 +1076,14 @@ mod tests {
     #[test]
     fn reopen_paused_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let err = reopen_task(&conn, "t").unwrap_err();
         assert!(
@@ -1032,7 +1095,15 @@ mod tests {
     #[test]
     fn update_description_works() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "old", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                description: "old",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         update_description(&conn, "t", "new").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.description, "new");
@@ -1041,8 +1112,22 @@ mod tests {
     #[test]
     fn reparent_works() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         reparent_task(&conn, "b", Some("a")).unwrap();
         let task = get_task(&conn, "b").unwrap();
         assert_eq!(task.parent.as_deref(), Some("a"));
@@ -1056,7 +1141,14 @@ mod tests {
     #[test]
     fn remove_leaf_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         remove_task(&conn, "t", false).unwrap();
         assert!(get_task(&conn, "t").is_err());
     }
@@ -1064,17 +1156,21 @@ mod tests {
     #[test]
     fn remove_parent_without_recursive_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child",
-            Some("parent"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "parent",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child",
+                parent: Some("parent"),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(remove_task(&conn, "parent", false).is_err());
@@ -1083,29 +1179,30 @@ mod tests {
     #[test]
     fn remove_parent_recursive() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "parent", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child",
-            Some("parent"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "parent",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "grandchild",
-            Some("child"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child",
+                parent: Some("parent"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "grandchild",
+                parent: Some("child"),
+                ..Default::default()
+            },
         )
         .unwrap();
         remove_task(&conn, "parent", true).unwrap();
@@ -1117,8 +1214,22 @@ mod tests {
     #[test]
     fn list_excludes_done_by_default() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "open", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "done", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "open",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "done",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "done").unwrap();
         let tasks = list_tasks(&conn, None, false, None, None, None).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -1128,8 +1239,22 @@ mod tests {
     #[test]
     fn list_all_includes_done() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "open", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "done", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "open",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "done",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "done").unwrap();
         let tasks = list_tasks(&conn, None, true, None, None, None).unwrap();
         assert_eq!(tasks.len(), 2);
@@ -1138,8 +1263,22 @@ mod tests {
     #[test]
     fn list_filter_status() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "open", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "active", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "open",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "active",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "active", "agent").unwrap();
 
         let open_tasks =
@@ -1156,20 +1295,31 @@ mod tests {
     #[test]
     fn list_with_root() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
-        add_task(&conn, "other", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "other",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let tasks = list_tasks(&conn, None, false, Some("root"), None, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
@@ -1177,7 +1327,14 @@ mod tests {
     #[test]
     fn notes_crud() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_note(&conn, "t", "note 1").unwrap();
         add_note(&conn, "t", "note 2").unwrap();
         let notes = list_notes(&conn, "t").unwrap();
@@ -1189,8 +1346,22 @@ mod tests {
     #[test]
     fn blocking_relationships() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "a", "b").unwrap();
         assert_eq!(get_blockers(&conn, "b").unwrap(), vec!["a"]);
         assert_eq!(get_dependents(&conn, "a").unwrap(), vec!["b"]);
@@ -1201,14 +1372,28 @@ mod tests {
     #[test]
     fn self_block_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(add_block(&conn, "a", "a").is_err());
     }
 
     #[test]
     fn claim_already_claimed_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent-1").unwrap();
         let err = claim_task(&conn, "t", "agent-2").unwrap_err();
         assert!(
@@ -1223,7 +1408,14 @@ mod tests {
     #[test]
     fn claim_idempotent_for_same_assignee() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent-1").unwrap();
         // Re-claiming by same assignee succeeds
         claim_task(&conn, "t", "agent-1").unwrap();
@@ -1234,9 +1426,30 @@ mod tests {
     #[test]
     fn dep_cycle_detected() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "c", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "c",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "a", "b").unwrap();
         add_block(&conn, "b", "c").unwrap();
         assert!(add_block(&conn, "c", "a").is_err());
@@ -1245,16 +1458,46 @@ mod tests {
     #[test]
     fn parent_cycle_detected() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", Some("a"), "", None, None, false, None, None).unwrap();
-        add_task(&conn, "c", Some("b"), "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                parent: Some("a"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "c",
+                parent: Some("b"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(reparent_task(&conn, "a", Some("c")).is_err());
     }
 
     #[test]
     fn notes_cascade_on_delete() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_note(&conn, "t", "a note").unwrap();
         remove_task(&conn, "t", false).unwrap();
         let count: i64 = conn
@@ -1266,8 +1509,22 @@ mod tests {
     #[test]
     fn deps_cascade_on_delete() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "a", "b").unwrap();
         remove_task(&conn, "a", false).unwrap();
         assert!(get_blockers(&conn, "b").unwrap().is_empty());
@@ -1282,8 +1539,22 @@ mod tests {
     #[test]
     fn claim_next_picks_oldest() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "second", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "third", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "second",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "third",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // "second" has lower id, should be picked first
         let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("second"));
@@ -1292,22 +1563,32 @@ mod tests {
     #[test]
     fn claim_next_skips_done_and_assigned() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "done-task", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "done-task",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "done-task").unwrap();
         add_task(
             &conn,
-            "claimed-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "claimed-task",
+                ..Default::default()
+            },
         )
         .unwrap();
         claim_task(&conn, "claimed-task", "other-agent").unwrap();
-        add_task(&conn, "available", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "available",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("available"));
@@ -1316,8 +1597,22 @@ mod tests {
     #[test]
     fn claim_next_skips_blocked_tasks() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "blocker", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "blocked", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocked",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "blocker", "blocked").unwrap();
 
         // "blocked" has undone blocker, so only "blocker" is available
@@ -1329,9 +1624,30 @@ mod tests {
     fn claim_next_prefers_unblockers() {
         let conn = db::open_memory().unwrap();
         // "plain" is older (lower id), but "unblocker" unblocks "downstream"
-        add_task(&conn, "plain", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "unblocker", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "downstream", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "plain",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "unblocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "downstream",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "unblocker", "downstream").unwrap();
 
         let picked = claim_next_task(&conn, "agent", None, None).unwrap();
@@ -1344,26 +1660,20 @@ mod tests {
         // "backend" is older but doesn't match preference
         add_task(
             &conn,
-            "backend",
-            None,
-            "server-side API work",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "backend",
+                description: "server-side API work",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "frontend",
-            None,
-            "UI components for dashboard",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "frontend",
+                description: "UI components for dashboard",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1376,26 +1686,20 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "task-a",
-            None,
-            "generic task",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-a",
+                description: "generic task",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "task-b",
-            None,
-            "another generic task",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-b",
+                description: "another generic task",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_note(&conn, "task-b", "needs database migration work").unwrap();
@@ -1410,14 +1714,11 @@ mod tests {
         // No task matches the preference, but tasks should still be returned
         add_task(
             &conn,
-            "only-task",
-            None,
-            "some work",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "only-task",
+                description: "some work",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1428,7 +1729,14 @@ mod tests {
     #[test]
     fn claim_next_sets_assignee() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let picked = claim_next_task(&conn, "my-agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("t"));
@@ -1443,14 +1751,12 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "t",
-            None,
-            "work",
-            None,
-            Some("agent-1"),
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "t",
+                description: "work",
+                claim: Some("agent-1"),
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = get_task(&conn, "t").unwrap();
@@ -1462,7 +1768,15 @@ mod tests {
     #[test]
     fn add_without_claim() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "work", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                description: "work",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert!(task.assignee.is_none());
         assert!(task.status_changed_at.is_none());
@@ -1471,7 +1785,14 @@ mod tests {
     #[test]
     fn pause_open_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.status, "paused");
@@ -1482,7 +1803,14 @@ mod tests {
     #[test]
     fn pause_active_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent").unwrap();
         pause_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
@@ -1493,7 +1821,14 @@ mod tests {
     #[test]
     fn pause_done_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "t").unwrap();
         let err = pause_task(&conn, "t").unwrap_err();
         assert!(
@@ -1505,7 +1840,14 @@ mod tests {
     #[test]
     fn pause_already_paused_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let err = pause_task(&conn, "t").unwrap_err();
         assert!(
@@ -1517,7 +1859,14 @@ mod tests {
     #[test]
     fn unpause_paused_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         super::unpause_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
@@ -1527,7 +1876,14 @@ mod tests {
     #[test]
     fn unpause_non_paused_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let err = super::unpause_task(&conn, "t").unwrap_err();
         assert!(
             err.to_string().contains("not paused"),
@@ -1538,7 +1894,14 @@ mod tests {
     #[test]
     fn claim_paused_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let err = claim_task(&conn, "t", "agent").unwrap_err();
         assert!(
@@ -1552,18 +1915,21 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "paused-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "paused-task",
+                ..Default::default()
+            },
         )
         .unwrap();
         pause_task(&conn, "paused-task").unwrap();
-        add_task(&conn, "available", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "available",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("available"));
@@ -1572,17 +1938,20 @@ mod tests {
     #[test]
     fn list_excludes_paused_by_default() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "open-task", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "paused-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "open-task",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "paused-task",
+                ..Default::default()
+            },
         )
         .unwrap();
         pause_task(&conn, "paused-task").unwrap();
@@ -1594,17 +1963,20 @@ mod tests {
     #[test]
     fn list_filter_paused() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "open-task", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "paused-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "open-task",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "paused-task",
+                ..Default::default()
+            },
         )
         .unwrap();
         pause_task(&conn, "paused-task").unwrap();
@@ -1618,44 +1990,49 @@ mod tests {
     #[test]
     fn list_children_returns_direct_children_only() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child1",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child2",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child1",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "grandchild",
-            Some("child1"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child2",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
-        add_task(&conn, "unrelated", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "grandchild",
+                parent: Some("child1"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "unrelated",
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let children = list_children(&conn, "root", None, false, None, None).unwrap();
         assert_eq!(children.len(), 2);
@@ -1666,29 +2043,30 @@ mod tests {
     #[test]
     fn list_children_excludes_done_by_default() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child-open",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child-done",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child-open",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child-done",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         mark_done(&conn, "child-done").unwrap();
@@ -1701,29 +2079,30 @@ mod tests {
     #[test]
     fn list_children_all_includes_done() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child-open",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child-done",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child-open",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child-done",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         mark_done(&conn, "child-done").unwrap();
@@ -1735,29 +2114,30 @@ mod tests {
     #[test]
     fn list_children_with_status_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child-open",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child-active",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child-open",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child-active",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         claim_task(&conn, "child-active", "agent").unwrap();
@@ -1777,7 +2157,14 @@ mod tests {
     #[test]
     fn list_children_no_children_returns_empty() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "leaf", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "leaf",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let children = list_children(&conn, "leaf", None, false, None, None).unwrap();
         assert!(children.is_empty());
     }
@@ -1785,7 +2172,14 @@ mod tests {
     #[test]
     fn steal_active_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent-1").unwrap();
         let prev = steal_task(&conn, "t", "agent-2").unwrap();
         assert_eq!(prev, "agent-1");
@@ -1797,7 +2191,14 @@ mod tests {
     #[test]
     fn steal_open_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let err = steal_task(&conn, "t", "agent-2").unwrap_err();
         assert!(
             err.to_string().contains("not active"),
@@ -1808,7 +2209,14 @@ mod tests {
     #[test]
     fn steal_paused_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let err = steal_task(&conn, "t", "agent-2").unwrap_err();
         assert!(
@@ -1820,7 +2228,14 @@ mod tests {
     #[test]
     fn steal_done_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "t").unwrap();
         let err = steal_task(&conn, "t", "agent-2").unwrap_err();
         assert!(
@@ -1832,7 +2247,14 @@ mod tests {
     #[test]
     fn force_unassign_active_task() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t", "agent-1").unwrap();
         force_unassign_task(&conn, "t").unwrap();
         let task = get_task(&conn, "t").unwrap();
@@ -1843,7 +2265,14 @@ mod tests {
     #[test]
     fn force_unassign_open_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let err = force_unassign_task(&conn, "t").unwrap_err();
         assert!(
             err.to_string().contains("not active"),
@@ -1854,7 +2283,14 @@ mod tests {
     #[test]
     fn force_unassign_done_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         mark_done(&conn, "t").unwrap();
         let err = force_unassign_task(&conn, "t").unwrap_err();
         assert!(
@@ -1866,7 +2302,14 @@ mod tests {
     #[test]
     fn force_unassign_paused_task_fails() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         pause_task(&conn, "t").unwrap();
         let err = force_unassign_task(&conn, "t").unwrap_err();
         assert!(
@@ -1888,7 +2331,16 @@ mod tests {
     #[test]
     fn add_with_paused() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t", None, "work", None, None, true, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                description: "work",
+                paused: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let task = get_task(&conn, "t").unwrap();
         assert_eq!(task.status, "paused");
         assert!(task.assignee.is_none());
@@ -1898,8 +2350,23 @@ mod tests {
     #[test]
     fn add_with_paused_excluded_from_claim_next() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "paused-task", None, "", None, None, true, None, None).unwrap();
-        add_task(&conn, "open-task", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "paused-task",
+                paused: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "open-task",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let picked = claim_next_task(&conn, "agent", None, None).unwrap();
         assert_eq!(picked.as_deref(), Some("open-task"));
     }
@@ -1907,8 +2374,16 @@ mod tests {
     #[test]
     fn add_with_paused_and_claim_fails() {
         let conn = db::open_memory().unwrap();
-        let err =
-            add_task(&conn, "t", None, "", None, Some("agent"), true, None, None).unwrap_err();
+        let err = add_task(
+            &conn,
+            AddTaskParams {
+                name: "t",
+                claim: Some("agent"),
+                paused: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("mutually exclusive"),
             "unexpected error: {err}"
@@ -1918,9 +2393,30 @@ mod tests {
     #[test]
     fn get_all_deps_returns_blockers_and_dependents() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "c", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "c",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "a", "b").unwrap();
         add_block(&conn, "a", "c").unwrap();
         add_block(&conn, "b", "c").unwrap();
@@ -1946,8 +2442,22 @@ mod tests {
     #[test]
     fn get_all_deps_excludes_done_blockers() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "a", "b").unwrap();
         mark_done(&conn, "a").unwrap();
 
@@ -1965,7 +2475,14 @@ mod tests {
     #[test]
     fn get_all_deps_empty() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let deps = get_all_deps(&conn).unwrap();
         assert!(deps.is_empty());
     }
@@ -1975,26 +2492,20 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "auth-login",
-            None,
-            "handles login",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "auth-login",
+                description: "handles login",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "billing",
-            None,
-            "payment processing",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "billing",
+                description: "payment processing",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2009,26 +2520,20 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "task-a",
-            None,
-            "implement authentication",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-a",
+                description: "implement authentication",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "task-b",
-            None,
-            "fix CSS styling",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-b",
+                description: "fix CSS styling",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2043,26 +2548,20 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "task-a",
-            None,
-            "generic task",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-a",
+                description: "generic task",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "task-b",
-            None,
-            "another task",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-b",
+                description: "another task",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_note(&conn, "task-b", "needs database migration").unwrap();
@@ -2078,14 +2577,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "done-task",
-            None,
-            "completed authentication work",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "done-task",
+                description: "completed authentication work",
+                ..Default::default()
+            },
         )
         .unwrap();
         mark_done(&conn, "done-task").unwrap();
@@ -2101,14 +2597,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "task-a",
-            None,
-            "some work",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "task-a",
+                description: "some work",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2128,14 +2621,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "auth-task",
-            None,
-            "authentication system",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "auth-task",
+                description: "authentication system",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_note(&conn, "auth-task", "authentication details here").unwrap();
@@ -2150,8 +2640,22 @@ mod tests {
     #[test]
     fn list_assignee_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "t1", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "t2", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t1",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "t2",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         claim_task(&conn, "t1", "agent-1").unwrap();
         claim_task(&conn, "t2", "agent-2").unwrap();
 
@@ -2163,9 +2667,30 @@ mod tests {
     #[test]
     fn list_blocked_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "blocker", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "blocked", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "free", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocked",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "free",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "blocker", "blocked").unwrap();
 
         let tasks = list_tasks(&conn, None, false, None, None, Some(true)).unwrap();
@@ -2176,9 +2701,30 @@ mod tests {
     #[test]
     fn list_unblocked_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "blocker", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "blocked", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "free", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocked",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "free",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "blocker", "blocked").unwrap();
 
         let tasks = list_tasks(&conn, None, false, None, None, Some(false)).unwrap();
@@ -2191,8 +2737,22 @@ mod tests {
     #[test]
     fn list_blocked_ignores_done_blockers() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "blocker", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "target", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "blocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "target",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         add_block(&conn, "blocker", "target").unwrap();
         mark_done(&conn, "blocker").unwrap();
 
@@ -2204,29 +2764,30 @@ mod tests {
     #[test]
     fn list_children_assignee_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child1",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child2",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child1",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "child2",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         claim_task(&conn, "child1", "agent-1").unwrap();
@@ -2240,41 +2801,38 @@ mod tests {
     #[test]
     fn list_children_blocked_filter() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "root", None, "", None, None, false, None, None).unwrap();
         add_task(
             &conn,
-            "child1",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "root",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "child2",
-            Some("root"),
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child1",
+                parent: Some("root"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "ext-blocker",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "child2",
+                parent: Some("root"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "ext-blocker",
+                ..Default::default()
+            },
         )
         .unwrap();
         add_block(&conn, "ext-blocker", "child1").unwrap();
@@ -2287,9 +2845,30 @@ mod tests {
     #[test]
     fn list_assignee_and_blocked_combined() {
         let conn = db::open_memory().unwrap();
-        add_task(&conn, "a", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "b", None, "", None, None, false, None, None).unwrap();
-        add_task(&conn, "c", None, "", None, None, false, None, None).unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "a",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "b",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        add_task(
+            &conn,
+            AddTaskParams {
+                name: "c",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // a is assigned to agent-1, not blocked
         claim_task(&conn, "a", "agent-1").unwrap();
         // b is assigned to agent-1, blocked by c
@@ -2312,26 +2891,20 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "gemini-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            AddTaskParams {
+                name: "gemini-task",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "claude-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("claude"),
-            None,
+            AddTaskParams {
+                name: "claude-task",
+                agent: Some("claude"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2348,14 +2921,10 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "default-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "default-task",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2368,38 +2937,29 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "gemini-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            AddTaskParams {
+                name: "gemini-task",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "claude-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("claude"),
-            None,
+            AddTaskParams {
+                name: "claude-task",
+                agent: Some("claude"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "other-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("gpt"),
-            None,
+            AddTaskParams {
+                name: "other-task",
+                agent: Some("gpt"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2417,14 +2977,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "gemini-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            AddTaskParams {
+                name: "gemini-task",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2438,14 +2995,11 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "gemini-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            AddTaskParams {
+                name: "gemini-task",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2458,26 +3012,19 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "typed-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            Some("claude"),
-            None,
+            AddTaskParams {
+                name: "typed-task",
+                agent: Some("claude"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "default-task",
-            None,
-            "",
-            None,
-            None,
-            false,
-            None,
-            None,
+            AddTaskParams {
+                name: "default-task",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -2491,38 +3038,32 @@ mod tests {
         let conn = db::open_memory().unwrap();
         add_task(
             &conn,
-            "gemini-ui",
-            None,
-            "UI components",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            AddTaskParams {
+                name: "gemini-ui",
+                description: "UI components",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "claude-ui",
-            None,
-            "UI components",
-            None,
-            None,
-            false,
-            Some("claude"),
-            None,
+            AddTaskParams {
+                name: "claude-ui",
+                description: "UI components",
+                agent: Some("claude"),
+                ..Default::default()
+            },
         )
         .unwrap();
         add_task(
             &conn,
-            "claude-api",
-            None,
-            "API endpoints",
-            None,
-            None,
-            false,
-            Some("claude"),
-            None,
+            AddTaskParams {
+                name: "claude-api",
+                description: "API endpoints",
+                agent: Some("claude"),
+                ..Default::default()
+            },
         )
         .unwrap();
 

@@ -175,14 +175,13 @@ impl App {
         let parent = form.parent.clone();
         match ops::add_task(
             conn,
-            &name,
-            parent.as_deref(),
-            &description,
-            note.as_deref(),
-            None,
-            false,
-            None,
-            None,
+            ops::AddTaskParams {
+                name: &name,
+                parent: parent.as_deref(),
+                description: &description,
+                note: note.as_deref(),
+                ..Default::default()
+            },
         ) {
             Ok(()) => {
                 self.add_form = None;

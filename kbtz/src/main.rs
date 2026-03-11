@@ -62,14 +62,16 @@ fn dispatch(conn: &Connection, command: Command) -> Result<()> {
         } => {
             ops::add_task(
                 conn,
-                &name,
-                parent.as_deref(),
-                &desc,
-                note.as_deref(),
-                claim.as_deref(),
-                paused,
-                agent.as_deref(),
-                directory.as_deref(),
+                ops::AddTaskParams {
+                    name: &name,
+                    parent: parent.as_deref(),
+                    description: &desc,
+                    note: note.as_deref(),
+                    claim: claim.as_deref(),
+                    paused,
+                    agent: agent.as_deref(),
+                    directory: directory.as_deref(),
+                },
             )?;
             if json {
                 let task = ops::get_task(conn, &name)?;
@@ -952,14 +954,12 @@ NOTE
         let conn = test_conn();
         ops::add_task(
             &conn,
-            "show-agent",
-            None,
-            "desc",
-            None,
-            None,
-            false,
-            Some("claude-opus-4-6"),
-            None,
+            ops::AddTaskParams {
+                name: "show-agent",
+                description: "desc",
+                agent: Some("claude-opus-4-6"),
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = ops::get_task(&conn, "show-agent").unwrap();
@@ -980,7 +980,12 @@ NOTE
     fn show_json_agent_null_when_not_set() {
         let conn = test_conn();
         ops::add_task(
-            &conn, "no-agent", None, "desc", None, None, false, None, None,
+            &conn,
+            ops::AddTaskParams {
+                name: "no-agent",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = ops::get_task(&conn, "no-agent").unwrap();

@@ -955,8 +955,22 @@ mod tests {
     #[test]
     fn flatten_tree_with_blockers() {
         let conn = db::open_memory().unwrap();
-        ops::add_task(&conn, "blocker", None, "", None, None, false, None, None).unwrap();
-        ops::add_task(&conn, "blocked", None, "", None, None, false, None, None).unwrap();
+        ops::add_task(
+            &conn,
+            ops::AddTaskParams {
+                name: "blocker",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::add_task(
+            &conn,
+            ops::AddTaskParams {
+                name: "blocked",
+                ..Default::default()
+            },
+        )
+        .unwrap();
         ops::add_block(&conn, "blocker", "blocked").unwrap();
 
         let tasks = vec![
