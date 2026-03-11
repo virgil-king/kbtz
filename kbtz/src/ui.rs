@@ -386,7 +386,17 @@ impl TreeView {
                     KeyCode::Enter => {
                         self.filter = if query.is_empty() { None } else { Some(query) };
                         self.mode = TreeMode::Normal;
-                        TreeKeyAction::Refresh
+                        // Return Unhandled so the caller can process Enter
+                        // (e.g. as RunAction to select the highlighted task).
+                        TreeKeyAction::Unhandled
+                    }
+                    KeyCode::Down => {
+                        self.move_down();
+                        TreeKeyAction::Continue
+                    }
+                    KeyCode::Up => {
+                        self.move_up();
+                        TreeKeyAction::Continue
                     }
                     KeyCode::Backspace => {
                         query.pop();
@@ -1690,9 +1700,36 @@ mod tests {
         tv.mode = TreeMode::Search("test".into());
         tv.filter = Some("test".into());
         let key = KeyEvent::from(KeyCode::Enter);
-        assert!(matches!(tv.handle_key(key), TreeKeyAction::Refresh));
+        // Enter returns Unhandled so the caller can process it (e.g. RunAction).
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Unhandled));
         assert_eq!(tv.filter.as_deref(), Some("test"));
         assert!(matches!(tv.mode, TreeMode::Normal));
+    }
+
+    #[test]
+    fn search_mode_arrow_keys_navigate() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("a", "open", None),
+            make_row("b", "open", None),
+            make_row("c", "open", None),
+        ];
+        tv.cursor = 0;
+        tv.list_state.select(Some(0));
+        tv.mode = TreeMode::Search("test".into());
+
+        // Down moves cursor
+        let key = KeyEvent::from(KeyCode::Down);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
+        assert_eq!(tv.cursor, 1);
+        // Still in search mode
+        assert!(matches!(tv.mode, TreeMode::Search(_)));
+
+        // Up moves cursor back
+        let key = KeyEvent::from(KeyCode::Up);
+        assert!(matches!(tv.handle_key(key), TreeKeyAction::Continue));
+        assert_eq!(tv.cursor, 0);
+        assert!(matches!(tv.mode, TreeMode::Search(_)));
     }
 
     #[test]
