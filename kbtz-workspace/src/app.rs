@@ -1185,7 +1185,12 @@ mod tests {
     fn remove_session_cleans_up_mapping() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1210,7 +1215,12 @@ mod tests {
     fn remove_session_preserves_newer_mapping() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1242,7 +1252,12 @@ mod tests {
     fn execute_actions_processes_remove() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1272,12 +1287,22 @@ mod tests {
     fn execute_actions_remove_then_spawn() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
         ops::add_task(
-            &app.conn, "task-b", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-b",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1368,7 +1393,12 @@ mod tests {
         let (app, _dir) = test_app();
         // Create a task and claim it as if a previous workspace session owned it.
         ops::add_task(
-            &app.conn, "orphan", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "orphan",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "orphan", "ws/99").unwrap();
@@ -1385,7 +1415,12 @@ mod tests {
     fn release_orphaned_tasks_preserves_live_sessions() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "live", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "live",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "live", "ws/1").unwrap();
@@ -1463,7 +1498,12 @@ mod tests {
     fn spawn_session_creates_session_file() {
         let (app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
@@ -1485,7 +1525,12 @@ mod tests {
     fn spawn_session_resumes_from_existing_file() {
         let (app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
@@ -1510,7 +1555,12 @@ mod tests {
     fn remove_session_preserves_file_for_active_task() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1542,7 +1592,12 @@ mod tests {
     fn remove_session_deletes_file_for_done_task() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1576,7 +1631,12 @@ mod tests {
     fn remove_session_preserves_file_for_paused_task() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1607,7 +1667,12 @@ mod tests {
     fn restart_session_deletes_session_file() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1637,7 +1702,12 @@ mod tests {
         // Uses default StubBackend which returns None for fresh_args/resume_args
         let (app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         let task = ops::get_task(&app.conn, "task-a").unwrap();
@@ -1691,14 +1761,12 @@ mod tests {
         let (mut app, _dir) = test_app_multi_backend();
         ops::add_task(
             &app.conn,
-            "gemini-task",
-            None,
-            "test gemini",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            ops::AddTaskParams {
+                name: "gemini-task",
+                description: "test gemini",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1719,14 +1787,11 @@ mod tests {
         let (mut app, _dir) = test_app_multi_backend();
         ops::add_task(
             &app.conn,
-            "plain-task",
-            None,
-            "no agent specified",
-            None,
-            None,
-            false,
-            None,
-            None,
+            ops::AddTaskParams {
+                name: "plain-task",
+                description: "no agent specified",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1747,14 +1812,12 @@ mod tests {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
-            "custom-task",
-            None,
-            "test custom agent",
-            None,
-            None,
-            false,
-            Some("custom-tool"),
-            None,
+            ops::AddTaskParams {
+                name: "custom-task",
+                description: "test custom agent",
+                agent: Some("custom-tool"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1772,14 +1835,12 @@ mod tests {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
-            "custom-task",
-            None,
-            "test custom agent",
-            None,
-            None,
-            false,
-            Some("custom-tool"),
-            None,
+            ops::AddTaskParams {
+                name: "custom-task",
+                description: "test custom agent",
+                agent: Some("custom-tool"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1827,26 +1888,21 @@ mod tests {
         // Create a task with agent="gemini" and one with no agent.
         ops::add_task(
             &app.conn,
-            "gemini-task",
-            None,
-            "uses gemini",
-            None,
-            None,
-            false,
-            Some("gemini"),
-            None,
+            ops::AddTaskParams {
+                name: "gemini-task",
+                description: "uses gemini",
+                agent: Some("gemini"),
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::add_task(
             &app.conn,
-            "default-task",
-            None,
-            "uses default",
-            None,
-            None,
-            false,
-            None,
-            None,
+            ops::AddTaskParams {
+                name: "default-task",
+                description: "uses default",
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1871,7 +1927,12 @@ mod tests {
     fn remove_session_cleans_up_tracked_session() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1896,7 +1957,12 @@ mod tests {
     fn remove_session_cleans_up_child_pid_file() {
         let (mut app, _dir) = test_app();
         ops::add_task(
-            &app.conn, "task-a", None, "desc", None, None, false, None, None,
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
         )
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
@@ -1967,14 +2033,12 @@ mod tests {
         // Task claimed by an external agent, not a workspace session.
         ops::add_task(
             &app.conn,
-            "external",
-            None,
-            "desc",
-            None,
-            Some("agent-1"),
-            false,
-            None,
-            None,
+            ops::AddTaskParams {
+                name: "external",
+                description: "desc",
+                claim: Some("agent-1"),
+                ..Default::default()
+            },
         )
         .unwrap();
 
