@@ -87,6 +87,20 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh active PostToolUse"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh active PostToolUse"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
