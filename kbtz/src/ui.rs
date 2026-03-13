@@ -796,18 +796,10 @@ pub enum NotesKeyAction {
 }
 
 /// Shared notes-panel state used by both `kbtz watch` and `kbtz-workspace`.
+#[derive(Default)]
 pub struct NotesPanel {
     pub notes: Vec<Note>,
     pub scroll: u16,
-}
-
-impl Default for NotesPanel {
-    fn default() -> Self {
-        Self {
-            notes: Vec::new(),
-            scroll: 0,
-        }
-    }
 }
 
 impl NotesPanel {
