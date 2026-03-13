@@ -635,6 +635,15 @@ fn tree_loop(
                     continue;
                 }
 
+                // Notes panel intercepts all keys when open.
+                if let Some(panel) = &mut app.notes_panel {
+                    match panel.handle_key(key) {
+                        kbtz::ui::NotesKeyAction::Close => app.notes_panel = None,
+                        kbtz::ui::NotesKeyAction::Continue => {}
+                    }
+                    continue;
+                }
+
                 match app.tree.handle_key(key) {
                     TreeKeyAction::Quit => return Ok(Action::Quit),
                     TreeKeyAction::Refresh | TreeKeyAction::ToggleShowAll => app.refresh_tree()?,
@@ -665,6 +674,9 @@ fn tree_loop(
                         }
                     }
                     TreeKeyAction::Unhandled => match key.code {
+                        KeyCode::Char('n') => {
+                            app.toggle_notes()?;
+                        }
                         KeyCode::Enter => {
                             if let Some(name) = app.tree.selected_name() {
                                 if app.task_to_session.contains_key(name) {

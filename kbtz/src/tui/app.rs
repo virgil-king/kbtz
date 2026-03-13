@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::model::Note;
 use crate::ops;
 use crate::ui::{
-    self, ActiveTaskPolicy, DefaultDecorator, FileStatusDecorator, TreeDecorator, TreeView,
+    self, ActiveTaskPolicy, DefaultDecorator, FileStatusDecorator, NotesPanel, TreeDecorator,
+    TreeView,
 };
 use crate::validate::validate_name;
 
@@ -78,9 +78,7 @@ impl AddForm {
 
 pub struct App {
     pub tree: TreeView,
-    pub show_notes: bool,
-    pub notes: Vec<Note>,
-    pub notes_scroll: u16,
+    pub notes_panel: Option<NotesPanel>,
     pub add_form: Option<AddForm>,
     pub workspace_dir: Option<PathBuf>,
     pub decorator: Box<dyn TreeDecorator>,
@@ -94,9 +92,7 @@ impl App {
     ) -> Result<Self> {
         let mut app = App {
             tree: TreeView::new(ActiveTaskPolicy::Refuse),
-            show_notes: false,
-            notes: Vec::new(),
-            notes_scroll: 0,
+            notes_panel: None,
             add_form: None,
             workspace_dir: workspace_dir.map(PathBuf::from),
             decorator: Box::new(DefaultDecorator),
@@ -115,9 +111,10 @@ impl App {
         };
         self.tree.clamp_cursor();
         self.refresh_statuses();
-        // Refresh notes if panel is open
-        if self.show_notes {
-            self.load_notes(conn)?;
+        if let Some(panel) = &mut self.notes_panel {
+            if let Some(name) = self.tree.selected_name() {
+                panel.load(conn, name)?;
+            }
         }
         Ok(())
     }
@@ -129,16 +126,15 @@ impl App {
         self.decorator = Box::new(FileStatusDecorator::from_dir(dir, &self.tree.rows));
     }
 
-    pub fn toggle_notes(&mut self) {
-        self.show_notes = !self.show_notes;
-        self.notes_scroll = 0;
-    }
-
-    pub fn load_notes(&mut self, conn: &Connection) -> Result<()> {
-        if let Some(name) = self.tree.selected_name() {
-            self.notes = ops::list_notes(conn, name)?;
+    pub fn toggle_notes(&mut self, conn: &Connection) -> Result<()> {
+        if self.notes_panel.is_some() {
+            self.notes_panel = None;
         } else {
-            self.notes.clear();
+            let mut panel = NotesPanel::new();
+            if let Some(name) = self.tree.selected_name() {
+                panel.load(conn, name)?;
+            }
+            self.notes_panel = Some(panel);
         }
         Ok(())
     }
