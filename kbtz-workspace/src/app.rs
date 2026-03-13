@@ -1061,6 +1061,9 @@ mod tests {
         fn resize(&self, _rows: u16, _cols: u16) -> Result<()> {
             Ok(())
         }
+        fn terminal_sync_bytes(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
         fn process_id(&self) -> Option<u32> {
             None
         }

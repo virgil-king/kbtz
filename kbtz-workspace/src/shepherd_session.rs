@@ -287,6 +287,14 @@ impl SessionHandle for ShepherdSession {
         Ok(())
     }
 
+    fn terminal_sync_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .terminal_sync_bytes())
+    }
+
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         let pty_rows = rows.saturating_sub(1);
         self.passthrough
