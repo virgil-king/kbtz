@@ -30,10 +30,17 @@ prev=""
 
 _hook_log "workspace-status: event=$event sid=$KBTZ_SESSION_ID state=$state prev=${prev:-<none>} task=${KBTZ_TASK:-?}"
 
-# Don't let Stop (idle) overwrite needs_input — the Notification hook fires
-# before Stop when the agent calls AskUserQuestion, so the sequence is:
+# Don't let Stop (idle) overwrite needs_input — this guard exists for
+# AskUserQuestion, where the sequence is:
 #   PreToolUse → active, Notification → needs_input, Stop → idle
-# Without this guard the session would show idle when it's actually waiting.
+# Without it the session would show idle when it's actually waiting.
+#
+# For permission_prompt the sequence is:
+#   PreToolUse → active, Notification → needs_input, (user approves),
+#   PostToolUse → active, ..., Stop → idle
+# PostToolUse clears needs_input after approval, so Stop sees prev=active
+# and correctly sets idle.
+#
 # SessionEnd bypasses this (a dead session can't need input).
 if [ "$state" = "idle" ] && [ "$event" != "SessionEnd" ]; then
   [ "$prev" = "needs_input" ] && exit 0
