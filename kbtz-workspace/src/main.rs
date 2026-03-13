@@ -828,14 +828,14 @@ fn handle_prefix_command(
                 }
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
-                let sb = sync_bytes(app, sid);
                 draw_normal_status_bar(
+                    app,
+                    sid,
                     rows,
                     cols,
                     kind,
                     last_status,
                     Some("no sessions need input"),
-                    &sb,
                 );
                 Ok(None)
             }
@@ -853,14 +853,13 @@ fn handle_prefix_command(
             Ok(None)
         }
         b'?' => {
-            let sb = sync_bytes(app, sid);
-            draw_help_bar(rows, cols, kind, &sb);
+            draw_help_bar(app, sid, rows, cols, kind);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
             if scroll.active {
-                draw_scroll_status_bar(rows, cols, scroll, &sb);
+                draw_scroll_status_bar(app, sid, rows, cols, scroll);
             } else {
-                draw_normal_status_bar(rows, cols, kind, last_status, None, &sb);
+                draw_normal_status_bar(app, sid, rows, cols, kind, last_status, None);
             }
             Ok(None)
         }
@@ -907,8 +906,7 @@ fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> R
         let _ = out.flush();
         // Render the current viewport (offset 0 = live screen).
         session.render_scrollback(0, app.term.cols)?;
-        let sb = sync_bytes(app, session_id);
-        draw_scroll_status_bar(app.term.rows, app.term.cols, scroll, &sb);
+        draw_scroll_status_bar(app, session_id, app.term.rows, app.term.cols, scroll);
     }
     Ok(())
 }
@@ -1112,8 +1110,15 @@ fn refresh_passthrough_screen(
     if let Some(session) = app.get_session(sid) {
         session.start_passthrough()?;
     }
-    let sb = sync_bytes(app, sid);
-    draw_normal_status_bar(app.term.rows, app.term.cols, kind, last_status, None, &sb);
+    draw_normal_status_bar(
+        app,
+        sid,
+        app.term.rows,
+        app.term.cols,
+        kind,
+        last_status,
+        None,
+    );
     Ok(())
 }
 
@@ -1140,10 +1145,15 @@ fn passthrough_loop(
     let mut debug_msg: Option<String> = None;
     let mut last_iter = Instant::now();
 
-    {
-        let sb = sync_bytes(app, sid);
-        draw_normal_status_bar(app.term.rows, app.term.cols, kind, &last_status, None, &sb);
-    }
+    draw_normal_status_bar(
+        app,
+        sid,
+        app.term.rows,
+        app.term.cols,
+        kind,
+        &last_status,
+        None,
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -1219,14 +1229,14 @@ fn passthrough_loop(
             redraw = true;
         }
         if redraw && !scroll.active {
-            let sb = sync_bytes(app, sid);
             draw_normal_status_bar(
+                app,
+                sid,
                 app.term.rows,
                 app.term.cols,
                 kind,
                 &last_status,
                 debug_msg.take().as_deref(),
-                &sb,
             );
         }
 
@@ -1262,20 +1272,18 @@ fn passthrough_loop(
                     )? {
                         return Ok(action);
                     }
-                    let sb = sync_bytes(app, sid);
                     if scroll.active {
-                        draw_scroll_status_bar(rows, cols, &scroll, &sb);
+                        draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                     } else {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None, &sb);
+                        draw_normal_status_bar(app, sid, rows, cols, kind, &last_status, None);
                     }
                     continue;
                 }
 
-                let sb = sync_bytes(app, sid);
                 match handle_scroll_input(app, sid, &mut scroll, &buf, &mut i, n, rows)? {
-                    true => draw_scroll_status_bar(rows, cols, &scroll, &sb),
+                    true => draw_scroll_status_bar(app, sid, rows, cols, &scroll),
                     false => {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None, &sb);
+                        draw_normal_status_bar(app, sid, rows, cols, kind, &last_status, None);
                     }
                 }
                 continue;
@@ -1290,8 +1298,7 @@ fn passthrough_loop(
                         // Left click → enter scroll mode for text selection.
                         enter_scroll_mode(app, sid, &mut scroll)?;
                         if scroll.active {
-                            let sb = sync_bytes(app, sid);
-                            draw_scroll_status_bar(rows, cols, &scroll, &sb);
+                            draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                         }
                         i += evt.len;
                         continue;
@@ -1321,8 +1328,7 @@ fn passthrough_loop(
                 if scroll.active {
                     let new = scroll.offset.saturating_add(1).min(scroll.total);
                     scroll_to(app, sid, &mut scroll, new)?;
-                    let sb = sync_bytes(app, sid);
-                    draw_scroll_status_bar(rows, cols, &scroll, &sb);
+                    draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                 }
                 i += 6;
                 continue;
@@ -1336,8 +1342,7 @@ fn passthrough_loop(
                     if scroll.active {
                         let new = scroll.offset.saturating_add(page).min(scroll.total);
                         scroll_to(app, sid, &mut scroll, new)?;
-                        let sb = sync_bytes(app, sid);
-                        draw_scroll_status_bar(rows, cols, &scroll, &sb);
+                        draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                     }
                     i += 4;
                     continue;
@@ -1358,8 +1363,7 @@ fn passthrough_loop(
                     return Ok(action);
                 }
                 if scroll.active {
-                    let sb = sync_bytes(app, sid);
-                    draw_scroll_status_bar(rows, cols, &scroll, &sb);
+                    draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                 }
             } else {
                 // Find the next PREFIX_KEY, CSI u prefix, or ESC sequence
@@ -1401,24 +1405,43 @@ fn passthrough_loop(
     }
 }
 
-/// Get VTE sync bytes for the given session.  Returns empty bytes if
-/// the session is unavailable (the bar still draws, just without sync).
-fn sync_bytes(app: &App, sid: &str) -> Vec<u8> {
-    app.get_session(sid)
-        .and_then(|s| s.terminal_sync_bytes().ok())
-        .unwrap_or_default()
+/// Perform a non-forwarding write to the terminal, then sync the
+/// terminal's SGR attributes, cursor position, and cursor visibility
+/// back to the VTE's state.  This prevents stale attributes from
+/// leaking into the reader thread's next raw write.
+///
+/// All temporary terminal writes during passthrough mode (status bars,
+/// help overlays, etc.) must go through this function.
+fn write_and_sync(app: &App, sid: &str, f: impl FnOnce(&mut io::StdoutLock)) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    f(&mut out);
+    if let Some(session) = app.get_session(sid) {
+        if let Ok(sync) = session.terminal_sync_bytes() {
+            let _ = out.write_all(&sync);
+        }
+    }
+    let _ = out.flush();
 }
 
-/// Draws a full-width bar on the last terminal row.
+/// Draws a full-width bar on the last terminal row, then syncs the
+/// terminal back to the VTE's state.
 ///
 /// `style` is the ANSI SGR parameter string (e.g. "7" for reverse, "7;33" for
 /// reverse+yellow). `left` is the primary content, and `right` is an optional
 /// right-aligned annotation rendered as `" [right]"`.
-fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>, sync_bytes: &[u8]) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_bar(&mut out, rows, cols, style, left, right, sync_bytes);
-    let _ = out.flush();
+fn draw_bar(
+    app: &App,
+    sid: &str,
+    rows: u16,
+    cols: u16,
+    style: &str,
+    left: &str,
+    right: Option<&str>,
+) {
+    write_and_sync(app, sid, |out| {
+        write_bar(out, rows, cols, style, left, right);
+    });
 }
 
 fn write_bar(
@@ -1428,7 +1451,6 @@ fn write_bar(
     style: &str,
     left: &str,
     right: Option<&str>,
-    sync_bytes: &[u8],
 ) {
     let content = if let Some(r) = right {
         let right_str = format!(" [{r}]");
@@ -1443,26 +1465,24 @@ fn write_bar(
         "\x1b[{rows};1H\x1b[{style}m{content}{:padding$}\x1b[0m",
         "",
     );
-    // Sync terminal state (SGR + cursor) back to VTE so the reader
-    // thread's next raw write doesn't inherit stale attributes.
-    let _ = out.write_all(sync_bytes);
 }
 
-fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState, sync_bytes: &[u8]) {
+fn draw_scroll_status_bar(app: &App, sid: &str, rows: u16, cols: u16, scroll: &ScrollState) {
     let content = format!(
         " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
         scroll.offset, scroll.total,
     );
-    draw_bar(rows, cols, "7;33", &content, None, sync_bytes);
+    draw_bar(app, sid, rows, cols, "7;33", &content, None);
 }
 
 fn draw_normal_status_bar(
+    app: &App,
+    sid: &str,
     rows: u16,
     cols: u16,
     kind: &SessionKind,
     status: &SessionStatus,
     debug: Option<&str>,
-    sync_bytes: &[u8],
 ) {
     let left = match kind {
         SessionKind::TopLevel => " ^B ? help \u{2502} task manager".to_string(),
@@ -1476,10 +1496,10 @@ fn draw_normal_status_bar(
             )
         }
     };
-    draw_bar(rows, cols, "7", &left, debug, sync_bytes);
+    draw_bar(app, sid, rows, cols, "7", &left, debug);
 }
 
-fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind, sync_bytes: &[u8]) {
+fn draw_help_bar(app: &App, sid: &str, rows: u16, cols: u16, kind: &SessionKind) {
     let content = match kind {
         SessionKind::TopLevel => {
             " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
@@ -1488,7 +1508,7 @@ fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind, sync_bytes: &[u8]) {
             " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
         }
     };
-    draw_bar(rows, cols, "7;33", content, None, sync_bytes);
+    draw_bar(app, sid, rows, cols, "7;33", content, None);
 }
 
 #[cfg(test)]
