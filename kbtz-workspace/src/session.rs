@@ -32,8 +32,20 @@ pub trait SessionHandle: Send {
     fn has_mouse_tracking(&self) -> bool;
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
-    /// Return escape sequences that sync the terminal to the VTE's
+    /// Return escape sequences that sync the real terminal to the VTE's
     /// current SGR attributes, cursor position, and cursor visibility.
+    ///
+    /// During passthrough mode the reader thread forwards raw child output
+    /// to stdout.  If we write directly to the terminal between those raw
+    /// writes (e.g. to draw a status bar), we leave the terminal in
+    /// whatever SGR/cursor state our drawing code ended with.  The next
+    /// raw write from the child then inherits that state, causing visible
+    /// artifacts — most commonly reverse-video "selection" on text that
+    /// should be unstyled.
+    ///
+    /// Writing these bytes after every non-forwarding write restores the
+    /// terminal to the state the child's VTE expects, closing the leak.
+    /// Prefer [`write_and_sync`] in main.rs which wraps this automatically.
     fn terminal_sync_bytes(&self) -> Result<Vec<u8>>;
     fn process_id(&self) -> Option<u32>;
     /// Returns true if the reader thread is still running.  A dead reader
@@ -360,11 +372,16 @@ impl Passthrough {
         )
     }
 
-    /// Return escape sequences that sync the real terminal's SGR
-    /// attributes, cursor position, and cursor visibility to the VTE's
-    /// current state.  Callers write these bytes to stdout after any
-    /// non-forwarding write (e.g. status bar) so the terminal matches
-    /// what the child expects.
+    /// Return escape sequences that sync the real terminal to the VTE's
+    /// current state.
+    ///
+    /// The returned bytes contain, in order:
+    /// 1. `attributes_formatted()` — SGR reset (`\x1b[0m`) followed by the
+    ///    VTE's current text attributes (colors, bold, reverse, etc.)
+    /// 2. `cursor_state_formatted()` — cursor position (`\x1b[row;colH`)
+    ///    and visibility (`\x1b[?25h` or `\x1b[?25l`)
+    ///
+    /// See [`SessionHandle::terminal_sync_bytes`] for the rationale.
     pub(crate) fn terminal_sync_bytes(&self) -> Vec<u8> {
         let screen = self.vte.screen();
         let mut bytes = screen.attributes_formatted();
