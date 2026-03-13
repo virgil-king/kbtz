@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{AddField, App};
-use crate::ui::TreeKeyAction;
+use crate::ui::{NotesKeyAction, TreeKeyAction};
 
 /// Result of handling a key press.
 pub enum KeyAction {
@@ -10,6 +10,7 @@ pub enum KeyAction {
     Refresh,
     OpenEditor,
     AddNote,
+    ToggleNotes,
     Pause(String),
     Unpause(String),
     MarkDone(String),
@@ -24,8 +25,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         return handle_add(app, key);
     }
 
-    if app.show_notes {
-        return handle_notes(app, key);
+    if let Some(panel) = &mut app.notes_panel {
+        return match panel.handle_key(key) {
+            NotesKeyAction::Close => {
+                app.notes_panel = None;
+                KeyAction::Continue
+            }
+            NotesKeyAction::Continue => KeyAction::Continue,
+        };
     }
 
     match app.tree.handle_key(key) {
@@ -40,10 +47,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         TreeKeyAction::Unhandled => match key.code {
             KeyCode::Esc => KeyAction::Quit,
             KeyCode::Enter => KeyAction::RunAction,
-            KeyCode::Char('n') => {
-                app.toggle_notes();
-                KeyAction::Continue
-            }
+            KeyCode::Char('n') => KeyAction::ToggleNotes,
             KeyCode::Char('a') => {
                 app.enter_add_mode(true);
                 KeyAction::Continue
@@ -55,47 +59,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             KeyCode::Char('N') => KeyAction::AddNote,
             _ => KeyAction::Continue,
         },
-    }
-}
-
-fn handle_notes(app: &mut App, key: KeyEvent) -> KeyAction {
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('q') => {
-            app.toggle_notes();
-            KeyAction::Continue
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.notes_scroll = app.notes_scroll.saturating_add(1);
-            KeyAction::Continue
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.notes_scroll = app.notes_scroll.saturating_sub(1);
-            KeyAction::Continue
-        }
-        KeyCode::PageDown => {
-            app.notes_scroll = app.notes_scroll.saturating_add(20);
-            KeyAction::Continue
-        }
-        KeyCode::PageUp => {
-            app.notes_scroll = app.notes_scroll.saturating_sub(20);
-            KeyAction::Continue
-        }
-        KeyCode::Char('G') => {
-            // Approximate total line count (word-wrap may add more, but this
-            // is a reasonable upper bound that ratatui clamps safely).
-            let lines: u16 = app
-                .notes
-                .iter()
-                .map(|n| n.content.lines().count() as u16 + 2)
-                .sum();
-            app.notes_scroll = lines.saturating_sub(1);
-            KeyAction::Continue
-        }
-        KeyCode::Char('g') => {
-            app.notes_scroll = 0;
-            KeyAction::Continue
-        }
-        _ => KeyAction::Continue,
     }
 }
 

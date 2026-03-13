@@ -7,6 +7,11 @@ use crate::app::{App, TrackedSession};
 use kbtz::ui;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    if let Some(panel) = &app.notes_panel {
+        panel.render(frame, frame.area(), app.tree.selected_name());
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -119,6 +124,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":spawn  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(":manager  "),
+            Span::styled("n", Style::default().fg(Color::Cyan)),
+            Span::raw(":notes  "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
             Span::raw(":collapse  "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
@@ -171,6 +178,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  c          ", Style::default().fg(Color::Cyan)),
             Span::raw("Task manager session"),
+        ]),
+        Line::from(vec![
+            Span::styled("  n          ", Style::default().fg(Color::Cyan)),
+            Span::raw("View notes"),
         ]),
         Line::from(vec![
             Span::styled("  Space      ", Style::default().fg(Color::Cyan)),

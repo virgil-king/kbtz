@@ -8,12 +8,12 @@ use std::path::Path;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, ListItem, ListState, Paragraph, Wrap};
 use rusqlite::Connection;
 
 use crate::paths;
 
-use crate::model::Task;
+use crate::model::{Note, Task};
 use crate::ops;
 
 /// A flattened tree row for display.
@@ -783,6 +783,111 @@ pub fn render_confirm(frame: &mut Frame, action: &str, task_name: &str, message:
     ];
 
     frame.render_widget(Paragraph::new(text), inner);
+}
+
+// ── Notes panel ────────────────────────────────────────────────────
+
+/// Action returned by `NotesPanel::handle_key`.
+pub enum NotesKeyAction {
+    /// Stay in notes mode; caller should redraw.
+    Continue,
+    /// User dismissed the notes panel.
+    Close,
+}
+
+/// Shared notes-panel state used by both `kbtz watch` and `kbtz-workspace`.
+#[derive(Default)]
+pub struct NotesPanel {
+    pub notes: Vec<Note>,
+    pub scroll: u16,
+}
+
+impl NotesPanel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Load notes for `task_name` from the database.
+    pub fn load(&mut self, conn: &Connection, task_name: &str) -> Result<()> {
+        self.notes = ops::list_notes(conn, task_name)?;
+        Ok(())
+    }
+
+    /// Handle a key press while the notes panel is visible.
+    pub fn handle_key(&mut self, key: KeyEvent) -> NotesKeyAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('q') => {
+                NotesKeyAction::Close
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll = self.scroll.saturating_add(1);
+                NotesKeyAction::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll = self.scroll.saturating_sub(1);
+                NotesKeyAction::Continue
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(20);
+                NotesKeyAction::Continue
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(20);
+                NotesKeyAction::Continue
+            }
+            KeyCode::Char('G') => {
+                let lines: u16 = self
+                    .notes
+                    .iter()
+                    .map(|n| n.content.lines().count() as u16 + 2)
+                    .sum();
+                self.scroll = lines.saturating_sub(1);
+                NotesKeyAction::Continue
+            }
+            KeyCode::Char('g') => {
+                self.scroll = 0;
+                NotesKeyAction::Continue
+            }
+            _ => NotesKeyAction::Continue,
+        }
+    }
+
+    /// Render the notes panel as a full-screen overlay.
+    pub fn render(&self, frame: &mut Frame, area: Rect, task_name: Option<&str>) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        let notes_area = chunks[0];
+        let hint_area = chunks[1];
+
+        let title = task_name
+            .map(|n| format!(" Notes: {n} "))
+            .unwrap_or_else(|| " Notes ".to_string());
+
+        let text = if self.notes.is_empty() {
+            "No notes.".to_string()
+        } else {
+            self.notes
+                .iter()
+                .map(|n| format!("[{}]\n{}\n", n.created_at, n.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let paragraph = Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll, 0));
+
+        frame.render_widget(paragraph, notes_area);
+
+        frame.render_widget(
+            Paragraph::new("Esc/q/n: back  j/k: scroll  g/G: top/bottom")
+                .style(Style::default().fg(Color::DarkGray)),
+            hint_area,
+        );
+    }
 }
 
 #[cfg(test)]

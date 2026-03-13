@@ -8,7 +8,7 @@ use rusqlite::Connection;
 
 use kbtz::model::Task;
 use kbtz::ops;
-use kbtz::ui::{ActiveTaskPolicy, TreeView};
+use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
@@ -61,6 +61,7 @@ pub struct App {
     pub term: TermSize,
     pub tree: TreeView,
     pub tree_dirty: bool,
+    pub notes_panel: Option<NotesPanel>,
 }
 
 pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
@@ -157,6 +158,7 @@ impl App {
             term,
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
+            notes_panel: None,
         };
         app.refresh_tree()?;
         if persistent_sessions {
@@ -202,6 +204,25 @@ impl App {
             None => rows,
         };
         self.tree.clamp_cursor();
+        if let Some(panel) = &mut self.notes_panel {
+            if let Some(name) = self.tree.selected_name() {
+                panel.load(&self.conn, name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Toggle the notes panel for the currently selected task.
+    pub fn toggle_notes(&mut self) -> Result<()> {
+        if self.notes_panel.is_some() {
+            self.notes_panel = None;
+        } else {
+            let mut panel = NotesPanel::new();
+            if let Some(name) = self.tree.selected_name() {
+                panel.load(&self.conn, name)?;
+            }
+            self.notes_panel = Some(panel);
+        }
         Ok(())
     }
 
@@ -1180,6 +1201,7 @@ mod tests {
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
+            notes_panel: None,
         };
         (app, status_dir)
     }
@@ -1493,6 +1515,7 @@ mod tests {
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
+            notes_panel: None,
         };
         (app, status_dir)
     }
@@ -1755,6 +1778,7 @@ mod tests {
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
+            notes_panel: None,
         };
         (app, status_dir)
     }
@@ -1886,6 +1910,7 @@ mod tests {
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
+            notes_panel: None,
         };
 
         // Create a task with agent="gemini" and one with no agent.

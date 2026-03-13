@@ -1,12 +1,12 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
 
 use super::app::{AddField, App};
 use crate::ui;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    if app.show_notes {
-        render_notes(frame, app, frame.area());
+    if let Some(panel) = &app.notes_panel {
+        panel.render(frame, frame.area(), app.selected_name());
         return;
     }
 
@@ -68,43 +68,6 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().bg(Color::DarkGray));
     frame.render_stateful_widget(list, tree_area, &mut app.tree.list_state);
-}
-
-fn render_notes(frame: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-    let notes_area = chunks[0];
-    let hint_area = chunks[1];
-
-    let title = app
-        .selected_name()
-        .map(|n| format!(" Notes: {n} "))
-        .unwrap_or_else(|| " Notes ".to_string());
-
-    let text = if app.notes.is_empty() {
-        "No notes.".to_string()
-    } else {
-        app.notes
-            .iter()
-            .map(|n| format!("[{}]\n{}\n", n.created_at, n.content))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((app.notes_scroll, 0));
-
-    frame.render_widget(paragraph, notes_area);
-
-    frame.render_widget(
-        Paragraph::new("Esc/q/n: back  j/k: scroll  g/G: top/bottom")
-            .style(Style::default().fg(Color::DarkGray)),
-        hint_area,
-    );
 }
 
 fn render_field(

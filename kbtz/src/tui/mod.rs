@@ -97,6 +97,9 @@ fn run_loop(
                                 }
                             }
                         }
+                        KeyAction::ToggleNotes => {
+                            app.toggle_notes(conn)?;
+                        }
                         KeyAction::AddNote => {
                             if let Some(task_name) = app.selected_name() {
                                 let task_name = task_name.to_string();
@@ -109,9 +112,10 @@ fn run_loop(
                                             {
                                                 app.tree.error = Some(e.to_string());
                                             } else {
-                                                app.show_notes = true;
-                                                app.notes_scroll = 0;
-                                                app.load_notes(conn)?;
+                                                // Open notes panel showing the newly added note
+                                                let mut panel = crate::ui::NotesPanel::new();
+                                                panel.load(conn, &task_name)?;
+                                                app.notes_panel = Some(panel);
                                             }
                                         }
                                     }
@@ -190,8 +194,10 @@ fn run_loop(
                         }
                         KeyAction::Continue => {}
                     }
-                    if app.show_notes {
-                        app.load_notes(conn)?;
+                    if let Some(panel) = &mut app.notes_panel {
+                        if let Some(name) = app.tree.selected_name() {
+                            panel.load(conn, name)?;
+                        }
                     }
                 }
             }
