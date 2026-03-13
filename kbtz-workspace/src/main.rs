@@ -505,7 +505,7 @@ fn try_consume_csiu_buf(buf: &[u8], i: &mut usize, n: usize) -> Option<u8> {
 fn csiu_to_legacy(codepoint: u32, modifier: u32) -> Option<u8> {
     let ctrl = (modifier.wrapping_sub(1)) & 4 != 0;
 
-    if ctrl && codepoint >= 97 && codepoint <= 122 {
+    if ctrl && (97..=122).contains(&codepoint) {
         // Ctrl + a-z → 0x01..0x1a
         Some((codepoint & 0x1f) as u8)
     } else if codepoint <= 127 {
