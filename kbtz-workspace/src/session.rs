@@ -228,6 +228,7 @@ impl Passthrough {
                 "\x1b[?1l",    // normal cursor keys
                 "\x1b>",       // normal keypad
                 "\x1b[?25h",   // show cursor
+                "\x1b[<u",     // pop kitty keyboard protocol (if pushed by child)
             )
             .as_bytes(),
         );

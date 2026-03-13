@@ -123,6 +123,22 @@ struct Cli {
 
 const PREFIX_KEY: u8 = 0x02; // Ctrl-B
 
+/// Length of the CSI u encoding of Ctrl-B: ESC [ 98 ; 5 u
+const CSIU_CTRL_B: [u8; 7] = *b"\x1b[98;5u";
+
+/// Check if bytes at position `i` are the CSI u (kitty keyboard protocol)
+/// encoding of Ctrl-B.  Returns the sequence length (7) on match, 0 otherwise.
+///
+/// Terminals that support the kitty keyboard protocol (e.g. Ghostty on macOS)
+/// may send Ctrl-B as `ESC [ 98 ; 5 u` instead of the legacy byte 0x02.
+fn csiu_prefix_len(buf: &[u8], i: usize, n: usize) -> usize {
+    if i + CSIU_CTRL_B.len() <= n && buf[i..i + CSIU_CTRL_B.len()] == CSIU_CTRL_B {
+        CSIU_CTRL_B.len()
+    } else {
+        0
+    }
+}
+
 /// Watches the kbtz database and status directory for changes.
 /// Polling with `poll()` checks both channels and refreshes app state.
 struct Watchers {
@@ -218,7 +234,11 @@ fn run() -> Result<()> {
     // across process boundaries, so a prior child that requested focus
     // events causes the terminal to send CSI I / CSI O into our stdin
     // before we enter raw mode — which gets echoed as "^[[I" / "^[[O".
-    let _ = write!(io::stdout(), "\x1b[?1004l");
+    //
+    // Also pop the kitty keyboard protocol stack in case a prior child
+    // pushed it.  Without this, the terminal may encode Ctrl-B as a CSI u
+    // sequence that we wouldn't detect as our prefix key.
+    let _ = write!(io::stdout(), "\x1b[?1004l\x1b[<u");
     let _ = io::stdout().flush();
 
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
@@ -402,25 +422,137 @@ fn poll_stdin(stdin: &mut io::StdinLock, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
-/// Read the command byte after a PREFIX_KEY, either from the remaining
-/// buffer or by reading one more byte from stdin. Returns `None` on
-/// EOF only. Retries on EINTR (signal interruption).
-fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
+/// Read one byte from the buffer (advancing `*i`) or from `stdin`.
+/// Returns `None` on EOF only.  Retries on EINTR.
+fn read_one_byte(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
     if *i < n {
         let b = buf[*i];
         *i += 1;
         Some(b)
     } else {
-        let mut cmd_buf = [0u8; 1];
+        let mut one = [0u8; 1];
         loop {
-            match stdin.read(&mut cmd_buf) {
+            match stdin.read(&mut one) {
                 Ok(0) => return None,
-                Ok(_) => return Some(cmd_buf[0]),
+                Ok(_) => return Some(one[0]),
                 Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,
                 Err(_) => return None,
             }
         }
     }
+}
+
+/// Try to consume a CSI u sequence from the buffer starting at `*i`.
+/// Expects the leading ESC has already been consumed.  On success,
+/// advances `*i` past the sequence and returns the translated legacy
+/// byte.  On failure, restores `*i` to its original value.
+///
+/// CSI u format: `[ codepoint [; modifier] u`
+fn try_consume_csiu_buf(buf: &[u8], i: &mut usize, n: usize) -> Option<u8> {
+    let saved = *i;
+
+    // Need at least '[', one digit, 'u' = 3 bytes.
+    if *i + 3 > n || buf[*i] != b'[' {
+        return None;
+    }
+    *i += 1;
+
+    // Parse codepoint (one or more digits).
+    let mut codepoint: u32 = 0;
+    while *i < n && buf[*i].is_ascii_digit() {
+        codepoint = codepoint * 10 + (buf[*i] - b'0') as u32;
+        *i += 1;
+    }
+    if codepoint == 0 || *i >= n {
+        *i = saved;
+        return None;
+    }
+
+    // Optional ';' + modifier.
+    let mut modifier: u32 = 1; // kitty default: no modifier
+    if buf[*i] == b';' {
+        *i += 1;
+        modifier = 0;
+        while *i < n && buf[*i].is_ascii_digit() {
+            modifier = modifier * 10 + (buf[*i] - b'0') as u32;
+            *i += 1;
+        }
+        if modifier == 0 || *i >= n {
+            *i = saved;
+            return None;
+        }
+    }
+
+    if buf[*i] != b'u' {
+        *i = saved;
+        return None;
+    }
+    *i += 1;
+
+    match csiu_to_legacy(codepoint, modifier) {
+        Some(b) => Some(b),
+        None => {
+            *i = saved;
+            None
+        }
+    }
+}
+
+/// Translate a CSI u codepoint + modifier pair to a legacy byte.
+///
+/// Modifier encoding (kitty protocol): value = 1 + bitmask, where
+/// shift=1, alt=2, ctrl=4, super=8.
+fn csiu_to_legacy(codepoint: u32, modifier: u32) -> Option<u8> {
+    let ctrl = (modifier.wrapping_sub(1)) & 4 != 0;
+
+    if ctrl && (97..=122).contains(&codepoint) {
+        // Ctrl + a-z → 0x01..0x1a
+        Some((codepoint & 0x1f) as u8)
+    } else if codepoint <= 127 {
+        Some(codepoint as u8)
+    } else {
+        None
+    }
+}
+
+/// Read the command byte after a PREFIX_KEY, either from the remaining
+/// buffer or by reading one more byte from stdin.  Returns `None` on
+/// EOF only.
+///
+/// When the kitty keyboard protocol is active, the command keystroke
+/// may arrive as a CSI u escape sequence (e.g. Ctrl-B as `ESC[98;5u`,
+/// Tab as `ESC[9u`).  This function detects and translates those.
+fn read_prefix_cmd(buf: &[u8], i: &mut usize, n: usize, stdin: &mut io::StdinLock) -> Option<u8> {
+    let cmd = read_one_byte(buf, i, n, stdin)?;
+
+    if cmd != 0x1b {
+        return Some(cmd);
+    }
+
+    // Try buffer-based CSI u parse (safe: restores *i on failure).
+    if let Some(legacy) = try_consume_csiu_buf(buf, i, n) {
+        return Some(legacy);
+    }
+
+    // If the buffer is exhausted, try reading fresh bytes from stdin.
+    // Terminals send escape sequences atomically, so the full CSI u
+    // should be available in a single read.
+    if *i >= n {
+        let mut extra = [0u8; 15];
+        match stdin.read(&mut extra) {
+            Ok(0) | Err(_) => return Some(0x1b),
+            Ok(en) => {
+                let mut ei = 0;
+                if let Some(legacy) = try_consume_csiu_buf(&extra, &mut ei, en) {
+                    return Some(legacy);
+                }
+                // Not CSI u — the consumed bytes are lost, but ESC as
+                // a prefix command is a no-op anyway.
+            }
+        }
+    }
+
+    Some(0x1b)
 }
 
 // ── Tree mode ──────────────────────────────────────────────────────────
@@ -1101,9 +1233,11 @@ fn passthrough_loop(
         while i < n {
             // ── Scroll mode input ──────────────────────────────────
             if scroll.active {
-                // PREFIX_KEY commands still work in scroll mode
-                if buf[i] == PREFIX_KEY {
-                    i += 1;
+                // PREFIX_KEY commands still work in scroll mode.
+                // Detect both legacy 0x02 and CSI u encoding (kitty keyboard protocol).
+                let csiu = csiu_prefix_len(&buf, i, n);
+                if buf[i] == PREFIX_KEY || csiu > 0 {
+                    i += if csiu > 0 { csiu } else { 1 };
                     let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
                         Some(b) => b,
                         None => return Ok(Action::Quit),
@@ -1195,8 +1329,10 @@ fn passthrough_loop(
                 }
             }
 
-            if buf[i] == PREFIX_KEY {
-                i += 1;
+            // Detect both legacy 0x02 and CSI u encoding (kitty keyboard protocol).
+            let csiu = csiu_prefix_len(&buf, i, n);
+            if buf[i] == PREFIX_KEY || csiu > 0 {
+                i += if csiu > 0 { csiu } else { 1 };
                 let cmd = match read_prefix_cmd(&buf, &mut i, n, &mut stdin) {
                     Some(b) => b,
                     None => return Ok(Action::Quit),
@@ -1210,10 +1346,14 @@ fn passthrough_loop(
                     draw_scroll_status_bar(rows, cols, &scroll);
                 }
             } else {
-                // Find the next PREFIX_KEY or ESC sequence we intercept,
-                // and write the entire chunk to the PTY in one call.
+                // Find the next PREFIX_KEY, CSI u prefix, or ESC sequence
+                // we intercept, and write the entire chunk to the PTY in
+                // one call.
                 let start = i;
-                while i < n && buf[i] != PREFIX_KEY {
+                while i < n
+                    && buf[i] != PREFIX_KEY
+                    && (buf[i] != 0x1b || csiu_prefix_len(&buf, i, n) == 0)
+                {
                     if buf[i] == 0x1b && i + 2 < n && buf[i + 1] == b'[' {
                         // Stop before SGR mouse sequence
                         if buf[i + 2] == b'<' {
@@ -1388,5 +1528,100 @@ mod tests {
         let evt = parse_sgr_mouse_scroll(buf, 0, buf.len()).unwrap();
         assert_eq!(evt.button, 64);
         assert_eq!(evt.len, buf.len());
+    }
+
+    // ── CSI u (kitty keyboard protocol) tests ────────────────────────
+
+    #[test]
+    fn csiu_prefix_len_matches_ctrl_b() {
+        let buf = b"\x1b[98;5u";
+        assert_eq!(csiu_prefix_len(buf, 0, buf.len()), 7);
+    }
+
+    #[test]
+    fn csiu_prefix_len_at_offset() {
+        let buf = b"xx\x1b[98;5urest";
+        assert_eq!(csiu_prefix_len(buf, 2, buf.len()), 7);
+    }
+
+    #[test]
+    fn csiu_prefix_len_no_match() {
+        assert_eq!(csiu_prefix_len(b"\x1b[65;5u", 0, 7), 0); // wrong codepoint
+        assert_eq!(csiu_prefix_len(b"\x1b[98;3u", 0, 7), 0); // wrong modifier
+        assert_eq!(csiu_prefix_len(b"\x1b[98;5", 0, 6), 0); // truncated
+        assert_eq!(csiu_prefix_len(b"hello", 0, 5), 0);
+    }
+
+    #[test]
+    fn csiu_to_legacy_ctrl_b() {
+        assert_eq!(csiu_to_legacy(98, 5), Some(0x02)); // Ctrl+b
+    }
+
+    #[test]
+    fn csiu_to_legacy_ctrl_a() {
+        assert_eq!(csiu_to_legacy(97, 5), Some(0x01)); // Ctrl+a
+    }
+
+    #[test]
+    fn csiu_to_legacy_plain_tab() {
+        assert_eq!(csiu_to_legacy(9, 1), Some(b'\t')); // Tab, no modifier
+    }
+
+    #[test]
+    fn csiu_to_legacy_plain_letter() {
+        assert_eq!(csiu_to_legacy(116, 1), Some(b't')); // 't', no modifier
+    }
+
+    #[test]
+    fn csiu_to_legacy_non_ascii_returns_none() {
+        assert_eq!(csiu_to_legacy(256, 1), None);
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_ctrl_b() {
+        let buf = b"[98;5urest";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), Some(0x02));
+        assert_eq!(i, 6); // consumed "[98;5u"
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_tab() {
+        let buf = b"[9u";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), Some(b'\t'));
+        assert_eq!(i, 3);
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_no_match_restores_i() {
+        let buf = b"[Amore";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), None);
+        assert_eq!(i, 0); // restored
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_truncated_restores_i() {
+        let buf = b"[98;5";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), None);
+        assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_not_bracket_returns_none() {
+        let buf = b"Omore";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), None);
+        assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn try_consume_csiu_buf_non_ascii_codepoint_restores_i() {
+        let buf = b"[256;1u";
+        let mut i = 0;
+        assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), None);
+        assert_eq!(i, 0);
     }
 }
