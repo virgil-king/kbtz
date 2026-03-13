@@ -32,6 +32,21 @@ pub trait SessionHandle: Send {
     fn has_mouse_tracking(&self) -> bool;
     fn write_input(&mut self, buf: &[u8]) -> Result<()>;
     fn resize(&self, rows: u16, cols: u16) -> Result<()>;
+    /// Return escape sequences that sync the real terminal to the VTE's
+    /// current SGR attributes, cursor position, and cursor visibility.
+    ///
+    /// During passthrough mode the reader thread forwards raw child output
+    /// to stdout.  If we write directly to the terminal between those raw
+    /// writes (e.g. to draw a status bar), we leave the terminal in
+    /// whatever SGR/cursor state our drawing code ended with.  The next
+    /// raw write from the child then inherits that state, causing visible
+    /// artifacts — most commonly reverse-video "selection" on text that
+    /// should be unstyled.
+    ///
+    /// Writing these bytes after every non-forwarding write restores the
+    /// terminal to the state the child's VTE expects, closing the leak.
+    /// Prefer [`write_and_sync`] in main.rs which wraps this automatically.
+    fn terminal_sync_bytes(&self) -> Result<Vec<u8>>;
     fn process_id(&self) -> Option<u32>;
     /// Returns true if the reader thread is still running.  A dead reader
     /// with a live child means the session is frozen (no output forwarding).
@@ -248,13 +263,10 @@ impl Passthrough {
             let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let _ = write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_col + 1);
-        if screen.hide_cursor() {
-            let _ = write!(out, "\x1b[?25l");
-        } else {
-            let _ = write!(out, "\x1b[?25h");
-        }
+        // Sync terminal state (SGR attributes, cursor position, cursor
+        // visibility) to match the VTE — the VTE is the source of truth.
+        let _ = out.write_all(&screen.attributes_formatted());
+        let _ = out.write_all(&screen.cursor_state_formatted());
         let _ = out.write_all(&screen.input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
     }
@@ -358,6 +370,23 @@ impl Passthrough {
             self.vte.screen().mouse_protocol_mode(),
             vt100::MouseProtocolMode::None
         )
+    }
+
+    /// Return escape sequences that sync the real terminal to the VTE's
+    /// current state.
+    ///
+    /// The returned bytes contain, in order:
+    /// 1. `attributes_formatted()` — SGR reset (`\x1b[0m`) followed by the
+    ///    VTE's current text attributes (colors, bold, reverse, etc.)
+    /// 2. `cursor_state_formatted()` — cursor position (`\x1b[row;colH`)
+    ///    and visibility (`\x1b[?25h` or `\x1b[?25l`)
+    ///
+    /// See [`SessionHandle::terminal_sync_bytes`] for the rationale.
+    pub(crate) fn terminal_sync_bytes(&self) -> Vec<u8> {
+        let screen = self.vte.screen();
+        let mut bytes = screen.attributes_formatted();
+        bytes.extend_from_slice(&screen.cursor_state_formatted());
+        bytes
     }
 
     /// Set the scrollback offset and write the viewport to `out`.
@@ -549,6 +578,14 @@ impl SessionHandle for Session {
             return Err(e).context("flush PTY");
         }
         Ok(())
+    }
+
+    fn terminal_sync_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self
+            .passthrough
+            .lock()
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
+            .terminal_sync_bytes())
     }
 
     fn resize(&self, rows: u16, cols: u16) -> Result<()> {
@@ -1286,6 +1323,61 @@ mod tests {
         assert_eq!(
             screen_before, screen_after,
             "CSI 3 J should not change visible screen"
+        );
+    }
+
+    #[test]
+    fn render_screen_positioned_resets_sgr_after_last_row() {
+        // Bug: render_screen_positioned renders all rows with per-row SGR
+        // reset, but after the last row, the terminal's SGR state is
+        // whatever the last cell's attributes were.  If the last row has
+        // reverse video (e.g. Claude Code's status bar), the terminal is
+        // left with reverse video active.  When raw byte forwarding starts,
+        // the child's output inherits this stale SGR — text and erased
+        // areas appear "selected."
+        //
+        // The invariant: render_screen_positioned must leave the terminal
+        // with SGR reset (default attributes) after all rendering is done.
+        let mut pt = Passthrough::new(4, 40);
+        // Simulate a screen where the last row has reverse video content,
+        // like Claude Code's status bar.
+        pt.process(b"\x1b[1;1Hnormal line 1\r\n");
+        pt.process(b"normal line 2\r\n");
+        pt.process(b"normal line 3\r\n");
+        pt.process(b"\x1b[7mstatus bar with reverse video\x1b[0m");
+
+        let mut buf = Vec::new();
+        pt.render_screen_positioned(&mut buf);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Find the last \x1b[K (erase-in-line for the last row).  After
+        // that comes the last row's content, then cursor positioning and
+        // mode sequences.  There must be an SGR reset (\x1b[0m or \x1b[m)
+        // after the last row's content.
+        let last_el = rendered
+            .rfind("\x1b[K")
+            .expect("expected at least one \\x1b[K");
+        let after_last_row = &rendered[last_el..];
+
+        // The row content includes reverse video (\x1b[7m).  After that
+        // content, before cursor positioning, there must be an SGR reset.
+        // Find cursor positioning (CSI row;col H) after the last row.
+        let cursor_pos = after_last_row
+            .find("\x1b[")
+            .and_then(|start| after_last_row[start..].find('H').map(|end| start + end + 1));
+        assert!(
+            cursor_pos.is_some(),
+            "expected cursor positioning after last row"
+        );
+
+        // Check that SGR is reset between the last row's content and the
+        // cursor positioning sequence.
+        let between = &after_last_row[..cursor_pos.unwrap()];
+        assert!(
+            between.contains("\x1b[0m") || between.contains("\x1b[m"),
+            "render_screen_positioned must reset SGR after the last row's content, \
+             but no reset found before cursor positioning.\n\
+             After last \\x1b[K: {after_last_row:?}"
         );
     }
 }

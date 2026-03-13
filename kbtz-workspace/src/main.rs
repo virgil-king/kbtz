@@ -829,6 +829,8 @@ fn handle_prefix_command(
                 Ok(Some(Action::ZoomIn(next_task)))
             } else {
                 draw_normal_status_bar(
+                    app,
+                    sid,
                     rows,
                     cols,
                     kind,
@@ -851,13 +853,13 @@ fn handle_prefix_command(
             Ok(None)
         }
         b'?' => {
-            draw_help_bar(rows, cols, kind);
+            draw_help_bar(app, sid, rows, cols, kind);
             let mut discard = [0u8; 1];
             let _ = stdin.read(&mut discard);
             if scroll.active {
-                draw_scroll_status_bar(rows, cols, scroll);
+                draw_scroll_status_bar(app, sid, rows, cols, scroll);
             } else {
-                draw_normal_status_bar(rows, cols, kind, last_status, None);
+                draw_normal_status_bar(app, sid, rows, cols, kind, last_status, None);
             }
             Ok(None)
         }
@@ -904,7 +906,7 @@ fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> R
         let _ = out.flush();
         // Render the current viewport (offset 0 = live screen).
         session.render_scrollback(0, app.term.cols)?;
-        draw_scroll_status_bar(app.term.rows, app.term.cols, scroll);
+        draw_scroll_status_bar(app, session_id, app.term.rows, app.term.cols, scroll);
     }
     Ok(())
 }
@@ -1108,7 +1110,15 @@ fn refresh_passthrough_screen(
     if let Some(session) = app.get_session(sid) {
         session.start_passthrough()?;
     }
-    draw_normal_status_bar(app.term.rows, app.term.cols, kind, last_status, None);
+    draw_normal_status_bar(
+        app,
+        sid,
+        app.term.rows,
+        app.term.cols,
+        kind,
+        last_status,
+        None,
+    );
     Ok(())
 }
 
@@ -1135,7 +1145,15 @@ fn passthrough_loop(
     let mut debug_msg: Option<String> = None;
     let mut last_iter = Instant::now();
 
-    draw_normal_status_bar(app.term.rows, app.term.cols, kind, &last_status, None);
+    draw_normal_status_bar(
+        app,
+        sid,
+        app.term.rows,
+        app.term.cols,
+        kind,
+        &last_status,
+        None,
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -1212,6 +1230,8 @@ fn passthrough_loop(
         }
         if redraw && !scroll.active {
             draw_normal_status_bar(
+                app,
+                sid,
                 app.term.rows,
                 app.term.cols,
                 kind,
@@ -1253,17 +1273,17 @@ fn passthrough_loop(
                         return Ok(action);
                     }
                     if scroll.active {
-                        draw_scroll_status_bar(rows, cols, &scroll);
+                        draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                     } else {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
+                        draw_normal_status_bar(app, sid, rows, cols, kind, &last_status, None);
                     }
                     continue;
                 }
 
                 match handle_scroll_input(app, sid, &mut scroll, &buf, &mut i, n, rows)? {
-                    true => draw_scroll_status_bar(rows, cols, &scroll),
+                    true => draw_scroll_status_bar(app, sid, rows, cols, &scroll),
                     false => {
-                        draw_normal_status_bar(rows, cols, kind, &last_status, None);
+                        draw_normal_status_bar(app, sid, rows, cols, kind, &last_status, None);
                     }
                 }
                 continue;
@@ -1278,7 +1298,7 @@ fn passthrough_loop(
                         // Left click → enter scroll mode for text selection.
                         enter_scroll_mode(app, sid, &mut scroll)?;
                         if scroll.active {
-                            draw_scroll_status_bar(rows, cols, &scroll);
+                            draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                         }
                         i += evt.len;
                         continue;
@@ -1308,7 +1328,7 @@ fn passthrough_loop(
                 if scroll.active {
                     let new = scroll.offset.saturating_add(1).min(scroll.total);
                     scroll_to(app, sid, &mut scroll, new)?;
-                    draw_scroll_status_bar(rows, cols, &scroll);
+                    draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                 }
                 i += 6;
                 continue;
@@ -1322,7 +1342,7 @@ fn passthrough_loop(
                     if scroll.active {
                         let new = scroll.offset.saturating_add(page).min(scroll.total);
                         scroll_to(app, sid, &mut scroll, new)?;
-                        draw_scroll_status_bar(rows, cols, &scroll);
+                        draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                     }
                     i += 4;
                     continue;
@@ -1343,7 +1363,7 @@ fn passthrough_loop(
                     return Ok(action);
                 }
                 if scroll.active {
-                    draw_scroll_status_bar(rows, cols, &scroll);
+                    draw_scroll_status_bar(app, sid, rows, cols, &scroll);
                 }
             } else {
                 // Find the next PREFIX_KEY, CSI u prefix, or ESC sequence
@@ -1385,12 +1405,53 @@ fn passthrough_loop(
     }
 }
 
-/// Draws a full-width bar on the last terminal row.
+/// Perform a non-forwarding write to the terminal, then sync the
+/// terminal's SGR attributes, cursor position, and cursor visibility
+/// back to the VTE's state.  This prevents stale attributes from
+/// leaking into the reader thread's next raw write.
+///
+/// All temporary terminal writes during passthrough mode (status bars,
+/// help overlays, etc.) must go through this function.
+fn write_and_sync(app: &App, sid: &str, f: impl FnOnce(&mut io::StdoutLock)) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    f(&mut out);
+    if let Some(session) = app.get_session(sid) {
+        if let Ok(sync) = session.terminal_sync_bytes() {
+            let _ = out.write_all(&sync);
+        }
+    }
+    let _ = out.flush();
+}
+
+/// Draws a full-width bar on the last terminal row, then syncs the
+/// terminal back to the VTE's state.
 ///
 /// `style` is the ANSI SGR parameter string (e.g. "7" for reverse, "7;33" for
 /// reverse+yellow). `left` is the primary content, and `right` is an optional
 /// right-aligned annotation rendered as `" [right]"`.
-fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>) {
+fn draw_bar(
+    app: &App,
+    sid: &str,
+    rows: u16,
+    cols: u16,
+    style: &str,
+    left: &str,
+    right: Option<&str>,
+) {
+    write_and_sync(app, sid, |out| {
+        write_bar(out, rows, cols, style, left, right);
+    });
+}
+
+fn write_bar(
+    out: &mut impl Write,
+    rows: u16,
+    cols: u16,
+    style: &str,
+    left: &str,
+    right: Option<&str>,
+) {
     let content = if let Some(r) = right {
         let right_str = format!(" [{r}]");
         let gap = (cols as usize).saturating_sub(left.len() + right_str.len());
@@ -1399,33 +1460,24 @@ fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>) 
         left.to_string()
     };
     let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let _ = write!(
         out,
-        "\x1b7\x1b[{rows};1H\x1b[{style}m{content}{:padding$}\x1b[0m\x1b8",
+        "\x1b[{rows};1H\x1b[{style}m{content}{:padding$}\x1b[0m",
         "",
     );
-    let _ = out.flush();
 }
 
-fn draw_scroll_status_bar(rows: u16, cols: u16, scroll: &ScrollState) {
+fn draw_scroll_status_bar(app: &App, sid: &str, rows: u16, cols: u16, scroll: &ScrollState) {
     let content = format!(
         " [SCROLL] line {}/{}  q:exit  k/\u{2191}/S-\u{2191}:up  j/\u{2193}:down  PgUp/PgDn  g/G:top/bot  click+drag:select",
         scroll.offset, scroll.total,
     );
-    let padding = (cols as usize).saturating_sub(content.len());
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = write!(
-        out,
-        "\x1b7\x1b[{rows};1H\x1b[7;33m{content}{:padding$}\x1b[0m\x1b8",
-        "",
-    );
-    let _ = out.flush();
+    draw_bar(app, sid, rows, cols, "7;33", &content, None);
 }
 
 fn draw_normal_status_bar(
+    app: &App,
+    sid: &str,
     rows: u16,
     cols: u16,
     kind: &SessionKind,
@@ -1444,10 +1496,10 @@ fn draw_normal_status_bar(
             )
         }
     };
-    draw_bar(rows, cols, "7", &left, debug);
+    draw_bar(app, sid, rows, cols, "7", &left, debug);
 }
 
-fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind) {
+fn draw_help_bar(app: &App, sid: &str, rows: u16, cols: u16, kind: &SessionKind) {
     let content = match kind {
         SessionKind::TopLevel => {
             " ^B t:tree  ^B n:next worker  ^B p:prev worker  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
@@ -1456,7 +1508,7 @@ fn draw_help_bar(rows: u16, cols: u16, kind: &SessionKind) {
             " ^B t:tree  ^B c:manager  ^B n:next  ^B p:prev  ^B Tab:input  ^B [:scroll  ^B ^B:send ^B  ^B q:quit  ^B ?:help"
         }
     };
-    draw_bar(rows, cols, "7;33", content, None);
+    draw_bar(app, sid, rows, cols, "7;33", content, None);
 }
 
 #[cfg(test)]
@@ -1623,5 +1675,55 @@ mod tests {
         let mut i = 0;
         assert_eq!(try_consume_csiu_buf(buf, &mut i, buf.len()), None);
         assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn write_bar_does_not_restore_sgr_state() {
+        // Bug: draw_bar uses DECSC (\x1b7) / DECRC (\x1b8) to save/restore
+        // cursor position while drawing the status bar.  But DECSC/DECRC
+        // saves and restores ALL cursor state including SGR attributes.
+        // If the child had reverse video active, \x1b8 restores it, leaving
+        // the terminal with stale reverse video after the bar draw.
+        //
+        // The invariant: after write_bar completes, the terminal's SGR
+        // state must be reset (default attributes), regardless of what
+        // state was active before the call.  Cursor position should be
+        // restored, but SGR must not be.
+        let mut buf = Vec::new();
+        write_bar(&mut buf, 24, 80, "7", " test bar content", None);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // DECRC (\x1b8) restores SGR along with cursor position.
+        // If the output contains \x1b8, it must be followed by an SGR
+        // reset to prevent stale attributes from leaking.
+        //
+        // Preferred fix: use \x1b[s / \x1b[u (SCP/RCP) which only
+        // saves/restores cursor position, not SGR.
+        if rendered.contains("\x1b8") {
+            // If DECRC is used, there must be an SGR reset after it.
+            let decrc_pos = rendered.rfind("\x1b8").unwrap();
+            let after_decrc = &rendered[decrc_pos + 2..];
+            assert!(
+                after_decrc.contains("\x1b[0m") || after_decrc.contains("\x1b[m"),
+                "write_bar uses DECRC (\\x1b8) which restores stale SGR attributes. \
+                 Either replace with SCP/RCP (\\x1b[s / \\x1b[u) or add SGR reset after DECRC.\n\
+                 Output: {rendered:?}"
+            );
+        }
+
+        // Additionally, the output must end in a state where SGR is reset.
+        // Check that the last SGR-affecting sequence is a reset.
+        let last_sgr_reset = rendered
+            .rfind("\x1b[0m")
+            .or_else(|| rendered.rfind("\x1b[m"));
+        let last_decrc = rendered.rfind("\x1b8");
+        if let (Some(reset_pos), Some(decrc_pos)) = (last_sgr_reset, last_decrc) {
+            assert!(
+                reset_pos > decrc_pos,
+                "SGR reset (\\x1b[0m at byte {reset_pos}) must come AFTER \
+                 DECRC (\\x1b8 at byte {decrc_pos}) to prevent stale SGR leaking.\n\
+                 Output: {rendered:?}"
+            );
+        }
     }
 }
