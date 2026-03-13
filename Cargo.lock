@@ -919,6 +919,7 @@ dependencies = [
  "ratatui",
  "rusqlite",
  "tempfile",
+ "unicode-width",
  "uuid",
  "vt100",
 ]

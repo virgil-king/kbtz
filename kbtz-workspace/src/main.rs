@@ -22,6 +22,7 @@ use crossterm::event::{self as ct_event, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 use app::{Action, App, TOPLEVEL_SESSION_ID};
 use session::SessionStatus;
@@ -1466,12 +1467,12 @@ fn write_bar(
 ) {
     let content = if let Some(r) = right {
         let right_str = format!(" [{r}]");
-        let gap = (cols as usize).saturating_sub(left.len() + right_str.len());
+        let gap = (cols as usize).saturating_sub(left.width() + right_str.width());
         format!("{left}{:gap$}{right_str}", "")
     } else {
         left.to_string()
     };
-    let padding = (cols as usize).saturating_sub(content.len());
+    let padding = (cols as usize).saturating_sub(content.width());
     let _ = write!(
         out,
         "\x1b[{rows};1H\x1b[{style}m{content}{:padding$}\x1b[0m",
