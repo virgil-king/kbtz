@@ -1414,14 +1414,7 @@ fn sync_bytes(app: &App, sid: &str) -> Vec<u8> {
 /// `style` is the ANSI SGR parameter string (e.g. "7" for reverse, "7;33" for
 /// reverse+yellow). `left` is the primary content, and `right` is an optional
 /// right-aligned annotation rendered as `" [right]"`.
-fn draw_bar(
-    rows: u16,
-    cols: u16,
-    style: &str,
-    left: &str,
-    right: Option<&str>,
-    sync_bytes: &[u8],
-) {
+fn draw_bar(rows: u16, cols: u16, style: &str, left: &str, right: Option<&str>, sync_bytes: &[u8]) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     write_bar(&mut out, rows, cols, style, left, right, sync_bytes);

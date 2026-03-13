@@ -1337,7 +1337,9 @@ mod tests {
         // that comes the last row's content, then cursor positioning and
         // mode sequences.  There must be an SGR reset (\x1b[0m or \x1b[m)
         // after the last row's content.
-        let last_el = rendered.rfind("\x1b[K").expect("expected at least one \\x1b[K");
+        let last_el = rendered
+            .rfind("\x1b[K")
+            .expect("expected at least one \\x1b[K");
         let after_last_row = &rendered[last_el..];
 
         // The row content includes reverse video (\x1b[7m).  After that
@@ -1345,12 +1347,11 @@ mod tests {
         // Find cursor positioning (CSI row;col H) after the last row.
         let cursor_pos = after_last_row
             .find("\x1b[")
-            .and_then(|start| {
-                after_last_row[start..]
-                    .find('H')
-                    .map(|end| start + end + 1)
-            });
-        assert!(cursor_pos.is_some(), "expected cursor positioning after last row");
+            .and_then(|start| after_last_row[start..].find('H').map(|end| start + end + 1));
+        assert!(
+            cursor_pos.is_some(),
+            "expected cursor positioning after last row"
+        );
 
         // Check that SGR is reset between the last row's content and the
         // cursor positioning sequence.
