@@ -537,8 +537,14 @@ impl App {
         let session_file = self.claude_sessions_dir.join(&task.name);
 
         // Try to resume a previous session if one exists.
+        let resume_prompt = format!(
+            "Your previous session was interrupted. Continue working on task '{}': {}",
+            task.name, task.description
+        );
         let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-            if let Some(resume_args) = backend.resume_args(system_instructions, &stored_uuid) {
+            if let Some(resume_args) =
+                backend.resume_args(system_instructions, &stored_uuid, &resume_prompt)
+            {
                 kbtz::debug_log::log(&format!(
                     "spawn_session: resuming {} (session {}, agent={})",
                     task.name, stored_uuid, agent_type
@@ -1491,8 +1497,17 @@ mod tests {
         ) -> Option<Vec<String>> {
             Some(vec!["--session-id".into(), session_id.into()])
         }
-        fn resume_args(&self, _system_instructions: &str, session_id: &str) -> Option<Vec<String>> {
-            Some(vec!["--resume".into(), session_id.into()])
+        fn resume_args(
+            &self,
+            _system_instructions: &str,
+            session_id: &str,
+            initial_prompt: &str,
+        ) -> Option<Vec<String>> {
+            Some(vec![
+                "--resume".into(),
+                session_id.into(),
+                initial_prompt.into(),
+            ])
         }
         fn request_exit(&self, session: &mut dyn SessionHandle) {
             session.mark_stopping();

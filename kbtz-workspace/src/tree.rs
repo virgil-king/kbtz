@@ -143,7 +143,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 30.min(term.height.saturating_sub(2));
+    let height = 34.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -245,6 +245,13 @@ pub fn render_help(frame: &mut Frame) {
             Span::styled("  ^B ?       ", Style::default().fg(Color::Cyan)),
             Span::raw("Show help"),
         ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled(
+            "Stuck session?",
+            Style::default().bold(),
+        )]),
+        Line::from(Span::raw("  Pause then unpause the task (p, p)")),
+        Line::from(Span::raw("  to kill and respawn its session.")),
     ];
 
     frame.render_widget(Paragraph::new(help_text), inner);
