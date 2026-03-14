@@ -51,6 +51,9 @@ pub trait SessionHandle: Send {
     /// Returns true if the reader thread is still running.  A dead reader
     /// with a live child means the session is frozen (no output forwarding).
     fn reader_alive(&self) -> bool;
+    /// Reap the underlying process and return its exit code.
+    /// Returns `None` if the process is still running or was already reaped.
+    fn exit_code(&mut self) -> Option<i32>;
 }
 
 pub trait SessionSpawner: Send {
@@ -138,7 +141,7 @@ impl SessionSpawner for ShepherdSpawner {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        cmd.spawn().with_context(|| {
+        let child = cmd.spawn().with_context(|| {
             format!(
                 "failed to spawn kbtz-shepherd at {}",
                 shepherd_bin.display()
@@ -157,9 +160,18 @@ impl SessionSpawner for ShepherdSpawner {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Connect to the shepherd
-        ShepherdSession::connect(&socket_path, &pid_path, task_name, session_id, rows, cols)
-            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+        // Connect to the shepherd, passing the Child handle so the
+        // workspace can reap it and read its exit code later.
+        ShepherdSession::connect(
+            &socket_path,
+            &pid_path,
+            task_name,
+            session_id,
+            rows,
+            cols,
+            Some(child),
+        )
+        .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }
 
@@ -610,6 +622,11 @@ impl SessionHandle for Session {
 
     fn reader_alive(&self) -> bool {
         self.reader_alive.load(Ordering::Acquire)
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        let status = self.child.try_wait().ok()??;
+        Some(status.exit_code() as i32)
     }
 }
 
@@ -1378,6 +1395,180 @@ mod tests {
             "render_screen_positioned must reset SGR after the last row's content, \
              but no reset found before cursor positioning.\n\
              After last \\x1b[K: {after_last_row:?}"
+        );
+    }
+
+    // ── render_scrollback: cursor positioning ──
+
+    #[test]
+    fn render_scrollback_uses_cursor_positioning_not_newlines() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        let total = pt.scrollback_available();
+
+        let mut buf = Vec::new();
+        pt.render_scrollback(&mut buf, total, 80);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Must use explicit cursor positioning (CSI row;1H), not \r\n.
+        assert!(
+            !rendered.contains("\r\n"),
+            "render_scrollback should not contain \\r\\n"
+        );
+        // Should have cursor positioning for each row.
+        for row in 1..=4 {
+            let expected = format!("\x1b[{row};1H");
+            assert!(
+                rendered.contains(&expected),
+                "expected cursor positioning {expected:?} in output"
+            );
+        }
+    }
+
+    // ── render_scrollback: content at different offsets ──
+
+    #[test]
+    fn render_scrollback_at_zero_shows_bottom_of_history() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+
+        let mut buf = Vec::new();
+        pt.render_scrollback(&mut buf, 0, 80);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // Offset 0 = no scroll = shows the most recent content (bottom).
+        // The most recent lines should be visible.
+        assert!(
+            rendered.contains("line 19"),
+            "offset 0 should show recent content, got: {rendered}"
+        );
+        // Earliest lines should NOT be visible at offset 0.
+        assert!(
+            !rendered.contains("line 0\x1b"),
+            "offset 0 should not show earliest content"
+        );
+    }
+
+    // ── render_scrollback: column width ──
+
+    #[test]
+    fn render_scrollback_respects_column_width() {
+        let mut pt = Passthrough::new(4, 80);
+        // Write lines long enough that truncation at 20 cols is observable.
+        for i in 0..10 {
+            pt.process(format!("this is a long content line number {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+
+        let mut buf_narrow = Vec::new();
+        pt.render_scrollback(&mut buf_narrow, 0, 20);
+
+        let mut buf_full = Vec::new();
+        pt.render_scrollback(&mut buf_full, 0, 80);
+
+        assert!(!buf_narrow.is_empty());
+        assert!(!buf_full.is_empty());
+        // Different column widths must produce different output since the
+        // lines are wider than 20 columns.
+        assert_ne!(
+            buf_narrow, buf_full,
+            "different column widths should produce different rendered output"
+        );
+    }
+
+    // ── render_scrollback: no scroll screen ──
+
+    #[test]
+    fn render_scrollback_without_scroll_mode_returns_zero() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        // Don't enter scroll mode.
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, 5, 80);
+        assert_eq!(applied, 0);
+        assert!(buf.is_empty());
+    }
+
+    // ── render_scrollback: final SGR reset ──
+
+    #[test]
+    fn render_scrollback_ends_with_sgr_reset() {
+        let mut pt = Passthrough::new(4, 80);
+        pt.process(b"\x1b[31mred text\x1b[0m\n");
+        for i in 0..10 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        let total = pt.scrollback_available();
+
+        let mut buf = Vec::new();
+        pt.render_scrollback(&mut buf, total, 80);
+        let rendered = String::from_utf8_lossy(&buf);
+
+        // The output must end with \x1b[0m to reset SGR.
+        assert!(
+            rendered.ends_with("\x1b[0m"),
+            "render_scrollback must end with SGR reset, got: ...{:?}",
+            &rendered[rendered.len().saturating_sub(20)..]
+        );
+    }
+
+    // ── scroll mode: empty screen ──
+
+    #[test]
+    fn scroll_mode_empty_screen_has_zero_scrollback() {
+        let mut pt = Passthrough::new(24, 80);
+        // No content written at all.
+        let total = pt.enter_scroll_mode();
+        assert_eq!(total, 0, "empty screen should have no scrollback");
+
+        // Rendering at offset 0 should still work.
+        let mut buf = Vec::new();
+        let applied = pt.render_scrollback(&mut buf, 0, 80);
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn scroll_mode_content_fits_screen_has_zero_scrollback() {
+        let mut pt = Passthrough::new(10, 80);
+        // Write fewer lines than the screen height.
+        pt.process(b"line 1\nline 2\nline 3\n");
+        let total = pt.enter_scroll_mode();
+        assert_eq!(
+            total, 0,
+            "content fitting on screen should have no scrollback"
+        );
+    }
+
+    // ── scroll mode: concurrent content ──
+
+    #[test]
+    fn scroll_mode_snapshot_is_frozen() {
+        let mut pt = Passthrough::new(4, 80);
+        for i in 0..20 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+        pt.enter_scroll_mode();
+        let total_before = pt.scrollback_available();
+
+        // Write more content to the live VTE (simulating child continuing to output).
+        for i in 20..40 {
+            pt.process(format!("line {i}\n").as_bytes());
+        }
+
+        // The scroll snapshot should be unchanged.
+        let total_after = pt.scrollback_available();
+        assert_eq!(
+            total_before, total_after,
+            "scroll snapshot should be frozen while scroll mode is active"
         );
     }
 }

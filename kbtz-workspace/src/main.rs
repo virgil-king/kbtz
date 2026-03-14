@@ -1739,4 +1739,14 @@ mod tests {
             );
         }
     }
+
+    // ── ScrollState ──
+
+    #[test]
+    fn scroll_state_new_defaults() {
+        let s = ScrollState::new();
+        assert!(!s.active);
+        assert_eq!(s.offset, 0);
+        assert_eq!(s.total, 0);
+    }
 }
