@@ -261,7 +261,7 @@ impl Orchestrator {
         env.insert("KBTZ_SESSION_ID".into(), session_id.clone());
         env.insert("KBTZ_WORKSPACE_DIR".into(), self.workspace_dir.clone());
 
-        let window_title = format!("⏳ {task_name}");
+        let window_title = format!("🚀 {task_name}");
         let window_id =
             match tmux::spawn_window(&self.session, &window_title, &env, &command, &args) {
                 Ok(wid) => wid,

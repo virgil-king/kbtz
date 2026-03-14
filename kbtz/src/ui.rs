@@ -128,13 +128,19 @@ pub fn status_style(status: &str) -> Style {
 }
 
 /// Emoji for a single state dimension (no trailing space).
+///
+/// All emojis must have the `Emoji_Presentation` Unicode property so that
+/// `unicode-width` and terminal rendering agree on a 2-cell width.
+/// Text-default emojis (e.g. U+23F8 ⏸) cause rendering glitches because
+/// terminals may show them as 2 cells while `unicode-width` reports 1,
+/// desynchronizing ratatui's buffer diff.
 fn state_emoji(state: &str) -> &'static str {
     match state {
-        "done" => "\u{2705}",           // ✅
-        "active" => "\u{1f7e2}",        // 🟢
-        "paused" => "\u{23f8}\u{fe0f}", // ⏸️
-        "blocked" => "\u{1f6a7}",       // 🚧
-        _ => "\u{26aa}",                // ⚪
+        "done" => "\u{2705}",     // ✅
+        "active" => "\u{26a1}",   // ⚡
+        "paused" => "\u{1f9ca}",  // 🧊
+        "blocked" => "\u{1f6a7}", // 🚧
+        _ => "",
     }
 }
 
@@ -142,7 +148,7 @@ fn state_emoji(state: &str) -> &'static str {
 ///
 /// Dimensions: blocked (default: unblocked), status (default: open).
 /// Each non-default dimension adds its emoji. If all dimensions are default,
-/// the open (⚪) emoji is shown.
+/// the icon is padding spaces (no indicator for the default state).
 pub fn icon_for_task(row: &TreeRow) -> String {
     let blocked = !row.blocked_by.is_empty();
     let non_default_status = row.status != "open";
@@ -154,9 +160,11 @@ pub fn icon_for_task(row: &TreeRow) -> String {
         s.push_str(state_emoji(&row.status));
     }
     if s.is_empty() {
-        s.push_str(state_emoji("open"));
+        // No indicators — pad to match the width of an emoji (2 cells) + trailing space.
+        s.push_str("   ");
+    } else {
+        s.push(' ');
     }
-    s.push(' ');
     s
 }
 
@@ -543,12 +551,15 @@ impl TreeDecorator for DefaultDecorator {
 }
 
 /// Map a session status string to its indicator emoji.
+///
+/// All emojis must have the `Emoji_Presentation` property (see
+/// [`state_emoji`] for rationale).
 pub fn session_indicator(status: &str) -> &'static str {
     match status.trim() {
-        "active" => "\u{1f7e2}",      // 🟢
-        "idle" => "\u{1f7e1}",        // 🟡
+        "active" => "\u{26a1}",       // ⚡
+        "idle" => "\u{1f4a4}",        // 💤
         "needs_input" => "\u{1f514}", // 🔔
-        _ => "\u{23f3}",              // ⏳
+        _ => "\u{1f680}",             // 🚀
     }
 }
 
@@ -929,12 +940,12 @@ mod tests {
     #[test]
     fn state_emoji_for_each_status() {
         assert!(state_emoji("done").contains('\u{2705}'));
-        assert!(state_emoji("active").contains('\u{1f7e2}'));
-        assert!(state_emoji("paused").contains('\u{23f8}'));
+        assert!(state_emoji("active").contains('\u{26a1}'));
+        assert!(state_emoji("paused").contains('\u{1f9ca}'));
         assert!(state_emoji("blocked").contains('\u{1f6a7}'));
-        assert!(state_emoji("open").contains('\u{26aa}'));
+        assert!(state_emoji("open").is_empty());
         // Unknown status gets the default
-        assert!(state_emoji("whatever").contains('\u{26aa}'));
+        assert!(state_emoji("whatever").is_empty());
     }
 
     // ── icon_for_task ──
@@ -944,7 +955,6 @@ mod tests {
         let mut row = make_row("t", "open", None);
         row.blocked_by = vec!["other".into()];
         assert!(icon_for_task(&row).contains('\u{1f6a7}'));
-        assert!(!icon_for_task(&row).contains('\u{26aa}'));
     }
 
     #[test]
@@ -953,14 +963,14 @@ mod tests {
         row.blocked_by = vec!["other".into()];
         let icon = icon_for_task(&row);
         assert!(icon.contains('\u{1f6a7}'), "should contain blocked emoji");
-        assert!(icon.contains('\u{23f8}'), "should contain paused emoji");
+        assert!(icon.contains('\u{1f9ca}'), "should contain paused emoji");
     }
 
     #[test]
     fn icon_for_task_unblocked_active_shows_active() {
         let row = make_row("t", "active", None);
         let icon = icon_for_task(&row);
-        assert!(icon.contains('\u{1f7e2}'));
+        assert!(icon.contains('\u{26a1}'));
         assert!(!icon.contains('\u{1f6a7}'));
     }
 
@@ -974,9 +984,9 @@ mod tests {
     }
 
     #[test]
-    fn icon_for_task_open_unblocked_shows_default() {
+    fn icon_for_task_open_unblocked_shows_spaces() {
         let row = make_row("t", "open", None);
-        assert!(icon_for_task(&row).contains('\u{26aa}'));
+        assert_eq!(icon_for_task(&row), "   ");
     }
 
     // ── tree_prefix ──
@@ -1610,21 +1620,21 @@ mod tests {
 
     #[test]
     fn session_indicator_known_statuses() {
-        assert_eq!(session_indicator("active"), "\u{1f7e2}");
-        assert_eq!(session_indicator("idle"), "\u{1f7e1}");
+        assert_eq!(session_indicator("active"), "\u{26a1}");
+        assert_eq!(session_indicator("idle"), "\u{1f4a4}");
         assert_eq!(session_indicator("needs_input"), "\u{1f514}");
     }
 
     #[test]
     fn session_indicator_trims_whitespace() {
-        assert_eq!(session_indicator("active\n"), "\u{1f7e2}");
-        assert_eq!(session_indicator("  idle  "), "\u{1f7e1}");
+        assert_eq!(session_indicator("active\n"), "\u{26a1}");
+        assert_eq!(session_indicator("  idle  "), "\u{1f4a4}");
     }
 
     #[test]
-    fn session_indicator_unknown_is_hourglass() {
-        assert_eq!(session_indicator("starting"), "\u{23f3}");
-        assert_eq!(session_indicator(""), "\u{23f3}");
+    fn session_indicator_unknown_is_rocket() {
+        assert_eq!(session_indicator("starting"), "\u{1f680}");
+        assert_eq!(session_indicator(""), "\u{1f680}");
     }
 
     // ── FileStatusDecorator ──
@@ -1640,7 +1650,7 @@ mod tests {
         assert!(dec.icon_override.is_some());
         let (icon, _) = dec.icon_override.unwrap();
         assert!(icon.contains('\u{1f916}'));
-        assert!(icon.contains('\u{1f7e2}'));
+        assert!(icon.contains('\u{26a1}'));
     }
 
     #[test]

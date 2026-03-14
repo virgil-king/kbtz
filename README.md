@@ -135,9 +135,9 @@ Agents report their status by writing to files in the workspace status directory
 
 | Status      | Indicator | Meaning                   |
 |-------------|-----------|---------------------------|
-| Starting    | ⏳        | Session just spawned      |
-| Active      | 🟢        | Agent is working          |
-| Idle        | 🟡        | Agent is waiting          |
+| Starting    | 🚀        | Session just spawned      |
+| Active      | ⚡        | Agent is working          |
+| Idle        | 💤        | Agent is waiting          |
 | Needs input | 🔔        | Agent needs user attention |
 
 ## kbtz CLI
