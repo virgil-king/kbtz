@@ -28,6 +28,16 @@ pub fn session_id_to_filename(session_id: &str) -> String {
     session_id.replace('/', "-")
 }
 
+/// The prefix used for workspace session IDs (e.g. `ws/3`).
+pub const SESSION_ID_PREFIX: &str = "ws/";
+
+/// Returns true if `filename` (with or without an extension like `.sock`)
+/// looks like a session status file produced by [`session_id_to_filename`].
+pub fn is_session_filename(filename: &str) -> bool {
+    let stem = filename.split_once('.').map_or(filename, |(s, _)| s);
+    filename_to_session_id(stem).starts_with(SESSION_ID_PREFIX)
+}
+
 /// Convert a status filename back to a session ID.
 /// `ws-3` → `ws/3`
 ///
@@ -80,5 +90,29 @@ mod tests {
     fn only_first_dash_replaced() {
         // If a filename has multiple dashes, only the first becomes /
         assert_eq!(filename_to_session_id("ws-foo-bar"), "ws/foo-bar");
+    }
+
+    #[test]
+    fn is_session_filename_matches_status_files() {
+        assert!(is_session_filename("ws-0"));
+        assert!(is_session_filename("ws-42"));
+        assert!(is_session_filename("ws-toplevel"));
+    }
+
+    #[test]
+    fn is_session_filename_matches_with_extensions() {
+        assert!(is_session_filename("ws-0.sock"));
+        assert!(is_session_filename("ws-1.pid"));
+        assert!(is_session_filename("ws-2.child-pid"));
+    }
+
+    #[test]
+    fn is_session_filename_rejects_non_session_files() {
+        assert!(!is_session_filename("kbtz.db"));
+        assert!(!is_session_filename("kbtz.db-wal"));
+        assert!(!is_session_filename("workspace.lock"));
+        assert!(!is_session_filename("orchestrator.log"));
+        assert!(!is_session_filename("something-else.txt"));
+        assert!(!is_session_filename("plain"));
     }
 }
