@@ -45,9 +45,18 @@ pub trait Backend: Send + Sync {
 
     /// Build CLI args to resume a previous session by ID.
     ///
+    /// `initial_prompt` is sent as the first user message in the resumed
+    /// session so the agent has a message to process instead of waiting
+    /// for interactive input.
+    ///
     /// Returns `Some(args)` if the backend supports session resume.
     /// Returns `None` if resume is not supported (always starts fresh).
-    fn resume_args(&self, _system_instructions: &str, _session_id: &str) -> Option<Vec<String>> {
+    fn resume_args(
+        &self,
+        _system_instructions: &str,
+        _session_id: &str,
+        _initial_prompt: &str,
+    ) -> Option<Vec<String>> {
         None
     }
 
@@ -102,14 +111,20 @@ impl Backend for Claude {
         Some(args)
     }
 
-    fn resume_args(&self, system_instructions: &str, session_id: &str) -> Option<Vec<String>> {
-        let mut args = Vec::with_capacity(self.prefix_args.len() + 4 + self.extra_args.len());
+    fn resume_args(
+        &self,
+        system_instructions: &str,
+        session_id: &str,
+        initial_prompt: &str,
+    ) -> Option<Vec<String>> {
+        let mut args = Vec::with_capacity(self.prefix_args.len() + 5 + self.extra_args.len());
         args.extend(self.prefix_args.iter().cloned());
         args.extend([
             "--resume".into(),
             session_id.into(),
             "--append-system-prompt".into(),
             system_instructions.into(),
+            initial_prompt.into(),
         ]);
         args.extend(self.extra_args.iter().cloned());
         Some(args)
@@ -271,7 +286,7 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        assert!(backend.resume_args("sys", "sess-1").is_none());
+        assert!(backend.resume_args("sys", "sess-1", "continue").is_none());
     }
 
     #[test]
@@ -408,7 +423,9 @@ mod tests {
             prefix_args: vec![],
             extra_args: vec![],
         };
-        let args = backend.resume_args("system text", "abc-123").unwrap();
+        let args = backend
+            .resume_args("system text", "abc-123", "continue task")
+            .unwrap();
         assert_eq!(
             args,
             vec![
@@ -416,6 +433,7 @@ mod tests {
                 "abc-123",
                 "--append-system-prompt",
                 "system text",
+                "continue task",
             ]
         );
     }
@@ -427,7 +445,9 @@ mod tests {
             prefix_args: vec!["--flag".into()],
             extra_args: vec!["--verbose".into()],
         };
-        let args = backend.resume_args("system text", "abc-123").unwrap();
+        let args = backend
+            .resume_args("system text", "abc-123", "continue task")
+            .unwrap();
         assert_eq!(
             args,
             vec![
@@ -436,6 +456,7 @@ mod tests {
                 "abc-123",
                 "--append-system-prompt",
                 "system text",
+                "continue task",
                 "--verbose",
             ]
         );
