@@ -128,11 +128,17 @@ pub fn status_style(status: &str) -> Style {
 }
 
 /// Emoji for a single state dimension (no trailing space).
+///
+/// All emojis must have the `Emoji_Presentation` Unicode property so that
+/// `unicode-width` and terminal rendering agree on a 2-cell width.
+/// Text-default emojis (e.g. U+23F8 ⏸) cause rendering glitches because
+/// terminals may show them as 2 cells while `unicode-width` reports 1,
+/// desynchronizing ratatui's buffer diff.
 fn state_emoji(state: &str) -> &'static str {
     match state {
         "done" => "\u{2705}",           // ✅
         "active" => "\u{1f7e2}",        // 🟢
-        "paused" => "\u{23f8}\u{fe0f}", // ⏸️
+        "paused" => "\u{1f9ca}",        // 🧊
         "blocked" => "\u{1f6a7}",       // 🚧
         _ => "\u{26aa}",                // ⚪
     }
@@ -543,12 +549,15 @@ impl TreeDecorator for DefaultDecorator {
 }
 
 /// Map a session status string to its indicator emoji.
+///
+/// All emojis must have the `Emoji_Presentation` property (see
+/// [`state_emoji`] for rationale).
 pub fn session_indicator(status: &str) -> &'static str {
     match status.trim() {
         "active" => "\u{1f7e2}",      // 🟢
         "idle" => "\u{1f7e1}",        // 🟡
         "needs_input" => "\u{1f514}", // 🔔
-        _ => "\u{23f3}",              // ⏳
+        _ => "\u{1f680}",             // 🚀
     }
 }
 
@@ -930,7 +939,7 @@ mod tests {
     fn state_emoji_for_each_status() {
         assert!(state_emoji("done").contains('\u{2705}'));
         assert!(state_emoji("active").contains('\u{1f7e2}'));
-        assert!(state_emoji("paused").contains('\u{23f8}'));
+        assert!(state_emoji("paused").contains('\u{1f9ca}'));
         assert!(state_emoji("blocked").contains('\u{1f6a7}'));
         assert!(state_emoji("open").contains('\u{26aa}'));
         // Unknown status gets the default
@@ -953,7 +962,7 @@ mod tests {
         row.blocked_by = vec!["other".into()];
         let icon = icon_for_task(&row);
         assert!(icon.contains('\u{1f6a7}'), "should contain blocked emoji");
-        assert!(icon.contains('\u{23f8}'), "should contain paused emoji");
+        assert!(icon.contains('\u{1f9ca}'), "should contain paused emoji");
     }
 
     #[test]
@@ -1622,9 +1631,9 @@ mod tests {
     }
 
     #[test]
-    fn session_indicator_unknown_is_hourglass() {
-        assert_eq!(session_indicator("starting"), "\u{23f3}");
-        assert_eq!(session_indicator(""), "\u{23f3}");
+    fn session_indicator_unknown_is_rocket() {
+        assert_eq!(session_indicator("starting"), "\u{1f680}");
+        assert_eq!(session_indicator(""), "\u{1f680}");
     }
 
     // ── FileStatusDecorator ──
