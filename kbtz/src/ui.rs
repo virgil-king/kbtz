@@ -136,11 +136,11 @@ pub fn status_style(status: &str) -> Style {
 /// desynchronizing ratatui's buffer diff.
 fn state_emoji(state: &str) -> &'static str {
     match state {
-        "done" => "\u{2705}",           // ✅
-        "active" => "\u{1f7e2}",        // 🟢
-        "paused" => "\u{1f9ca}",        // 🧊
-        "blocked" => "\u{1f6a7}",       // 🚧
-        _ => "\u{26aa}",                // ⚪
+        "done" => "\u{2705}",     // ✅
+        "active" => "\u{1f7e2}",  // 🟢
+        "paused" => "\u{1f9ca}",  // 🧊
+        "blocked" => "\u{1f6a7}", // 🚧
+        _ => "\u{26aa}",          // ⚪
     }
 }
 
