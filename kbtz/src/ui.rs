@@ -1903,4 +1903,129 @@ mod tests {
         tv.handle_key(key);
         assert!(matches!(tv.mode, TreeMode::Search(ref q) if q == "old"));
     }
+
+    // ── NotesPanel scroll ──
+
+    #[test]
+    fn notes_panel_scroll_down() {
+        let mut panel = NotesPanel::new();
+        assert_eq!(panel.scroll, 0);
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 1);
+    }
+
+    #[test]
+    fn notes_panel_scroll_up() {
+        let mut panel = NotesPanel::new();
+        panel.scroll = 5;
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 4);
+    }
+
+    #[test]
+    fn notes_panel_scroll_up_clamps_at_zero() {
+        let mut panel = NotesPanel::new();
+        assert_eq!(panel.scroll, 0);
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Up));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 0, "scroll should not underflow");
+    }
+
+    #[test]
+    fn notes_panel_page_down() {
+        let mut panel = NotesPanel::new();
+        let action = panel.handle_key(KeyEvent::from(KeyCode::PageDown));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 20);
+    }
+
+    #[test]
+    fn notes_panel_page_up() {
+        let mut panel = NotesPanel::new();
+        panel.scroll = 25;
+        let action = panel.handle_key(KeyEvent::from(KeyCode::PageUp));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 5);
+    }
+
+    #[test]
+    fn notes_panel_page_up_clamps_at_zero() {
+        let mut panel = NotesPanel::new();
+        panel.scroll = 10;
+        let action = panel.handle_key(KeyEvent::from(KeyCode::PageUp));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn notes_panel_go_to_top() {
+        let mut panel = NotesPanel::new();
+        panel.scroll = 50;
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn notes_panel_go_to_bottom() {
+        let mut panel = NotesPanel::new();
+        panel.notes = vec![
+            Note {
+                id: 1,
+                task: "t".into(),
+                content: "line1\nline2\nline3".into(),
+                created_at: "2026-01-01".into(),
+            },
+            Note {
+                id: 2,
+                task: "t".into(),
+                content: "line4\nline5".into(),
+                created_at: "2026-01-02".into(),
+            },
+        ];
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Char('G')));
+        assert!(matches!(action, NotesKeyAction::Continue));
+        // G computes total lines as sum of (content_lines + 2) per note.
+        // Note 1: 3 content lines + 2 (timestamp + blank) = 5
+        // Note 2: 2 content lines + 2 = 4
+        // Total = 9, scroll = 9 - 1 = 8
+        assert_eq!(panel.scroll, 8, "G should scroll to total_lines - 1");
+    }
+
+    #[test]
+    fn notes_panel_close_keys() {
+        for key in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+        ] {
+            let mut panel = NotesPanel::new();
+            let action = panel.handle_key(KeyEvent::from(key));
+            assert!(
+                matches!(action, NotesKeyAction::Close),
+                "{key:?} should close notes panel"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_panel_unknown_key_continues() {
+        let mut panel = NotesPanel::new();
+        let action = panel.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(matches!(action, NotesKeyAction::Continue));
+    }
+
+    #[test]
+    fn notes_panel_arrow_keys_scroll() {
+        let mut panel = NotesPanel::new();
+        panel.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(panel.scroll, 1);
+        panel.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(panel.scroll, 2);
+        panel.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(panel.scroll, 1);
+    }
 }
