@@ -554,8 +554,8 @@ impl TreeDecorator for DefaultDecorator {
 /// [`state_emoji`] for rationale).
 pub fn session_indicator(status: &str) -> &'static str {
     match status.trim() {
-        "active" => "\u{1f7e2}",      // 🟢
-        "idle" => "\u{1f7e1}",        // 🟡
+        "active" => "\u{26a1}",       // ⚡
+        "idle" => "\u{1f4a4}",        // 💤
         "needs_input" => "\u{1f514}", // 🔔
         _ => "\u{1f680}",             // 🚀
     }
@@ -1619,15 +1619,15 @@ mod tests {
 
     #[test]
     fn session_indicator_known_statuses() {
-        assert_eq!(session_indicator("active"), "\u{1f7e2}");
-        assert_eq!(session_indicator("idle"), "\u{1f7e1}");
+        assert_eq!(session_indicator("active"), "\u{26a1}");
+        assert_eq!(session_indicator("idle"), "\u{1f4a4}");
         assert_eq!(session_indicator("needs_input"), "\u{1f514}");
     }
 
     #[test]
     fn session_indicator_trims_whitespace() {
-        assert_eq!(session_indicator("active\n"), "\u{1f7e2}");
-        assert_eq!(session_indicator("  idle  "), "\u{1f7e1}");
+        assert_eq!(session_indicator("active\n"), "\u{26a1}");
+        assert_eq!(session_indicator("  idle  "), "\u{1f4a4}");
     }
 
     #[test]
@@ -1649,7 +1649,7 @@ mod tests {
         assert!(dec.icon_override.is_some());
         let (icon, _) = dec.icon_override.unwrap();
         assert!(icon.contains('\u{1f916}'));
-        assert!(icon.contains('\u{1f7e2}'));
+        assert!(icon.contains('\u{26a1}'));
     }
 
     #[test]
