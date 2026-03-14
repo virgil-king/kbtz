@@ -140,7 +140,7 @@ fn state_emoji(state: &str) -> &'static str {
         "active" => "\u{1f7e2}",  // 🟢
         "paused" => "\u{1f9ca}",  // 🧊
         "blocked" => "\u{1f6a7}", // 🚧
-        _ => "\u{26aa}",          // ⚪
+        _ => "",
     }
 }
 
@@ -148,7 +148,7 @@ fn state_emoji(state: &str) -> &'static str {
 ///
 /// Dimensions: blocked (default: unblocked), status (default: open).
 /// Each non-default dimension adds its emoji. If all dimensions are default,
-/// the open (⚪) emoji is shown.
+/// the icon is padding spaces (no indicator for the default state).
 pub fn icon_for_task(row: &TreeRow) -> String {
     let blocked = !row.blocked_by.is_empty();
     let non_default_status = row.status != "open";
@@ -160,9 +160,11 @@ pub fn icon_for_task(row: &TreeRow) -> String {
         s.push_str(state_emoji(&row.status));
     }
     if s.is_empty() {
-        s.push_str(state_emoji("open"));
+        // No indicators — pad to match the width of an emoji (2 cells) + trailing space.
+        s.push_str("   ");
+    } else {
+        s.push(' ');
     }
-    s.push(' ');
     s
 }
 
@@ -941,9 +943,9 @@ mod tests {
         assert!(state_emoji("active").contains('\u{1f7e2}'));
         assert!(state_emoji("paused").contains('\u{1f9ca}'));
         assert!(state_emoji("blocked").contains('\u{1f6a7}'));
-        assert!(state_emoji("open").contains('\u{26aa}'));
+        assert!(state_emoji("open").is_empty());
         // Unknown status gets the default
-        assert!(state_emoji("whatever").contains('\u{26aa}'));
+        assert!(state_emoji("whatever").is_empty());
     }
 
     // ── icon_for_task ──
@@ -953,7 +955,6 @@ mod tests {
         let mut row = make_row("t", "open", None);
         row.blocked_by = vec!["other".into()];
         assert!(icon_for_task(&row).contains('\u{1f6a7}'));
-        assert!(!icon_for_task(&row).contains('\u{26aa}'));
     }
 
     #[test]
@@ -983,9 +984,9 @@ mod tests {
     }
 
     #[test]
-    fn icon_for_task_open_unblocked_shows_default() {
+    fn icon_for_task_open_unblocked_shows_spaces() {
         let row = make_row("t", "open", None);
-        assert!(icon_for_task(&row).contains('\u{26aa}'));
+        assert_eq!(icon_for_task(&row), "   ");
     }
 
     // ── tree_prefix ──
