@@ -697,6 +697,11 @@ impl App {
     }
 
     /// Reconnect to shepherd sessions from a previous workspace instance.
+    ///
+    /// This deliberately ignores `max_concurrency` — ALL surviving sessions
+    /// are reconnected so that work-in-progress is never lost on restart.
+    /// The concurrency limit is only applied later when deciding whether to
+    /// spawn *new* sessions via `lifecycle::tick()`.
     pub fn reconnect_sessions(&mut self) -> Result<()> {
         kbtz::debug_log::log("reconnect: scanning for shepherd sockets");
         let entries = std::fs::read_dir(&self.status_dir)?;
@@ -802,10 +807,16 @@ impl App {
                 }
             }
         }
-        kbtz::debug_log::log(&format!(
-            "reconnect: done, {} sessions active",
-            self.sessions.len()
-        ));
+        let count = self.sessions.len();
+        if count > self.max_concurrency {
+            kbtz::debug_log::log(&format!(
+                "reconnect: done, {count} sessions active (exceeds max_concurrency={}; \
+                 all reconnected sessions preserved)",
+                self.max_concurrency
+            ));
+        } else {
+            kbtz::debug_log::log(&format!("reconnect: done, {count} sessions active"));
+        }
         Ok(())
     }
 
@@ -2075,5 +2086,118 @@ mod tests {
         let task = ops::get_task(&app.conn, "external").unwrap();
         assert_eq!(task.status, "active");
         assert_eq!(task.assignee.as_deref(), Some("agent-1"));
+    }
+
+    // ── Reconnected sessions exceeding concurrency ───────────────────
+
+    /// Simulate the startup flow where persistent sessions are reconnected
+    /// and the number of reconnected sessions exceeds max_concurrency.
+    /// All reconnected sessions must be preserved; the concurrency limit
+    /// only prevents spawning NEW sessions.
+    #[test]
+    fn reconnected_sessions_exceeding_concurrency_are_preserved() {
+        let (mut app, _dir) = test_app();
+        // max_concurrency is 2, but we'll simulate 4 reconnected sessions.
+
+        // Create and claim 4 tasks as if they were owned by a previous workspace.
+        for i in 1..=4 {
+            let name = format!("task-{i}");
+            ops::add_task(
+                &app.conn,
+                ops::AddTaskParams {
+                    name: &name,
+                    description: "desc",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let sid = format!("ws/{i}");
+            ops::claim_task(&app.conn, &name, &sid).unwrap();
+
+            // Simulate reconnect_sessions() having adopted these sessions.
+            app.sessions.insert(
+                sid.clone(),
+                TrackedSession {
+                    handle: Box::new(StubSession::new(&name, &sid, true)),
+                    agent_type: "claude".to_string(),
+                },
+            );
+            app.task_to_session.insert(name, sid);
+        }
+        app.counter = 4;
+
+        // release_orphaned_tasks should NOT release any of the 4 tasks.
+        app.release_orphaned_tasks().unwrap();
+        for i in 1..=4 {
+            let task = ops::get_task(&app.conn, &format!("task-{i}")).unwrap();
+            assert_eq!(task.status, "active", "task-{i} should remain active");
+        }
+
+        // tick() should NOT reap any of the 4 sessions, even though
+        // we're over the concurrency limit (4 > 2).
+        let world = app.snapshot();
+        let actions = lifecycle::tick(&world);
+        assert!(
+            actions.is_empty(),
+            "no sessions should be reaped and no new sessions spawned, got: {actions:?}"
+        );
+        assert_eq!(app.sessions.len(), 4);
+    }
+
+    /// When reconnected sessions exceed concurrency and there are also
+    /// open tasks waiting, tick() should not spawn new sessions.
+    #[test]
+    fn over_capacity_from_reconnect_blocks_new_spawns() {
+        let (mut app, _dir) = test_app();
+        // max_concurrency is 2.
+
+        // Simulate 3 reconnected sessions (over capacity).
+        for i in 1..=3 {
+            let name = format!("task-{i}");
+            ops::add_task(
+                &app.conn,
+                ops::AddTaskParams {
+                    name: &name,
+                    description: "desc",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let sid = format!("ws/{i}");
+            ops::claim_task(&app.conn, &name, &sid).unwrap();
+
+            app.sessions.insert(
+                sid.clone(),
+                TrackedSession {
+                    handle: Box::new(StubSession::new(&name, &sid, true)),
+                    agent_type: "claude".to_string(),
+                },
+            );
+            app.task_to_session.insert(name, sid);
+        }
+        app.counter = 3;
+
+        // Add an open task waiting to be claimed.
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "waiting-task",
+                description: "should not be spawned yet",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // tick() should not spawn for the waiting task.
+        let world = app.snapshot();
+        let actions = lifecycle::tick(&world);
+        assert!(
+            actions.is_empty(),
+            "should not spawn while over capacity, got: {actions:?}"
+        );
+
+        // The waiting task should remain open.
+        let task = ops::get_task(&app.conn, "waiting-task").unwrap();
+        assert_eq!(task.status, "open");
     }
 }

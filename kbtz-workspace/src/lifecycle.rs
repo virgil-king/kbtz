@@ -386,4 +386,22 @@ mod tests {
             .iter()
             .any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
     }
+
+    // 15. Over capacity (reconnected sessions) -> no reaping, no spawning
+    #[test]
+    fn over_capacity_preserves_all_sessions() {
+        let w = world(
+            vec![
+                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
+                snapshot("ws/2", SessionPhase::Running, active_task("ws/2")),
+                snapshot("ws/3", SessionPhase::Running, active_task("ws/3")),
+                snapshot("ws/4", SessionPhase::Running, active_task("ws/4")),
+                snapshot("ws/5", SessionPhase::Running, active_task("ws/5")),
+            ],
+            3, // max_concurrency < running sessions
+        );
+        let actions = tick(&w);
+        // No sessions should be reaped, no new sessions spawned.
+        assert!(actions.is_empty());
+    }
 }
