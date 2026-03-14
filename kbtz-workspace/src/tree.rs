@@ -48,7 +48,7 @@ impl ui::TreeDecorator for SessionDecorator<'_> {
             if let Some(ref assignee) = row.assignee {
                 return ui::RowDecoration {
                     icon_override: Some((
-                        format!("\u{1f47d}{}  ", ui::icon_for_task(row)),
+                        format!("\u{1f47d}{}", ui::icon_for_task(row)),
                         ui::status_style(&row.status),
                     )),
                     after_name: vec![Span::styled(

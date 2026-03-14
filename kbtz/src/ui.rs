@@ -137,7 +137,7 @@ pub fn status_style(status: &str) -> Style {
 fn state_emoji(state: &str) -> &'static str {
     match state {
         "done" => "\u{2705}",     // ✅
-        "active" => "\u{1f7e2}",  // 🟢
+        "active" => "\u{26a1}",   // ⚡
         "paused" => "\u{1f9ca}",  // 🧊
         "blocked" => "\u{1f6a7}", // 🚧
         _ => "",
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn state_emoji_for_each_status() {
         assert!(state_emoji("done").contains('\u{2705}'));
-        assert!(state_emoji("active").contains('\u{1f7e2}'));
+        assert!(state_emoji("active").contains('\u{26a1}'));
         assert!(state_emoji("paused").contains('\u{1f9ca}'));
         assert!(state_emoji("blocked").contains('\u{1f6a7}'));
         assert!(state_emoji("open").is_empty());
@@ -970,7 +970,7 @@ mod tests {
     fn icon_for_task_unblocked_active_shows_active() {
         let row = make_row("t", "active", None);
         let icon = icon_for_task(&row);
-        assert!(icon.contains('\u{1f7e2}'));
+        assert!(icon.contains('\u{26a1}'));
         assert!(!icon.contains('\u{1f6a7}'));
     }
 
