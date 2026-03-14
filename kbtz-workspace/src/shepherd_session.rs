@@ -25,6 +25,10 @@ pub struct ShepherdSession {
     /// shepherd means the socket connection broke and the session is
     /// frozen (no output forwarding, input silently dropped).
     reader_alive: Arc<AtomicBool>,
+    /// Handle to the shepherd process, used to reap it and read its exit
+    /// code. `None` for sessions adopted via `reconnect_sessions()` (the
+    /// original parent process is gone).
+    process: Option<std::process::Child>,
 }
 
 impl ShepherdSession {
@@ -35,6 +39,7 @@ impl ShepherdSession {
         session_id: &str,
         rows: u16,
         cols: u16,
+        process: Option<std::process::Child>,
     ) -> Result<Self> {
         let pid_str = std::fs::read_to_string(pid_path)
             .with_context(|| format!("failed to read shepherd PID from {}", pid_path.display()))?;
@@ -113,6 +118,7 @@ impl ShepherdSession {
             child_pid,
             stopping_since: None,
             reader_alive,
+            process,
         })
     }
 }
@@ -328,6 +334,12 @@ impl SessionHandle for ShepherdSession {
     fn reader_alive(&self) -> bool {
         self.reader_alive.load(Ordering::Acquire)
     }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        let child = self.process.as_mut()?;
+        let status = child.try_wait().ok()??;
+        status.code()
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +398,7 @@ mod tests {
             child_pid: None,
             stopping_since: None,
             reader_alive,
+            process: None,
         };
 
         let server_reader = BufReader::new(server_stream);
@@ -411,6 +424,7 @@ mod tests {
             child_pid: None,
             stopping_since: None,
             reader_alive: Arc::new(AtomicBool::new(true)),
+            process: None,
         };
 
         // is_alive takes &mut self
@@ -543,6 +557,7 @@ mod tests {
             child_pid: Some(child_pid),
             stopping_since: None,
             reader_alive: Arc::new(AtomicBool::new(true)),
+            process: None,
         };
 
         session.force_kill();
@@ -577,6 +592,7 @@ mod tests {
             child_pid: None,
             stopping_since: None,
             reader_alive: Arc::new(AtomicBool::new(true)),
+            process: None,
         };
 
         session.force_kill();

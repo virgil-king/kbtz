@@ -266,7 +266,7 @@ fn run(
 
         // Check if child has exited.
         match child.try_wait() {
-            Ok(Some(_status)) => {
+            Ok(Some(status)) => {
                 // Child exited. Set PTY reader non-blocking so drain_pty
                 // can't hang waiting for data that will never arrive.
                 unsafe {
@@ -275,7 +275,9 @@ fn run(
                 }
                 drain_pty(&mut pty_reader, &mut vte, &mut client);
                 cleanup(socket_path, pid_file);
-                return Ok(());
+                // Exit with the child's exit code so the workspace can
+                // detect failed sessions via waitpid on the shepherd.
+                std::process::exit(status.exit_code() as i32);
             }
             Ok(None) => {} // still running
             Err(_) => {

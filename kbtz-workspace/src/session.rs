@@ -51,6 +51,9 @@ pub trait SessionHandle: Send {
     /// Returns true if the reader thread is still running.  A dead reader
     /// with a live child means the session is frozen (no output forwarding).
     fn reader_alive(&self) -> bool;
+    /// Reap the underlying process and return its exit code.
+    /// Returns `None` if the process is still running or was already reaped.
+    fn exit_code(&mut self) -> Option<i32>;
 }
 
 pub trait SessionSpawner: Send {
@@ -138,7 +141,7 @@ impl SessionSpawner for ShepherdSpawner {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        cmd.spawn().with_context(|| {
+        let child = cmd.spawn().with_context(|| {
             format!(
                 "failed to spawn kbtz-shepherd at {}",
                 shepherd_bin.display()
@@ -157,8 +160,11 @@ impl SessionSpawner for ShepherdSpawner {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Connect to the shepherd
-        ShepherdSession::connect(&socket_path, &pid_path, task_name, session_id, rows, cols)
+        // Connect to the shepherd, passing the Child handle so the
+        // workspace can reap it and read its exit code later.
+        ShepherdSession::connect(
+            &socket_path, &pid_path, task_name, session_id, rows, cols, Some(child),
+        )
             .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }
@@ -610,6 +616,11 @@ impl SessionHandle for Session {
 
     fn reader_alive(&self) -> bool {
         self.reader_alive.load(Ordering::Acquire)
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        let status = self.child.try_wait().ok()??;
+        Some(status.exit_code() as i32)
     }
 }
 
