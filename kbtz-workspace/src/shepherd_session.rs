@@ -249,13 +249,13 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
-        let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::new(stdout.lock());
-        Ok(self
+        let mut pt = self
             .passthrough
             .lock()
-            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_scrollback(&mut out, offset, cols))
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?;
+        Ok(kbtz_workspace::with_sync_stdout(|out| {
+            pt.render_scrollback(out, offset, cols)
+        }))
     }
 
     fn scrollback_available(&self) -> Result<usize> {
