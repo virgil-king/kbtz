@@ -913,10 +913,14 @@ fn enter_scroll_mode(app: &App, session_id: &str, scroll: &mut ScrollState) -> R
         scroll.offset = 0;
         scroll.active = true;
         // Disable mouse tracking so the terminal handles native text selection.
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
-        let _ = write!(out, "\x1b[?1000l\x1b[?1006l\x1b[?25h");
-        let _ = out.flush();
+        // Scoped so the stdout lock is released before render_scrollback,
+        // which acquires passthrough → stdout in the correct order.
+        {
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            let _ = write!(out, "\x1b[?1000l\x1b[?1006l\x1b[?25h");
+            let _ = out.flush();
+        }
         // Render the current viewport (offset 0 = live screen).
         session.render_scrollback(0, app.term.cols)?;
         draw_scroll_status_bar(app, session_id, app.term.rows, app.term.cols, scroll);
@@ -1426,13 +1430,17 @@ fn passthrough_loop(
 /// All temporary terminal writes during passthrough mode (status bars,
 /// help overlays, etc.) must go through this function.
 fn write_and_sync(app: &App, sid: &str, f: impl FnOnce(&mut io::StdoutLock)) {
+    // Acquire passthrough (via terminal_sync_bytes) BEFORE stdout to
+    // respect the passthrough → stdout lock ordering.  See the doc
+    // comment on `Passthrough` in session.rs.
+    let sync = app
+        .get_session(sid)
+        .and_then(|s| s.terminal_sync_bytes().ok());
     let stdout = io::stdout();
     let mut out = stdout.lock();
     f(&mut out);
-    if let Some(session) = app.get_session(sid) {
-        if let Ok(sync) = session.terminal_sync_bytes() {
-            let _ = out.write_all(&sync);
-        }
+    if let Some(sync) = sync {
+        let _ = out.write_all(&sync);
     }
     let _ = out.flush();
 }
