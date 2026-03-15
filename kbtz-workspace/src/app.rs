@@ -393,7 +393,7 @@ impl App {
     fn spawn_up_to(&mut self, count: usize) -> Result<()> {
         for _ in 0..count {
             self.counter += 1;
-            let session_id = format!("ws/{}", self.counter);
+            let session_id = format!("{}{}", kbtz::paths::SESSION_ID_PREFIX, self.counter);
 
             let claim =
                 match ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref(), None) {
@@ -454,7 +454,7 @@ impl App {
         let agent_type = self.resolve_agent_type(&task).to_string();
 
         self.counter += 1;
-        let session_id = format!("ws/{}", self.counter);
+        let session_id = format!("{}{}", kbtz::paths::SESSION_ID_PREFIX, self.counter);
 
         kbtz::debug_log::log(&format!(
             "spawn_for_task: claiming {task_name} as {session_id}"
@@ -770,7 +770,7 @@ impl App {
                                 "reconnect: adopted {session_id} (task={task_name}, agent={agent_type})"
                             ));
                             if let Some(n) = session_id
-                                .strip_prefix("ws/")
+                                .strip_prefix(kbtz::paths::SESSION_ID_PREFIX)
                                 .and_then(|s| s.parse::<u64>().ok())
                             {
                                 self.counter = self.counter.max(n);
@@ -841,7 +841,7 @@ impl App {
             let Some(ref assignee) = task.assignee else {
                 continue;
             };
-            if !assignee.starts_with("ws/") {
+            if !assignee.starts_with(kbtz::paths::SESSION_ID_PREFIX) {
                 continue;
             }
             if self.task_to_session.contains_key(&task.name) {
@@ -989,16 +989,18 @@ impl App {
         }
         self.toplevel = None;
 
-        // Clean up status files.  In persistent mode, preserve .sock/.pid/.lock
-        // files that belong to shepherds.  Otherwise, clean everything except the
-        // workspace lock.
+        // Clean up session status/socket/pid files.
         if let Ok(entries) = std::fs::read_dir(&self.status_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str());
-                if ext == Some("lock") {
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if !kbtz::paths::is_session_filename(name) {
                     continue;
                 }
+                let ext = path.extension().and_then(|e| e.to_str());
                 if self.persistent_sessions
                     && (ext == Some("sock") || ext == Some("pid") || ext == Some("child-pid"))
                 {
@@ -2214,5 +2216,74 @@ mod tests {
         // The waiting task should remain open.
         let task = ops::get_task(&app.conn, "waiting-task").unwrap();
         assert_eq!(task.status, "open");
+    }
+
+    #[test]
+    fn shutdown_does_not_delete_database_in_status_dir() {
+        let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
+
+        // Place the database *inside* the status directory.
+        let db_path = status_dir.path().join("kbtz.db");
+        let conn = kbtz::db::open(db_path.to_str().unwrap()).unwrap();
+        kbtz::db::init(&conn).unwrap();
+        assert!(db_path.exists(), "database should exist before shutdown");
+
+        // Create WAL and SHM files alongside the database (SQLite would do this).
+        let wal_path = status_dir.path().join("kbtz.db-wal");
+        std::fs::write(&wal_path, b"fake wal").unwrap();
+        let shm_path = status_dir.path().join("kbtz.db-shm");
+        std::fs::write(&shm_path, b"fake shm").unwrap();
+
+        // Create session files that SHOULD be cleaned up.
+        let status_file = status_dir.path().join("ws-1");
+        std::fs::write(&status_file, b"active").unwrap();
+        let sock_file = status_dir.path().join("ws-1.sock");
+        std::fs::write(&sock_file, b"").unwrap();
+
+        // Create an unrelated file that must NOT be cleaned up.
+        let unrelated = status_dir.path().join("something-else.txt");
+        std::fs::write(&unrelated, b"important").unwrap();
+
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(StubBackend));
+        let mut app = App {
+            db_path: db_path.to_str().unwrap().to_string(),
+            conn,
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backends,
+            default_backend: "claude".to_string(),
+            spawner: Box::new(StubSpawner),
+            persistent_sessions: false,
+            default_directory: std::env::current_dir().unwrap(),
+            toplevel: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
+            tree_dirty: false,
+            notes_panel: None,
+        };
+
+        app.shutdown();
+
+        assert!(db_path.exists(), "database must survive shutdown");
+        assert!(wal_path.exists(), "WAL file must survive shutdown");
+        assert!(shm_path.exists(), "SHM file must survive shutdown");
+        assert!(unrelated.exists(), "unrelated files must survive shutdown");
+        assert!(
+            !status_file.exists(),
+            "session status file should be cleaned up"
+        );
+        assert!(
+            !sock_file.exists(),
+            "session socket file should be cleaned up"
+        );
     }
 }

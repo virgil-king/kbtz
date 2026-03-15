@@ -87,7 +87,7 @@ impl Orchestrator {
     fn next_free_slot(&self) -> usize {
         let mut slot = 0;
         loop {
-            let sid = format!("ws/{slot}");
+            let sid = format!("{}{slot}", paths::SESSION_ID_PREFIX);
             if !self.windows.contains_key(&sid) {
                 return slot;
             }
@@ -223,7 +223,7 @@ impl Orchestrator {
 
     fn spawn_one(&mut self) -> Result<()> {
         let slot = self.next_free_slot();
-        let session_id = format!("ws/{slot}");
+        let session_id = format!("{}{slot}", paths::SESSION_ID_PREFIX);
 
         let task_name =
             ops::claim_next_task(&self.conn, &session_id, self.prefer.as_deref(), None)?
