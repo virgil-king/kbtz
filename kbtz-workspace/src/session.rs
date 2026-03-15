@@ -214,10 +214,7 @@ impl Passthrough {
     pub(crate) fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        self.render_screen_positioned(&mut out);
-        let _ = out.flush();
+        kbtz_workspace::with_sync_stdout(|out| self.render_screen_positioned(out));
 
         self.active = true;
     }
@@ -356,10 +353,7 @@ impl Passthrough {
     pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_screen = None;
 
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        self.render_screen_positioned(&mut out);
-        let _ = out.flush();
+        kbtz_workspace::with_sync_stdout(|out| self.render_screen_positioned(out));
 
         self.active = true;
     }
@@ -410,7 +404,6 @@ impl Passthrough {
             let _ = out.write_all(&row_bytes);
         }
         let _ = write!(out, "\x1b[0m");
-        let _ = out.flush();
 
         clamped
     }
@@ -538,13 +531,13 @@ impl SessionHandle for Session {
     }
 
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        Ok(self
+        let mut pt = self
             .passthrough
             .lock()
-            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?
-            .render_scrollback(&mut out, offset, cols))
+            .map_err(|_| anyhow::anyhow!("passthrough mutex poisoned"))?;
+        Ok(kbtz_workspace::with_sync_stdout(|out| {
+            pt.render_scrollback(out, offset, cols)
+        }))
     }
 
     fn scrollback_available(&self) -> Result<usize> {

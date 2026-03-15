@@ -1,9 +1,27 @@
 pub mod prompt;
 pub mod protocol;
 
+use std::io::{BufWriter, StdoutLock, Write};
+
 /// Max scrollback rows retained per session for the scroll-back viewer.
 /// Shared between the workspace (session.rs) and the shepherd.
 pub const SCROLLBACK_ROWS: usize = 10_000;
+
+/// Run `f` inside a buffered, synchronized stdout update.
+///
+/// Wraps stdout in a `BufWriter` so all writes coalesce into one flush,
+/// and brackets the output with DEC private mode 2026 (synchronized
+/// update) so terminals that support it hold painting until the frame
+/// is complete.  Terminals that don't recognize the sequence ignore it.
+pub fn with_sync_stdout<T>(f: impl FnOnce(&mut BufWriter<StdoutLock<'_>>) -> T) -> T {
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    let _ = out.write_all(b"\x1b[?2026h");
+    let result = f(&mut out);
+    let _ = out.write_all(b"\x1b[?2026l");
+    let _ = out.flush();
+    result
+}
 
 /// Resize both the main and alternate screen grids.  The vt100 crate's
 /// `set_size()` only resizes the active screen; a terminal has one
