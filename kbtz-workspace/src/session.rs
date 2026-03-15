@@ -216,7 +216,9 @@ impl Passthrough {
 
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
+        let _ = out.write_all(b"\x1b[?2026h"); // begin synchronized update
         self.render_screen_positioned(&mut out);
+        let _ = out.write_all(b"\x1b[?2026l"); // end synchronized update
         let _ = out.flush();
 
         self.active = true;
@@ -358,7 +360,9 @@ impl Passthrough {
 
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
+        let _ = out.write_all(b"\x1b[?2026h"); // begin synchronized update
         self.render_screen_positioned(&mut out);
+        let _ = out.write_all(b"\x1b[?2026l"); // end synchronized update
         let _ = out.flush();
 
         self.active = true;
@@ -405,11 +409,13 @@ impl Passthrough {
         let clamped = offset.min(max);
         screen.set_scrollback(clamped);
 
+        let _ = out.write_all(b"\x1b[?2026h"); // begin synchronized update
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
             let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
             let _ = out.write_all(&row_bytes);
         }
         let _ = write!(out, "\x1b[0m");
+        let _ = out.write_all(b"\x1b[?2026l"); // end synchronized update
         let _ = out.flush();
 
         clamped
