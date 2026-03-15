@@ -163,9 +163,15 @@ impl SessionSpawner for ShepherdSpawner {
         // Connect to the shepherd, passing the Child handle so the
         // workspace can reap it and read its exit code later.
         ShepherdSession::connect(
-            &socket_path, &pid_path, task_name, session_id, rows, cols, Some(child),
+            &socket_path,
+            &pid_path,
+            task_name,
+            session_id,
+            rows,
+            cols,
+            Some(child),
         )
-            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+        .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }
 
