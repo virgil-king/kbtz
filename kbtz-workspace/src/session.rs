@@ -191,6 +191,20 @@ use kbtz_workspace::SCROLLBACK_ROWS;
 /// The VTE is kept up-to-date at all times for scroll mode, which
 /// accesses the main screen's scrollback by temporarily toggling
 /// DECRST/DECSET 47.
+///
+/// # Lock ordering
+///
+/// Two locks guard shared state: the per-session `passthrough` mutex
+/// (this struct) and the process-wide `stdout` lock.  The required
+/// acquisition order is:
+///
+///   **passthrough → stdout**
+///
+/// The reader thread follows this order (lock passthrough to process
+/// data, then lock stdout to forward it).  Every main-thread call site
+/// must do the same.  In particular, never hold a `StdoutLock` while
+/// calling a method that acquires the passthrough mutex — doing so
+/// inverts the order and creates a deadlock with the reader thread.
 pub struct Passthrough {
     pub(crate) active: bool,
     vte: vt100::Parser,
