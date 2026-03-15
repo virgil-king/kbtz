@@ -250,7 +250,7 @@ impl SessionHandle for ShepherdSession {
 
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
         let stdout = std::io::stdout();
-        let mut out = stdout.lock();
+        let mut out = std::io::BufWriter::new(stdout.lock());
         Ok(self
             .passthrough
             .lock()

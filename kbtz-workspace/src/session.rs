@@ -215,7 +215,7 @@ impl Passthrough {
         debug_assert!(!self.active, "start() called while already active");
 
         let stdout = std::io::stdout();
-        let mut out = stdout.lock();
+        let mut out = std::io::BufWriter::new(stdout.lock());
         self.render_screen_positioned(&mut out);
         let _ = out.flush();
 
@@ -357,7 +357,7 @@ impl Passthrough {
         self.scroll_screen = None;
 
         let stdout = std::io::stdout();
-        let mut out = stdout.lock();
+        let mut out = std::io::BufWriter::new(stdout.lock());
         self.render_screen_positioned(&mut out);
         let _ = out.flush();
 
@@ -539,7 +539,7 @@ impl SessionHandle for Session {
 
     fn render_scrollback(&self, offset: usize, cols: u16) -> Result<usize> {
         let stdout = std::io::stdout();
-        let mut out = stdout.lock();
+        let mut out = std::io::BufWriter::new(stdout.lock());
         Ok(self
             .passthrough
             .lock()
