@@ -251,7 +251,7 @@ impl Passthrough {
     }
 
     /// Render the VTE screen to `out` using explicit cursor positioning
-    /// per row (CSI row;1 H + CSI K + row content).  This never causes
+    /// per row (CSI row;1 H + row content + CSI 0 m + CSI K).  This never causes
     /// terminal scrolling, unlike `state_formatted()` / `state_diff()`
     /// which use sequential `\r\n` between rows.
     fn render_screen_positioned(&self, out: &mut impl Write) {

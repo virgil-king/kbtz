@@ -37,7 +37,7 @@ reader thread's job via raw byte forwarding.
 
 On mode transitions (entering passthrough, exiting scroll mode, resize/wake),
 `render_screen_positioned()` does a one-shot VTE-to-terminal sync using
-explicit cursor positioning per row (`CSI row;1 H` + `CSI K` + content).
+explicit cursor positioning per row (`CSI row;1 H` + content + `CSI 0 m` + `CSI K`).
 This never causes terminal scrolling.
 
 ## Alternate Screen Lifecycle
@@ -273,7 +273,7 @@ mode — it never renders child output.
 
 On transitions (entering passthrough, exiting scroll mode, resize/wake),
 `render_screen_positioned()` does a one-shot VTE-to-terminal sync using
-explicit cursor positioning per row (`CSI row;1 H` + `CSI K` + content).
+explicit cursor positioning per row (`CSI row;1 H` + content + `CSI 0 m` + `CSI K`).
 This never emits `\r\n` and is safe within scroll regions.
 
 **Why this is different from approach #1**: Approach #1 had `scrollback=0`
