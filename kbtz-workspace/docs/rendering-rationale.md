@@ -98,9 +98,11 @@ they emit `\r\n` between rows, which scrolls content within the scroll
 region that protects our status bar.
 
 Instead, each row is rendered with `CSI row;1 H` (move cursor to row)
-+ `CSI K` (erase line) + row content. Explicit cursor positioning
-never causes scrolling — it jumps directly to the target row. This is
-what tmux does.
++ row content + `CSI 0 m` (reset SGR) + `CSI K` (erase remainder).
+Content is overwritten in place — the erase only clears cells past the
+end of the row, avoiding the flicker caused by clearing before writing.
+Explicit cursor positioning never causes scrolling — it jumps directly
+to the target row. This is what tmux does.
 
 ## CSI 3 J interception
 

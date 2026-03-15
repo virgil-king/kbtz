@@ -258,10 +258,12 @@ impl Passthrough {
         let screen = self.vte.screen();
         let (_rows, cols) = screen.size();
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
-            // Reset SGR before erasing so \x1b[K doesn't inherit stale
-            // attributes (e.g. reverse video) from the previous row.
-            let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
+            // Position cursor then overwrite row content in place.
+            // Clear remainder *after* content to avoid the momentary
+            // blank flash caused by erasing before writing.
+            let _ = write!(out, "\x1b[{};1H", i + 1);
             let _ = out.write_all(&row_bytes);
+            let _ = write!(out, "\x1b[0m\x1b[K");
         }
         // Sync terminal state (SGR attributes, cursor position, cursor
         // visibility) to match the VTE — the VTE is the source of truth.
@@ -406,10 +408,10 @@ impl Passthrough {
         screen.set_scrollback(clamped);
 
         for (i, row_bytes) in screen.rows_formatted(0, cols).enumerate() {
-            let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
+            let _ = write!(out, "\x1b[{};1H", i + 1);
             let _ = out.write_all(&row_bytes);
+            let _ = write!(out, "\x1b[0m\x1b[K");
         }
-        let _ = write!(out, "\x1b[0m");
         let _ = out.flush();
 
         clamped
@@ -920,11 +922,12 @@ mod tests {
     }
 
     #[test]
-    fn render_scrollback_resets_attrs_before_each_row() {
+    fn render_scrollback_resets_attrs_after_each_row() {
         let mut pt = Passthrough::new(4, 80);
         // Write a line with reverse video, then enough lines to create
         // scrollback.  When rendering, the row with reverse video should
-        // NOT leak its attributes into the \x1b[K of the following row.
+        // NOT leak its attributes into the \x1b[K that clears the
+        // remainder of the line.
         pt.process(b"\x1b[7mreversed\x1b[0m\n");
         for i in 0..10 {
             pt.process(format!("normal {i}\n").as_bytes());
@@ -937,10 +940,10 @@ mod tests {
         pt.render_scrollback(&mut buf, total, 80);
         let rendered = String::from_utf8_lossy(&buf);
 
-        // Every \x1b[K (erase-in-line) must be preceded by \x1b[0m (reset)
-        // so the erase uses the default background, not stale attributes.
-        // The reset appears before the cursor-positioning sequence, so we
-        // check that \x1b[0m occurs between consecutive \x1b[K sequences.
+        // Every \x1b[K (erase-in-line) must be immediately preceded by
+        // \x1b[0m (reset) so the erase uses the default background, not
+        // stale attributes from the row content.  The reset+erase appears
+        // after each row's content.
         let el_positions: Vec<usize> = rendered.match_indices("\x1b[K").map(|(p, _)| p).collect();
         assert!(!el_positions.is_empty(), "expected at least one \\x1b[K");
         let mut prev_end = 0;
@@ -1195,10 +1198,10 @@ mod tests {
     }
 
     #[test]
-    fn render_screen_positioned_resets_attrs_before_each_row() {
+    fn render_screen_positioned_resets_attrs_after_each_row() {
         let mut pt = Passthrough::new(4, 80);
         // Write a line with reverse video.  When rendering, the reverse
-        // video must NOT leak into \x1b[K of the following rows.
+        // video must NOT leak into the \x1b[K that clears the remainder.
         pt.process(b"\x1b[7mreversed\x1b[0m\r\n");
         pt.process(b"normal line 1\r\n");
         pt.process(b"normal line 2\r\n");
@@ -1209,7 +1212,7 @@ mod tests {
         let rendered = String::from_utf8_lossy(&buf);
 
         // Every \x1b[K must be preceded by \x1b[0m so the erase uses
-        // default attributes, not stale attributes from a previous row.
+        // default attributes, not stale row content attributes.
         let el_positions: Vec<usize> = rendered.match_indices("\x1b[K").map(|(p, _)| p).collect();
         assert!(!el_positions.is_empty(), "expected at least one \\x1b[K");
         let mut prev_end = 0;

@@ -120,8 +120,8 @@ terminal.
 `render_scrollback(offset, cols)` uses the cloned `Screen`:
 - `screen.set_scrollback(offset)` shifts the viewport
 - `screen.rows_formatted(0, cols)` returns styled row data
-- Each row is written with `\x1b[0m` reset before `\x1b[K` to prevent
-  attribute leaking between rows
+- Row content is written first, then `\x1b[0m\x1b[K` clears the
+  remainder — overwriting in place avoids flicker from clearing first
 
 ## UX Requirements
 
