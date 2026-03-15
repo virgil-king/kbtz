@@ -196,6 +196,12 @@ pub struct Passthrough {
     vte: vt100::Parser,
     /// Cloned snapshot of the main screen, captured on scroll mode entry.
     scroll_screen: Option<vt100::Screen>,
+    /// Previously rendered row content for diff-based VTE rendering.
+    /// Each entry is the `rows_formatted` output for that row index.
+    prev_rows: Vec<Vec<u8>>,
+    /// Previously emitted cursor/attribute sync bytes.  Compared to
+    /// avoid redundant writes when nothing changed.
+    prev_sync: Vec<u8>,
 }
 
 impl Passthrough {
@@ -204,22 +210,31 @@ impl Passthrough {
             active: false,
             vte: vt100::Parser::new(rows, cols, SCROLLBACK_ROWS),
             scroll_screen: None,
+            prev_rows: Vec::new(),
+            prev_sync: Vec::new(),
         }
     }
 
     /// Switch to passthrough mode.  Render the VTE's current screen
-    /// state using explicit cursor positioning (no `\r\n` that could
-    /// cause scrolling within a scroll region), restore input modes,
-    /// and set `active` for live raw byte forwarding.
+    /// state using explicit cursor positioning, restore input modes,
+    /// and set `active` for VTE-based rendering in the reader thread.
     pub(crate) fn start(&mut self) {
         debug_assert!(!self.active, "start() called while already active");
 
         kbtz_workspace::with_sync_stdout(|out| self.render_screen_positioned(out));
 
+        // Snapshot rendered state so the reader thread can diff against it.
+        let screen = self.vte.screen();
+        let (_, cols) = screen.size();
+        self.prev_rows = screen.rows_formatted(0, cols).collect();
+        self.prev_sync = screen.attributes_formatted();
+        self.prev_sync
+            .extend_from_slice(&screen.cursor_state_formatted());
+
         self.active = true;
     }
 
-    /// Stop passthrough: disable raw forwarding and reset input modes.
+    /// Stop passthrough: disable VTE rendering and reset input modes.
     pub(crate) fn stop(&mut self) {
         if !self.active {
             return;
@@ -266,6 +281,40 @@ impl Passthrough {
         let _ = out.write_all(&screen.cursor_state_formatted());
         let _ = out.write_all(&screen.input_mode_formatted());
         let _ = out.write_all(b"\x1b[?1000h\x1b[?1006h");
+    }
+
+    /// Compute an incremental update from the previously rendered state
+    /// to the current VTE screen.  Only changed rows are included, each
+    /// rendered with explicit cursor positioning (`CSI row;1 H`) to
+    /// avoid `\r\n`-based scrolling.  Returns an empty `Vec` when
+    /// nothing changed (no rows, no cursor/attribute movement).
+    ///
+    /// Updates `prev_rows` so the next call diffs against this render.
+    fn render_diff(&mut self) -> Vec<u8> {
+        let screen = self.vte.screen();
+        let (_, cols) = screen.size();
+        let current_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
+        let mut out = Vec::new();
+
+        for (i, row_bytes) in current_rows.iter().enumerate() {
+            if i >= self.prev_rows.len() || self.prev_rows[i] != *row_bytes {
+                let _ = write!(out, "\x1b[0m\x1b[{};1H\x1b[K", i + 1);
+                out.extend_from_slice(row_bytes);
+            }
+        }
+
+        self.prev_rows = current_rows;
+
+        // Sync cursor and attributes, but only if something changed
+        // (rows or cursor/attributes) to avoid redundant writes that
+        // can cause cursor flicker.
+        let mut sync = screen.attributes_formatted();
+        sync.extend_from_slice(&screen.cursor_state_formatted());
+        if !out.is_empty() || sync != self.prev_sync {
+            out.extend_from_slice(&sync);
+            self.prev_sync = sync;
+        }
+        out
     }
 
     pub(crate) fn process(&mut self, data: &[u8]) {
@@ -317,6 +366,9 @@ impl Passthrough {
 
     pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
         kbtz_workspace::resize_both_screens(&mut self.vte, rows, cols);
+        // Dimensions changed — force a full re-render on next diff.
+        self.prev_rows.clear();
+        self.prev_sync.clear();
     }
 
     /// Enter scroll mode: snapshot the main screen (with scrollback)
@@ -349,11 +401,19 @@ impl Passthrough {
     }
 
     /// Exit scroll mode: discard the snapshot, re-render the live
-    /// screen, and resume raw forwarding.
+    /// screen, and resume VTE-based rendering.
     pub(crate) fn exit_scroll_mode(&mut self) {
         self.scroll_screen = None;
 
         kbtz_workspace::with_sync_stdout(|out| self.render_screen_positioned(out));
+
+        // Reset diff state so the reader thread diffs from the fresh render.
+        let screen = self.vte.screen();
+        let (_, cols) = screen.size();
+        self.prev_rows = screen.rows_formatted(0, cols).collect();
+        self.prev_sync = screen.attributes_formatted();
+        self.prev_sync
+            .extend_from_slice(&screen.cursor_state_formatted());
 
         self.active = true;
     }
@@ -718,9 +778,16 @@ fn reader_thread(
                 pt.process(&buf[..n]);
 
                 if pt.active {
-                    let mut out = stdout.lock();
-                    let _ = out.write_all(&buf[..n]);
-                    let _ = out.flush();
+                    // Render from VTE state instead of forwarding raw
+                    // bytes.  This prevents child escape sequences
+                    // (e.g. \x1b[r, \x1b[2J) from corrupting the real
+                    // terminal's scroll region or erasing the status bar.
+                    let output = pt.render_diff();
+                    if !output.is_empty() {
+                        let mut out = stdout.lock();
+                        let _ = out.write_all(&output);
+                        let _ = out.flush();
+                    }
                 }
             }
         }
