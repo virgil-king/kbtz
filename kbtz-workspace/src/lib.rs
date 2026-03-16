@@ -83,9 +83,13 @@ pub fn build_restore_sequence(vte: &mut vt100::Parser) -> Vec<u8> {
     screen.set_scrollback(0);
 
     // Phase 2: Write visible rows 0..H-1 to create enough scroll
-    // pressure for the receiving VTE.  Without these, the first H-1
-    // scrollback lines remain on-screen instead of being pushed into
-    // scrollback, causing missing content when the user scrolls up.
+    // pressure for the receiving VTE.
+    //
+    // INVARIANT: N lines with \r\n to an H-row screen → N-H+1 scrollback
+    // rows (the first H-1 lines fill the screen without scrolling).
+    // Phase 1 writes total_scrollback lines.  We need total_scrollback
+    // scrollback rows, so we must write total_scrollback + H - 1 lines
+    // total.  These H-1 visible rows supply the difference.
     for row_bytes in screen
         .rows_formatted(0, cols)
         .take((rows as usize).saturating_sub(1))
@@ -282,5 +286,37 @@ mod tests {
                 "scrollback viewport at offset {i} mismatch"
             );
         }
+    }
+
+    /// Regression test at realistic terminal size.  The scrollback depth
+    /// bug (missing H-1 rows) was most visible at large screen heights
+    /// where H-1 is a significant number of lost rows.
+    #[test]
+    fn restore_sequence_realistic_size() {
+        let rows: u16 = 50;
+        let cols: u16 = 200;
+        let mut src = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        // Simulate a long session with varied content.
+        for i in 0..500 {
+            src.process(format!("output line {i}: some content here\r\n").as_bytes());
+        }
+        src.process(b"cursor here");
+
+        let src_scrollback = scrollback_depth(src.screen_mut());
+        assert!(
+            src_scrollback > (rows as usize),
+            "need more scrollback than screen height"
+        );
+
+        let restore = build_restore_sequence(&mut src);
+        let mut dst = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        dst.process(&restore);
+
+        assert_eq!(src.screen().contents(), dst.screen().contents());
+        assert_eq!(
+            scrollback_depth(dst.screen_mut()),
+            src_scrollback,
+            "scrollback depth must match at realistic terminal size"
+        );
     }
 }
