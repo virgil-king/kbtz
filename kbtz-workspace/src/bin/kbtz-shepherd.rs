@@ -392,25 +392,22 @@ fn run(
                             // Note: try_wait() reaps the exit status. We store
                             // it so the main loop's exit handler can use it
                             // instead of calling try_wait() again.
-                            match child.try_wait() {
-                                Ok(Some(status)) => {
-                                    // Child is dead — drop the connection
-                                    // without sending InitialState, then
-                                    // clean up and exit.
-                                    drop(handshake_stream);
-                                    unsafe {
-                                        let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
-                                        libc::fcntl(
-                                            pty_master_fd,
-                                            libc::F_SETFL,
-                                            flags | libc::O_NONBLOCK,
-                                        );
-                                    }
-                                    drain_pty(&mut pty_reader, &mut vte, &mut client);
-                                    cleanup(socket_path, pid_file);
-                                    std::process::exit(status.exit_code() as i32);
+                            if let Ok(Some(status)) = child.try_wait() {
+                                // Child is dead — drop the connection
+                                // without sending InitialState, then
+                                // clean up and exit.
+                                drop(handshake_stream);
+                                unsafe {
+                                    let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
+                                    libc::fcntl(
+                                        pty_master_fd,
+                                        libc::F_SETFL,
+                                        flags | libc::O_NONBLOCK,
+                                    );
                                 }
-                                _ => {} // still running, proceed with handshake
+                                drain_pty(&mut pty_reader, &mut vte, &mut client);
+                                cleanup(socket_path, pid_file);
+                                std::process::exit(status.exit_code() as i32);
                             }
 
                             let restore = build_restore_sequence(&mut vte);
