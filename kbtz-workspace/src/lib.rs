@@ -86,7 +86,10 @@ pub fn build_restore_sequence(vte: &mut vt100::Parser) -> Vec<u8> {
     // pressure for the receiving VTE.  Without these, the first H-1
     // scrollback lines remain on-screen instead of being pushed into
     // scrollback, causing missing content when the user scrolls up.
-    for row_bytes in screen.rows_formatted(0, cols).take((rows as usize).saturating_sub(1)) {
+    for row_bytes in screen
+        .rows_formatted(0, cols)
+        .take((rows as usize).saturating_sub(1))
+    {
         restore.extend_from_slice(&row_bytes);
         restore.extend_from_slice(b"\r\n");
     }
@@ -257,7 +260,10 @@ mod tests {
         src.process(b"visible");
 
         let src_viewports = scrollback_viewports(&mut src);
-        assert!(src_viewports.len() > 5, "need meaningful scrollback for test");
+        assert!(
+            src_viewports.len() > 5,
+            "need meaningful scrollback for test"
+        );
 
         let restore = build_restore_sequence(&mut src);
         let mut dst = vt100::Parser::new(5, 40, SCROLLBACK_ROWS);
