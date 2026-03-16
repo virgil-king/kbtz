@@ -147,9 +147,21 @@ impl SessionSpawner for ShepherdSpawner {
                 shepherd_bin.display()
             )
         })?;
+        let shepherd_os_pid = child.id();
+        kbtz::debug_log::log(&format!(
+            "spawn({session_id}): shepherd process started, os_pid={shepherd_os_pid}"
+        ));
 
         // Wait for socket to appear (shepherd needs a moment to start)
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let socket_preexisted = socket_path.exists();
+        if socket_preexisted {
+            kbtz::debug_log::log(&format!(
+                "spawn({session_id}): WARNING socket already exists at {} before shepherd started",
+                socket_path.display()
+            ));
+        }
+        let wait_start = Instant::now();
+        let deadline = wait_start + Duration::from_secs(5);
         while !socket_path.exists() {
             if Instant::now() >= deadline {
                 bail!(
@@ -159,6 +171,10 @@ impl SessionSpawner for ShepherdSpawner {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        let wait_ms = wait_start.elapsed().as_millis();
+        kbtz::debug_log::log(&format!(
+            "spawn({session_id}): socket appeared after {wait_ms}ms (preexisted={socket_preexisted})"
+        ));
 
         // Connect to the shepherd, passing the Child handle so the
         // workspace can reap it and read its exit code later.
@@ -171,6 +187,12 @@ impl SessionSpawner for ShepherdSpawner {
             cols,
             Some(child),
         )
+        .map_err(|e| {
+            kbtz::debug_log::log(&format!(
+                "spawn({session_id}): handshake FAILED (os_pid={shepherd_os_pid}): {e:#}"
+            ));
+            e
+        })
         .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }

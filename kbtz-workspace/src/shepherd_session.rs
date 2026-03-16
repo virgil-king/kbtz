@@ -52,9 +52,15 @@ impl ShepherdSession {
             .ok()
             .and_then(|s| s.trim().parse().ok());
 
+        kbtz::debug_log::log(&format!(
+            "connect({session_id}): shepherd_pid={shepherd_pid} child_pid={child_pid:?} socket={}",
+            socket_path.display()
+        ));
+
         let stream = UnixStream::connect(socket_path).with_context(|| {
             format!("failed to connect to shepherd at {}", socket_path.display())
         })?;
+        kbtz::debug_log::log(&format!("connect({session_id}): socket connected"));
         let read_stream = stream
             .try_clone()
             .context("failed to clone Unix stream for reader")?;
@@ -78,6 +84,7 @@ impl ShepherdSession {
             )
             .context("failed to send initial resize to shepherd")?;
         }
+        kbtz::debug_log::log(&format!("connect({session_id}): sent Resize({pty_rows}x{cols})"));
 
         let mut reader = BufReader::new(read_stream);
 
@@ -86,7 +93,13 @@ impl ShepherdSession {
         let first_msg = protocol::read_message(&mut reader)
             .context("failed to read initial message from shepherd")?;
         let initial_data = match first_msg {
-            Some(Message::InitialState(data)) => data,
+            Some(Message::InitialState(data)) => {
+                kbtz::debug_log::log(&format!(
+                    "connect({session_id}): received InitialState ({} bytes)",
+                    data.len()
+                ));
+                data
+            }
             Some(other) => bail!(
                 "expected InitialState from shepherd, got {:?}",
                 std::mem::discriminant(&other)
