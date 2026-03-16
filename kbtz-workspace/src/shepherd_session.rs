@@ -57,13 +57,15 @@ impl ShepherdSession {
 
         let pty_rows = rows.saturating_sub(1);
 
-        // Size-first handshake: send Resize before reading InitialState
-        // so the shepherd builds the restore sequence at our terminal size.
+        // Handshake: version byte → Resize → InitialState.
+        // The version byte lets the shepherd reject incompatible clients.
         let writer = Mutex::new(BufWriter::new(write_stream));
         {
             let mut w = writer
                 .lock()
                 .expect("writer lock poisoned during construction");
+            protocol::write_version(&mut *w)
+                .context("failed to send protocol version to shepherd")?;
             protocol::write_message(
                 &mut *w,
                 &Message::Resize {
