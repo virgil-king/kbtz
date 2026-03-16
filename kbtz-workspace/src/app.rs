@@ -686,10 +686,9 @@ impl App {
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     ///
     /// The Claude session file is deleted when the task is done, or when
-    /// the child exited with a non-zero code (indicating a crash during
-    /// init that never established a conversation for the stored UUID).
-    /// For paused, blocked, and other non-done tasks with a clean exit,
-    /// the file is preserved for future resume.
+    /// the child crashed during init (non-zero exit without a prior
+    /// graceful-exit request). For paused, blocked, and other non-done
+    /// tasks the file is preserved for future resume.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(mut ts) = self.sessions.remove(session_id) {
             let task_name = ts.handle.task_name().to_string();
@@ -723,12 +722,15 @@ impl App {
             }
             cleanup_session_files(&self.status_dir, session_id);
 
-            // Check if the shepherd exited with a non-zero code (forwarded
-            // from the child). A non-zero exit means the agent crashed
-            // during init and never established a conversation for this
-            // UUID. Preserving the session file would cause an infinite
-            // resume-crash loop.
-            let child_failed = ts.handle.exit_code().is_some_and(|code| code != 0);
+            // Only treat a non-zero exit as a crash if we never requested
+            // the session to stop. When we send SIGTERM for blocking/done/
+            // paused reaps, the child may be killed by the signal (exit
+            // code 1 via portable_pty) even though the conversation is
+            // valid and resumable. Only unsolicited non-zero exits indicate
+            // a crash during init that would cause a resume-crash loop.
+            let was_requested = ts.handle.stopping_since().is_some();
+            let child_failed =
+                !was_requested && ts.handle.exit_code().is_some_and(|code| code != 0);
 
             if task_done || child_failed {
                 if child_failed {
@@ -1790,6 +1792,48 @@ mod tests {
         assert!(
             !session_file.exists(),
             "session file should be deleted when child exited with non-zero code"
+        );
+    }
+
+    #[test]
+    fn remove_session_preserves_file_when_stopped_with_nonzero_exit() {
+        // When a session is intentionally stopped (e.g. task blocked),
+        // the child may exit non-zero (signal kill via portable_pty).
+        // The session file should still be preserved for resume.
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        let mut stub = StubSession::new("task-a", "ws/1", false);
+        stub.exit_code = Some(1);
+        stub.mark_stopping(); // session was intentionally stopped
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(stub),
+                agent_type: "claude".to_string(),
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            session_file.exists(),
+            "session file should be preserved when intentionally stopped, \
+             even with non-zero exit code"
         );
     }
 
