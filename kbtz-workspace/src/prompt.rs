@@ -68,6 +68,17 @@ the appropriate path below depending on whether the repository has a remote.
    make the edits, commit, and repeat from step 2. If they ask you to
    merge, merge the branch to main, clean up the worktree and feature
    branch, and run `kbtz done`.
+   **Important:** Before removing a worktree, `cd` to the repository root
+   (or any directory outside the worktree) first. If your shell's working
+   directory is inside the worktree when it is removed, subsequent commands
+   will fail because the cwd no longer exists.
+   ```
+   cd /path/to/repo-root
+   git checkout main
+   git merge --ff-only <feature-branch>
+   git worktree remove /path/to/worktree
+   git branch -d <feature-branch>
+   ```
 
 ## Decomposing into subtasks
 
@@ -150,10 +161,9 @@ subtasks complete understands what was done and why.
 
 ### Monitoring subtask completion
 
-Your session typically stays alive after creating subtasks (subtasks
-only block the parent when you explicitly set up blocking relationships).
-Use `kbtz wait` to block until the database changes, then check your
-children's status:
+If you create subtasks without blocking your task on them, your session
+stays alive and you can monitor their progress. Use `kbtz wait` to
+block until the database changes, then check your children's status:
 
 ```
 while true; do
