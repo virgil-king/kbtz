@@ -310,11 +310,13 @@ impl TreeView {
     /// Toggle visibility of done tasks.
     pub fn toggle_show_done(&mut self) {
         self.show_done = !self.show_done;
+        *self.list_state.offset_mut() = 0;
     }
 
     /// Toggle visibility of paused tasks.
     pub fn toggle_show_paused(&mut self) {
         self.show_paused = !self.show_paused;
+        *self.list_state.offset_mut() = 0;
     }
 
     /// Returns a label describing the current filter state, or `None` if
@@ -1484,6 +1486,14 @@ mod tests {
     }
 
     #[test]
+    fn toggle_show_done_resets_scroll_offset() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        *tv.list_state.offset_mut() = 50;
+        tv.toggle_show_done();
+        assert_eq!(tv.list_state.offset(), 0);
+    }
+
+    #[test]
     fn handle_key_p_toggles_show_paused() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
         assert!(!tv.show_paused);
@@ -1495,6 +1505,14 @@ mod tests {
         let key = KeyEvent::from(KeyCode::Char('P'));
         assert!(matches!(tv.handle_key(key), TreeKeyAction::ToggleShowAll));
         assert!(!tv.show_paused);
+    }
+
+    #[test]
+    fn toggle_show_paused_resets_scroll_offset() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        *tv.list_state.offset_mut() = 50;
+        tv.toggle_show_paused();
+        assert_eq!(tv.list_state.offset(), 0);
     }
 
     #[test]
