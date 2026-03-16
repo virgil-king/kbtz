@@ -316,7 +316,7 @@ impl Passthrough {
     /// nothing changed (no rows, no cursor/attribute movement).
     ///
     /// Updates `prev_rows` so the next call diffs against this render.
-    fn render_diff(&mut self) -> Vec<u8> {
+    pub(crate) fn render_diff(&mut self) -> Vec<u8> {
         let screen = self.vte.screen();
         let (_, cols) = screen.size();
         let current_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
