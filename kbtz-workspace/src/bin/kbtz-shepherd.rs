@@ -383,6 +383,33 @@ fn run(
                             });
                             resize_both_screens(&mut vte, new_rows, new_cols);
 
+                            // Check if the child has already exited before
+                            // completing the handshake. Without this, a child
+                            // that crashes during init would still get a
+                            // successful handshake, causing the workspace to
+                            // persist a session UUID for a dead conversation.
+                            //
+                            // Note: try_wait() reaps the exit status. We store
+                            // it so the main loop's exit handler can use it
+                            // instead of calling try_wait() again.
+                            if let Ok(Some(status)) = child.try_wait() {
+                                // Child is dead — drop the connection
+                                // without sending InitialState, then
+                                // clean up and exit.
+                                drop(handshake_stream);
+                                unsafe {
+                                    let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
+                                    libc::fcntl(
+                                        pty_master_fd,
+                                        libc::F_SETFL,
+                                        flags | libc::O_NONBLOCK,
+                                    );
+                                }
+                                drain_pty(&mut pty_reader, &mut vte, &mut client);
+                                cleanup(socket_path, pid_file);
+                                std::process::exit(status.exit_code() as i32);
+                            }
+
                             let restore = build_restore_sequence(&mut vte);
                             if protocol::write_message(
                                 &mut handshake_stream,
