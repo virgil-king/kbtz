@@ -78,10 +78,25 @@ impl ShepherdSession {
 
         // Read InitialState — shepherd builds this from structured VTE
         // data (scrollback rows + state_formatted), not raw byte replay.
+        // The InitialState also carries the shepherd's session_id so we can
+        // verify we connected to the right process (prevents PID-reuse races).
         let first_msg = protocol::read_message(&mut reader)
             .context("failed to read initial message from shepherd")?;
         let initial_data = match first_msg {
-            Some(Message::InitialState(data)) => data,
+            Some(Message::InitialState {
+                session_id: shepherd_sid,
+                data,
+            }) => {
+                if !shepherd_sid.is_empty() && shepherd_sid != session_id {
+                    bail!(
+                        "session_id mismatch: expected {:?}, shepherd reported {:?} \
+                         (PID was likely reused by a different session)",
+                        session_id,
+                        shepherd_sid,
+                    );
+                }
+                data
+            }
             Some(other) => bail!(
                 "expected InitialState from shepherd, got {:?}",
                 std::mem::discriminant(&other)
@@ -347,7 +362,10 @@ mod tests {
         let mut server_writer = BufWriter::new(server_stream.try_clone().unwrap());
         protocol::write_message(
             &mut server_writer,
-            &Message::InitialState(b"hello".to_vec()),
+            &Message::InitialState {
+                session_id: "test-session".to_string(),
+                data: b"hello".to_vec(),
+            },
         )
         .unwrap();
 
@@ -360,7 +378,7 @@ mod tests {
         // but in this test helper we skip that since there's no real shepherd).
         let first_msg = protocol::read_message(&mut reader).unwrap().unwrap();
         let initial_data = match first_msg {
-            Message::InitialState(data) => data,
+            Message::InitialState { data, .. } => data,
             other => panic!("expected InitialState, got {:?}", other),
         };
 

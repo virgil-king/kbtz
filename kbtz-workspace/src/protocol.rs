@@ -11,7 +11,9 @@ pub enum Message {
     /// Terminal resize (workspace -> shepherd). Type 0x03.
     Resize { rows: u16, cols: u16 },
     /// Full output buffer for state recovery on connect (shepherd -> workspace). Type 0x04.
-    InitialState(Vec<u8>),
+    /// Includes the shepherd's session ID so the workspace can verify it connected
+    /// to the right process (prevents PID-reuse misconnection).
+    InitialState { session_id: String, data: Vec<u8> },
     /// Request graceful shutdown (workspace -> shepherd). Type 0x05.
     Shutdown,
 }
@@ -40,7 +42,20 @@ pub fn encode(msg: &Message) -> Vec<u8> {
             buf.extend_from_slice(&cols.to_be_bytes());
             return buf;
         }
-        Message::InitialState(data) => (TYPE_INITIAL_STATE, data.as_slice()),
+        Message::InitialState { session_id, data } => {
+            // Wire format: [type] [2-byte session_id len] [session_id bytes] [data bytes]
+            let sid_bytes = session_id.as_bytes();
+            let sid_len = sid_bytes.len() as u16;
+            let payload_len = 2 + sid_bytes.len() + data.len();
+            let length: u32 = 1 + payload_len as u32;
+            let mut buf = Vec::with_capacity(4 + length as usize);
+            buf.extend_from_slice(&length.to_be_bytes());
+            buf.push(TYPE_INITIAL_STATE);
+            buf.extend_from_slice(&sid_len.to_be_bytes());
+            buf.extend_from_slice(sid_bytes);
+            buf.extend_from_slice(data);
+            return buf;
+        }
         Message::Shutdown => (TYPE_SHUTDOWN, [].as_slice()),
     };
 
@@ -75,7 +90,26 @@ pub fn decode(buf: &[u8]) -> Result<Message> {
             let cols = u16::from_be_bytes([payload[2], payload[3]]);
             Ok(Message::Resize { rows, cols })
         }
-        TYPE_INITIAL_STATE => Ok(Message::InitialState(payload.to_vec())),
+        TYPE_INITIAL_STATE => {
+            if payload.len() < 2 {
+                bail!(
+                    "InitialState payload too short: expected at least 2 bytes, got {}",
+                    payload.len()
+                );
+            }
+            let sid_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+            if payload.len() < 2 + sid_len {
+                bail!(
+                    "InitialState payload too short for session_id: need {} bytes, got {}",
+                    2 + sid_len,
+                    payload.len()
+                );
+            }
+            let session_id = String::from_utf8(payload[2..2 + sid_len].to_vec())
+                .context("invalid UTF-8 in InitialState session_id")?;
+            let data = payload[2 + sid_len..].to_vec();
+            Ok(Message::InitialState { session_id, data })
+        }
         TYPE_SHUTDOWN => Ok(Message::Shutdown),
         _ => bail!("unknown message type: 0x{:02x}", type_byte),
     }
@@ -147,10 +181,31 @@ mod tests {
     #[test]
     fn roundtrip_initial_state() {
         let data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
-        let msg = Message::InitialState(data);
+        let msg = Message::InitialState {
+            session_id: "ws/42".to_string(),
+            data,
+        };
         let encoded = encode(&msg);
         let decoded = decode(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn roundtrip_initial_state_empty_session_id() {
+        let msg = Message::InitialState {
+            session_id: String::new(),
+            data: b"restore".to_vec(),
+        };
+        let encoded = encode(&msg);
+        let decoded = decode(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn decode_initial_state_truncated_fails() {
+        // Only type byte, no payload for session_id length
+        let result = decode(&[TYPE_INITIAL_STATE]);
+        assert!(result.is_err());
     }
 
     #[test]

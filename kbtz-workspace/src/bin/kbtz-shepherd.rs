@@ -252,6 +252,9 @@ fn run(
     // store, like tmux's server-side pane history.  No raw byte buffer.
     let mut vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
 
+    // Read session ID from environment for handshake validation.
+    let session_id = std::env::var("KBTZ_SESSION_ID").unwrap_or_default();
+
     let mut client: Option<ClientConn> = None;
     let mut shutdown_requested = false;
     let mut read_buf = [0u8; 8192];
@@ -384,7 +387,10 @@ fn run(
                             let restore = build_restore_sequence(&mut vte);
                             if protocol::write_message(
                                 &mut handshake_stream,
-                                &Message::InitialState(restore),
+                                &Message::InitialState {
+                                    session_id: session_id.clone(),
+                                    data: restore,
+                                },
                             )
                             .is_err()
                             {
