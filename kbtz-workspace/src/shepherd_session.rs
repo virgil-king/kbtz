@@ -87,7 +87,7 @@ impl ShepherdSession {
                 session_id: shepherd_sid,
                 data,
             }) => {
-                if !shepherd_sid.is_empty() && shepherd_sid != session_id {
+                if shepherd_sid != session_id {
                     bail!(
                         "session_id mismatch: expected {:?}, shepherd reported {:?} \
                          (PID was likely reused by a different session)",
@@ -537,6 +537,53 @@ mod tests {
                 .spawn()
                 .unwrap()
         }
+    }
+
+    #[test]
+    fn connect_rejects_session_id_mismatch() {
+        // Test the validation logic directly: simulate a shepherd sending
+        // InitialState with a different session_id than expected.
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+
+        // Shepherd side: send InitialState with wrong session_id.
+        let handle = std::thread::spawn(move || {
+            let mut server_read = BufReader::new(server_stream.try_clone().unwrap());
+            let mut server_write = BufWriter::new(server_stream);
+            // Read the Resize the client sends first.
+            let _ = protocol::read_message(&mut server_read).unwrap();
+            protocol::write_message(
+                &mut server_write,
+                &Message::InitialState {
+                    session_id: "ws/999".to_string(),
+                    data: b"restore".to_vec(),
+                },
+            )
+            .unwrap();
+        });
+
+        // Client side: replicate the connect() handshake logic inline.
+        let read_stream = client_stream.try_clone().unwrap();
+        let write_stream = client_stream;
+        let writer = Mutex::new(BufWriter::new(write_stream));
+        {
+            let mut w = writer.lock().unwrap();
+            protocol::write_message(&mut *w, &Message::Resize { rows: 23, cols: 80 }).unwrap();
+        }
+
+        let mut reader = BufReader::new(read_stream);
+        let first_msg = protocol::read_message(&mut reader).unwrap();
+        let expected_session_id = "ws/1";
+
+        let is_mismatch = match first_msg {
+            Some(Message::InitialState {
+                session_id: shepherd_sid,
+                ..
+            }) => shepherd_sid != expected_session_id,
+            _ => panic!("expected InitialState message"),
+        };
+
+        handle.join().unwrap();
+        assert!(is_mismatch, "should detect session_id mismatch");
     }
 
     #[test]

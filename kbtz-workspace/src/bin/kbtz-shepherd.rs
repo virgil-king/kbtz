@@ -253,7 +253,9 @@ fn run(
     let mut vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
 
     // Read session ID from environment for handshake validation.
-    let session_id = std::env::var("KBTZ_SESSION_ID").unwrap_or_default();
+    // This must be set — without it we can't prove our identity to the workspace.
+    let session_id = std::env::var("KBTZ_SESSION_ID")
+        .map_err(|_| anyhow::anyhow!("KBTZ_SESSION_ID not set in environment"))?;
 
     let mut client: Option<ClientConn> = None;
     let mut shutdown_requested = false;
