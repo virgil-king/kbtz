@@ -686,10 +686,9 @@ impl App {
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     ///
     /// The Claude session file is deleted when the task is done, or when
-    /// the child exited with a non-zero code (indicating a crash during
-    /// init that never established a conversation for the stored UUID).
-    /// For paused, blocked, and other non-done tasks with a clean exit,
-    /// the file is preserved for future resume.
+    /// the child crashed during init (non-zero exit without a prior
+    /// graceful-exit request). For paused, blocked, and other non-done
+    /// tasks the file is preserved for future resume.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(mut ts) = self.sessions.remove(session_id) {
             let task_name = ts.handle.task_name().to_string();
@@ -723,12 +722,15 @@ impl App {
             }
             cleanup_session_files(&self.status_dir, session_id);
 
-            // Check if the shepherd exited with a non-zero code (forwarded
-            // from the child). A non-zero exit means the agent crashed
-            // during init and never established a conversation for this
-            // UUID. Preserving the session file would cause an infinite
-            // resume-crash loop.
-            let child_failed = ts.handle.exit_code().is_some_and(|code| code != 0);
+            // Only treat a non-zero exit as a crash if we never requested
+            // the session to stop. When we send SIGTERM for blocking/done/
+            // paused reaps, the child may be killed by the signal (exit
+            // code 1 via portable_pty) even though the conversation is
+            // valid and resumable. Only unsolicited non-zero exits indicate
+            // a crash during init that would cause a resume-crash loop.
+            let was_requested = ts.handle.stopping_since().is_some();
+            let child_failed =
+                !was_requested && ts.handle.exit_code().is_some_and(|code| code != 0);
 
             if task_done || child_failed {
                 if child_failed {
@@ -1794,6 +1796,48 @@ mod tests {
     }
 
     #[test]
+    fn remove_session_preserves_file_when_stopped_with_nonzero_exit() {
+        // When a session is intentionally stopped (e.g. task blocked),
+        // the child may exit non-zero (signal kill via portable_pty).
+        // The session file should still be preserved for resume.
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        let mut stub = StubSession::new("task-a", "ws/1", false);
+        stub.exit_code = Some(1);
+        stub.mark_stopping(); // session was intentionally stopped
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(stub),
+                agent_type: "claude".to_string(),
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            session_file.exists(),
+            "session file should be preserved when intentionally stopped, \
+             even with non-zero exit code"
+        );
+    }
+
+    #[test]
     fn remove_session_preserves_file_on_zero_exit() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
@@ -2397,6 +2441,125 @@ mod tests {
         assert!(
             !sock_file.exists(),
             "session socket file should be cleaned up"
+        );
+    }
+
+    /// When reconnect_sessions encounters a dead shepherd, the orchestrator
+    /// files should be cleaned up but the claude-sessions/<task> file must
+    /// be preserved so the next spawn can resume the conversation.
+    #[test]
+    fn reconnect_dead_shepherd_preserves_session_file() {
+        let (mut app, _dir) = test_app();
+
+        let task_name = "task-a";
+        let session_id = "ws/1";
+        let uuid = "test-uuid-dead-shepherd";
+
+        // Create task and claim it as the session.
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: task_name,
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, task_name, session_id).unwrap();
+
+        // Write the claude session file (UUID for resume).
+        let session_file = app.claude_sessions_dir.join(task_name);
+        std::fs::write(&session_file, uuid).unwrap();
+
+        // Create orchestrator files simulating a previously running shepherd.
+        let filename = session_id_to_filename(session_id);
+        let sock_path = app.status_dir.join(format!("{filename}.sock"));
+        let pid_path = app.status_dir.join(format!("{filename}.pid"));
+        std::fs::write(&sock_path, "").unwrap();
+        // Use an impossible PID so the alive check fails (dead shepherd).
+        std::fs::write(&pid_path, "999999999").unwrap();
+
+        app.reconnect_sessions().unwrap();
+
+        // Claude session file must be preserved for future resume.
+        assert!(
+            session_file.exists(),
+            "claude session file must survive reconnect failure (dead shepherd)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&session_file).unwrap(),
+            uuid,
+            "session UUID must be intact"
+        );
+
+        // Orchestrator files should be cleaned up.
+        assert!(!sock_path.exists(), "stale socket should be removed");
+        assert!(!pid_path.exists(), "stale pid file should be removed");
+
+        // Task should be released (available for re-spawn).
+        let task = ops::get_task(&app.conn, task_name).unwrap();
+        assert_eq!(
+            task.status, "open",
+            "task should be released after reconnect failure"
+        );
+    }
+
+    /// When reconnect_sessions fails to connect to a shepherd (stale socket),
+    /// the claude-sessions/<task> file must be preserved for future resume.
+    #[test]
+    fn reconnect_stale_socket_preserves_session_file() {
+        let (mut app, _dir) = test_app();
+
+        let task_name = "task-a";
+        let session_id = "ws/1";
+        let uuid = "test-uuid-stale-socket";
+
+        // Create task and claim it.
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: task_name,
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, task_name, session_id).unwrap();
+
+        // Write the claude session file (UUID for resume).
+        let session_file = app.claude_sessions_dir.join(task_name);
+        std::fs::write(&session_file, uuid).unwrap();
+
+        // Create a .sock as a regular file (not a real socket) so connect fails.
+        // Use the current process PID so the alive check passes.
+        let filename = session_id_to_filename(session_id);
+        let sock_path = app.status_dir.join(format!("{filename}.sock"));
+        let pid_path = app.status_dir.join(format!("{filename}.pid"));
+        std::fs::write(&sock_path, "").unwrap();
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+        app.reconnect_sessions().unwrap();
+
+        // Claude session file must be preserved for future resume.
+        assert!(
+            session_file.exists(),
+            "claude session file must survive reconnect failure (stale socket)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&session_file).unwrap(),
+            uuid,
+            "session UUID must be intact"
+        );
+
+        // Orchestrator files should be cleaned up.
+        assert!(!sock_path.exists(), "stale socket should be removed");
+        assert!(!pid_path.exists(), "stale pid file should be removed");
+
+        // Task should be released.
+        let task = ops::get_task(&app.conn, task_name).unwrap();
+        assert_eq!(
+            task.status, "open",
+            "task should be released after reconnect failure"
         );
     }
 }
