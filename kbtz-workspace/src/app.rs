@@ -665,11 +665,13 @@ impl App {
 
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     ///
-    /// The Claude session file is deleted only when the task is done. For
-    /// paused, blocked, and other non-done tasks the file is preserved,
-    /// allowing future spawns to resume the conversation.
+    /// The Claude session file is deleted when the task is done, or when
+    /// the child exited with a non-zero code (indicating a crash during
+    /// init that never established a conversation for the stored UUID).
+    /// For paused, blocked, and other non-done tasks with a clean exit,
+    /// the file is preserved for future resume.
     fn remove_session(&mut self, session_id: &str) {
-        if let Some(ts) = self.sessions.remove(session_id) {
+        if let Some(mut ts) = self.sessions.remove(session_id) {
             let task_name = ts.handle.task_name().to_string();
             let sid = ts.handle.session_id().to_string();
             kbtz::debug_log::log(&format!(
@@ -694,9 +696,20 @@ impl App {
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
             let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.child-pid")));
 
-            // Delete session file only for done tasks; preserve for paused,
-            // blocked, and other active tasks so the next spawn can resume.
-            if task_done {
+            // Check if the shepherd exited with a non-zero code (forwarded
+            // from the child). A non-zero exit means the agent crashed
+            // during init and never established a conversation for this
+            // UUID. Preserving the session file would cause an infinite
+            // resume-crash loop.
+            let child_failed = ts.handle.exit_code().is_some_and(|code| code != 0);
+
+            if task_done || child_failed {
+                if child_failed {
+                    kbtz::debug_log::log(&format!(
+                        "remove_session: clearing session file for {task_name} \
+                         (child exited with non-zero code)"
+                    ));
+                }
                 let _ = std::fs::remove_file(self.claude_sessions_dir.join(&task_name));
             }
         }
@@ -757,6 +770,7 @@ impl App {
                         &session_id,
                         self.term.rows,
                         self.term.cols,
+                        None, // no Child handle for reconnected sessions
                     ) {
                         Ok(session) => {
                             // Resolve agent type from the task's agent field.
@@ -1033,6 +1047,7 @@ mod tests {
         status: SessionStatus,
         alive: bool,
         stopping_since: Option<Instant>,
+        exit_code: Option<i32>,
     }
 
     impl StubSession {
@@ -1043,6 +1058,7 @@ mod tests {
                 status: SessionStatus::Starting,
                 alive,
                 stopping_since: None,
+                exit_code: None,
             }
         }
     }
@@ -1109,6 +1125,9 @@ mod tests {
         }
         fn reader_alive(&self) -> bool {
             true
+        }
+        fn exit_code(&mut self) -> Option<i32> {
+            self.exit_code
         }
     }
 
@@ -1714,6 +1733,80 @@ mod tests {
         assert!(
             session_file.exists(),
             "session file should be preserved for paused task"
+        );
+    }
+
+    #[test]
+    fn remove_session_deletes_file_on_nonzero_exit() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        let mut stub = StubSession::new("task-a", "ws/1", false);
+        stub.exit_code = Some(1);
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(stub),
+                agent_type: "claude".to_string(),
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            !session_file.exists(),
+            "session file should be deleted when child exited with non-zero code"
+        );
+    }
+
+    #[test]
+    fn remove_session_preserves_file_on_zero_exit() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        let mut stub = StubSession::new("task-a", "ws/1", false);
+        stub.exit_code = Some(0);
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(stub),
+                agent_type: "claude".to_string(),
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            session_file.exists(),
+            "session file should be preserved when child exited with zero code"
         );
     }
 
