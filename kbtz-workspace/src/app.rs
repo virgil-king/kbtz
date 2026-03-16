@@ -550,53 +550,46 @@ impl App {
             "Your previous session was interrupted. Continue working on task '{}': {}",
             task.name, task.description
         );
-        let (args, is_resume) = if let Some(stored_uuid) = Self::read_session_file(&session_file) {
-            if let Some(resume_args) =
-                backend.resume_args(system_instructions, &stored_uuid, &resume_prompt)
-            {
-                kbtz::debug_log::log(&format!(
-                    "spawn_session: resuming {} (session {}, agent={})",
-                    task.name, stored_uuid, agent_type
-                ));
-                (resume_args, true)
-            } else {
-                // Backend doesn't support resume; start fresh (no tracking).
-                let _ = std::fs::remove_file(&session_file);
-                (
-                    backend.worker_args(system_instructions, &initial_prompt),
-                    false,
-                )
-            }
-        } else {
-            // No stored session. Try fresh_args for session tracking, fall back to worker_args.
-            let new_uuid = uuid::Uuid::new_v4().to_string();
-            if let Some(fresh_args) =
-                backend.fresh_args(system_instructions, &initial_prompt, &new_uuid)
-            {
-                if let Err(e) = std::fs::write(&session_file, &new_uuid) {
+        // new_uuid is Some when we're starting a fresh tracked session.
+        // Written to disk only after a successful spawn.
+        let (args, is_resume, new_uuid) =
+            if let Some(stored_uuid) = Self::read_session_file(&session_file) {
+                if let Some(resume_args) =
+                    backend.resume_args(system_instructions, &stored_uuid, &resume_prompt)
+                {
                     kbtz::debug_log::log(&format!(
-                        "spawn_session: failed to write session file for {}: {e}",
-                        task.name
+                        "spawn_session: resuming {} (session {}, agent={})",
+                        task.name, stored_uuid, agent_type
                     ));
-                    // Fall back to worker_args without tracking.
+                    (resume_args, true, None)
+                } else {
+                    // Backend doesn't support resume; start fresh (no tracking).
+                    let _ = std::fs::remove_file(&session_file);
                     (
                         backend.worker_args(system_instructions, &initial_prompt),
                         false,
+                        None,
                     )
-                } else {
-                    kbtz::debug_log::log(&format!(
-                        "spawn_session: fresh {} (session {}, agent={})",
-                        task.name, new_uuid, agent_type
-                    ));
-                    (fresh_args, false)
                 }
             } else {
-                (
-                    backend.worker_args(system_instructions, &initial_prompt),
-                    false,
-                )
-            }
-        };
+                // No stored session. Try fresh_args for session tracking, fall back to worker_args.
+                let uuid = uuid::Uuid::new_v4().to_string();
+                if let Some(fresh_args) =
+                    backend.fresh_args(system_instructions, &initial_prompt, &uuid)
+                {
+                    kbtz::debug_log::log(&format!(
+                        "spawn_session: fresh {} (session {}, agent={})",
+                        task.name, uuid, agent_type
+                    ));
+                    (fresh_args, false, Some(uuid))
+                } else {
+                    (
+                        backend.worker_args(system_instructions, &initial_prompt),
+                        false,
+                        None,
+                    )
+                }
+            };
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let command = backend.command();
@@ -629,13 +622,31 @@ impl App {
             &session_dir,
         );
 
-        // If resume failed, delete the session file so next attempt starts fresh.
-        if is_resume && result.is_err() {
-            kbtz::debug_log::log(&format!(
-                "spawn_session: resume failed for {}, clearing session file",
-                task.name
-            ));
-            let _ = std::fs::remove_file(&session_file);
+        match &result {
+            Ok(_) => {
+                // Write the session file only after a successful spawn.
+                // Writing before spawn would leave a stale UUID on disk if
+                // the process crashes during init before establishing a
+                // conversation.
+                if let Some(uuid) = &new_uuid {
+                    if let Err(e) = std::fs::write(&session_file, uuid) {
+                        kbtz::debug_log::log(&format!(
+                            "spawn_session: failed to write session file for {}: {e}",
+                            task.name
+                        ));
+                    }
+                }
+            }
+            Err(_) if is_resume => {
+                // Resume failed at the spawn level — delete the session
+                // file so the next attempt starts fresh.
+                kbtz::debug_log::log(&format!(
+                    "spawn_session: resume failed for {}, clearing session file",
+                    task.name
+                ));
+                let _ = std::fs::remove_file(&session_file);
+            }
+            Err(_) => {}
         }
 
         result
