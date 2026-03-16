@@ -144,9 +144,16 @@ fn shepherd_reader_thread(
                 pt.process(&data);
 
                 if pt.active {
-                    let mut out = stdout.lock();
-                    let _ = out.write_all(&data);
-                    let _ = out.flush();
+                    // Render from VTE state instead of forwarding raw
+                    // bytes.  This prevents child escape sequences
+                    // (e.g. \x1b[r, \x1b[2J) from corrupting the real
+                    // terminal's scroll region or erasing the status bar.
+                    let output = pt.render_diff();
+                    if !output.is_empty() {
+                        let mut out = stdout.lock();
+                        let _ = out.write_all(&output);
+                        let _ = out.flush();
+                    }
                 }
             }
             Ok(Some(_)) => {} // Ignore unexpected messages

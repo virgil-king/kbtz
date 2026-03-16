@@ -43,9 +43,16 @@ pub fn resize_both_screens(vte: &mut vt100::Parser, rows: u16, cols: u16) {
 /// The sequence is:
 /// 1. Scrollback rows (oldest first), each followed by `\r\n` — these
 ///    scroll off the top of the receiving VTE into its scrollback buffer.
-/// 2. `state_formatted()` — restores the visible screen (starts with
-///    ClearScreen, so scrollback is not affected).
-/// 3. If the child was on the alt screen: DECSET 47 + alt screen
+/// 2. Visible rows 0..H-1 (each followed by `\r\n`) — these provide
+///    the scroll pressure needed to push all scrollback rows off-screen
+///    in the receiving VTE.  Writing N lines with `\r\n` to an H-row
+///    screen produces N - H + 1 scrollback rows, so we need
+///    `total_scrollback + H - 1` total lines to get `total_scrollback`
+///    rows of scrollback.  The visible rows themselves end up on-screen
+///    and are overwritten by the next step.
+/// 3. `state_formatted()` — restores the visible screen using cursor
+///    positioning (no scrolling), so scrollback is not affected.
+/// 4. If the child was on the alt screen: DECSET 47 + alt screen
 ///    `state_formatted()`.
 pub fn build_restore_sequence(vte: &mut vt100::Parser) -> Vec<u8> {
     let was_alt = vte.screen().alternate_screen();
@@ -56,7 +63,7 @@ pub fn build_restore_sequence(vte: &mut vt100::Parser) -> Vec<u8> {
     }
 
     let screen = vte.screen_mut();
-    let cols = screen.size().1;
+    let (rows, cols) = screen.size();
 
     // Probe total scrollback depth
     screen.set_scrollback(usize::MAX);
@@ -75,10 +82,27 @@ pub fn build_restore_sequence(vte: &mut vt100::Parser) -> Vec<u8> {
     }
     screen.set_scrollback(0);
 
-    // Phase 2: Restore main screen visible content
+    // Phase 2: Write visible rows 0..H-1 to create enough scroll
+    // pressure for the receiving VTE.
+    //
+    // INVARIANT: N lines with \r\n to an H-row screen → N-H+1 scrollback
+    // rows (the first H-1 lines fill the screen without scrolling).
+    // Phase 1 writes total_scrollback lines.  We need total_scrollback
+    // scrollback rows, so we must write total_scrollback + H - 1 lines
+    // total.  These H-1 visible rows supply the difference.
+    for row_bytes in screen
+        .rows_formatted(0, cols)
+        .take((rows as usize).saturating_sub(1))
+    {
+        restore.extend_from_slice(&row_bytes);
+        restore.extend_from_slice(b"\r\n");
+    }
+
+    // Phase 3: Restore main screen visible content (uses cursor
+    // positioning, no scrolling — scrollback is not affected).
     restore.extend_from_slice(&screen.state_formatted());
 
-    // Phase 3: If child was on alt screen, switch and restore alt content
+    // Phase 4: If child was on alt screen, switch and restore alt content
     if was_alt {
         vte.process(b"\x1b[?47h"); // restore shepherd's VTE to alt screen
 
@@ -126,11 +150,11 @@ mod tests {
         let dst_contents = dst.screen().contents();
         assert_eq!(src_contents, dst_contents, "visible screen should match");
 
-        // Verify scrollback was transferred.
+        // Verify scrollback depth matches exactly.
         let dst_scrollback = scrollback_depth(dst.screen_mut());
-        assert!(
-            dst_scrollback > 0,
-            "destination should have scrollback, got 0"
+        assert_eq!(
+            dst_scrollback, src_scrollback,
+            "scrollback depth must match exactly"
         );
     }
 
@@ -163,12 +187,14 @@ mod tests {
             "alt screen content should match"
         );
 
-        // Switch to main screen to check scrollback.
+        // Switch to main screen to check scrollback depth matches.
+        src.process(b"\x1b[?47l");
+        let src_scrollback = scrollback_depth(src.screen_mut());
         dst.process(b"\x1b[?47l");
         let dst_scrollback = scrollback_depth(dst.screen_mut());
-        assert!(
-            dst_scrollback > 0,
-            "main screen should have scrollback after alt screen restore"
+        assert_eq!(
+            dst_scrollback, src_scrollback,
+            "main screen scrollback depth must match after alt screen restore"
         );
     }
 
@@ -210,5 +236,87 @@ mod tests {
         // Should have scrollback (lines reflowed to 40 cols).
         let dst_scrollback = scrollback_depth(dst.screen_mut());
         assert!(dst_scrollback > 0, "should have scrollback after reflow");
+    }
+
+    /// Helper: capture the visible viewport at each scrollback offset.
+    /// Returns one `contents()` snapshot per offset, oldest first.
+    fn scrollback_viewports(vte: &mut vt100::Parser) -> Vec<String> {
+        let screen = vte.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let total = screen.scrollback();
+        let mut viewports = Vec::new();
+        for offset in (1..=total).rev() {
+            screen.set_scrollback(offset);
+            viewports.push(screen.contents());
+        }
+        screen.set_scrollback(0);
+        viewports
+    }
+
+    #[test]
+    fn restore_sequence_scrollback_content_matches() {
+        // Verify that viewport content at every scrollback offset
+        // survives the restore sequence, not just the depth.
+        let mut src = vt100::Parser::new(5, 40, SCROLLBACK_ROWS);
+        for i in 0..30 {
+            src.process(format!("line {i}\r\n").as_bytes());
+        }
+        src.process(b"visible");
+
+        let src_viewports = scrollback_viewports(&mut src);
+        assert!(
+            src_viewports.len() > 5,
+            "need meaningful scrollback for test"
+        );
+
+        let restore = build_restore_sequence(&mut src);
+        let mut dst = vt100::Parser::new(5, 40, SCROLLBACK_ROWS);
+        dst.process(&restore);
+
+        let dst_viewports = scrollback_viewports(&mut dst);
+        assert_eq!(
+            dst_viewports.len(),
+            src_viewports.len(),
+            "scrollback depth must match"
+        );
+        for (i, (src_vp, dst_vp)) in src_viewports.iter().zip(dst_viewports.iter()).enumerate() {
+            assert_eq!(
+                src_vp.trim(),
+                dst_vp.trim(),
+                "scrollback viewport at offset {i} mismatch"
+            );
+        }
+    }
+
+    /// Regression test at realistic terminal size.  The scrollback depth
+    /// bug (missing H-1 rows) was most visible at large screen heights
+    /// where H-1 is a significant number of lost rows.
+    #[test]
+    fn restore_sequence_realistic_size() {
+        let rows: u16 = 50;
+        let cols: u16 = 200;
+        let mut src = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        // Simulate a long session with varied content.
+        for i in 0..500 {
+            src.process(format!("output line {i}: some content here\r\n").as_bytes());
+        }
+        src.process(b"cursor here");
+
+        let src_scrollback = scrollback_depth(src.screen_mut());
+        assert!(
+            src_scrollback > (rows as usize),
+            "need more scrollback than screen height"
+        );
+
+        let restore = build_restore_sequence(&mut src);
+        let mut dst = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+        dst.process(&restore);
+
+        assert_eq!(src.screen().contents(), dst.screen().contents());
+        assert_eq!(
+            scrollback_depth(dst.screen_mut()),
+            src_scrollback,
+            "scrollback depth must match at realistic terminal size"
+        );
     }
 }

@@ -338,6 +338,13 @@ fn run(
                     let data = &read_buf[..n];
                     vte.process(data);
 
+                    // CSI 3 J (Erase Saved Lines) — the vt100 crate
+                    // doesn't implement this, so clear scrollback
+                    // manually to stay consistent with the workspace.
+                    if data.windows(4).any(|w| w == b"\x1b[3J") {
+                        clear_scrollback(&mut vte);
+                    }
+
                     if let Some(ref mut cc) = client {
                         if cc
                             .write_message(&Message::PtyOutput(data.to_vec()))
@@ -490,6 +497,34 @@ fn run(
             }
         }
     }
+}
+
+/// Clear scrollback by replacing the VTE with a fresh one that has only
+/// the visible screen state.  Mirrors `Passthrough::clear_scrollback()`
+/// in the workspace — both must handle CSI 3 J identically so the
+/// shepherd's authoritative scrollback matches the workspace's view.
+fn clear_scrollback(vte: &mut vt100::Parser) {
+    let (rows, cols) = vte.screen().size();
+    let was_alt = vte.screen().alternate_screen();
+
+    let mut alt_state = None;
+    if was_alt {
+        alt_state = Some(vte.screen().state_formatted());
+        vte.process(b"\x1b[?47l");
+    }
+    let main_state = vte.screen().state_formatted();
+    if was_alt {
+        vte.process(b"\x1b[?47h");
+    }
+
+    let mut fresh = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+    fresh.process(&main_state);
+    if let Some(alt) = alt_state {
+        fresh.process(b"\x1b[?47h");
+        fresh.process(&alt);
+    }
+
+    *vte = fresh;
 }
 
 fn forward_sigterm(child_pid: Option<u32>) {
