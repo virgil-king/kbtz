@@ -81,6 +81,15 @@ fn session_id_to_filename(session_id: &str) -> String {
     kbtz::paths::session_id_to_filename(session_id)
 }
 
+/// Remove the status, socket, PID, and child-PID files for a session.
+fn cleanup_session_files(status_dir: &Path, session_id: &str) {
+    let filename = session_id_to_filename(session_id);
+    let _ = std::fs::remove_file(status_dir.join(&filename));
+    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.sock")));
+    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.pid")));
+    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.child-pid")));
+}
+
 /// Kill the agent child process group from the `.child-pid` file next to a shepherd `.pid` file.
 fn kill_child_from_pid_file(pid_path: &Path) {
     let child_pid_path = pid_path.with_extension("child-pid");
@@ -679,10 +688,21 @@ impl App {
                 ts.handle.status().label()
             ));
             // Check task status before releasing — we need to know if the session
-            // file should be preserved for resume.
-            let task_done = ops::get_task(&self.conn, &task_name)
-                .map(|t| t.status == "done")
-                .unwrap_or(true); // task deleted = treat as done
+            // file should be preserved for resume. Distinguish "task deleted"
+            // from transient DB errors (lock contention) — only treat missing
+            // tasks as done. Preserving the session file on DB errors avoids
+            // losing conversation context due to a transient lock.
+            let task_done = match ops::get_task(&self.conn, &task_name) {
+                Ok(t) => t.status == "done",
+                Err(e) if is_db_busy(&e) => {
+                    kbtz::debug_log::log(&format!(
+                        "remove_session: DB busy looking up {task_name}, \
+                         preserving session file"
+                    ));
+                    false
+                }
+                Err(_) => true, // task deleted or other error — treat as done
+            };
             let _ = ops::release_task(&self.conn, &task_name, &sid);
             // Only remove the task->session mapping if it still points to this
             // session. A new session may have already claimed the same task
@@ -690,11 +710,7 @@ impl App {
             if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
                 self.task_to_session.remove(&task_name);
             }
-            let filename = session_id_to_filename(session_id);
-            let _ = std::fs::remove_file(self.status_dir.join(&filename));
-            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.sock")));
-            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.pid")));
-            let _ = std::fs::remove_file(self.status_dir.join(format!("{filename}.child-pid")));
+            cleanup_session_files(&self.status_dir, session_id);
 
             // Check if the shepherd exited with a non-zero code (forwarded
             // from the child). A non-zero exit means the agent crashed
@@ -749,9 +765,7 @@ impl App {
                         ));
                         // Shepherd died — clean up stale files and kill orphaned child
                         kill_child_from_pid_file(&pid_path);
-                        let _ = std::fs::remove_file(&path);
-                        let _ = std::fs::remove_file(&pid_path);
-                        let _ = std::fs::remove_file(pid_path.with_extension("child-pid"));
+                        cleanup_session_files(&self.status_dir, &session_id);
                         if let Some(task_name) = self.find_task_for_session(&session_id) {
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                         }
@@ -802,10 +816,7 @@ impl App {
                             kbtz::debug_log::log(&format!(
                                 "reconnect: stale socket for {session_id} (task={task_name}): {e}"
                             ));
-                            // Stale socket -- clean up
-                            let _ = std::fs::remove_file(&path);
-                            let _ = std::fs::remove_file(&pid_path);
-                            let _ = std::fs::remove_file(pid_path.with_extension("child-pid"));
+                            cleanup_session_files(&self.status_dir, &session_id);
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                         }
                     }
@@ -821,9 +832,7 @@ impl App {
                             unsafe { libc::kill(pid, libc::SIGKILL) };
                         }
                     }
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(&pid_path);
-                    let _ = std::fs::remove_file(pid_path.with_extension("child-pid"));
+                    cleanup_session_files(&self.status_dir, &session_id);
                 }
             }
         }
