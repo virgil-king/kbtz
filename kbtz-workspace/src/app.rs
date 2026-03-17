@@ -460,6 +460,9 @@ impl App {
         }
 
         let task = ops::get_task(&self.conn, task_name)?;
+        if task.status != "open" {
+            bail!("task '{task_name}' is {}, not open", task.status);
+        }
         let agent_type = self.resolve_agent_type(&task).to_string();
 
         self.counter += 1;
