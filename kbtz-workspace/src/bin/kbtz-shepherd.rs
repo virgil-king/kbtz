@@ -181,8 +181,14 @@ fn run(
     // 2. Write PID file.
     std::fs::write(pid_file, format!("{}", std::process::id()))?;
 
-    // 3. Install SIGTERM handler.
+    // 3. Install signal handlers.
     unsafe {
+        // Reset SIGCHLD to default. The workspace process may have a
+        // custom SIGCHLD disposition (e.g. SIG_IGN for auto-reap) that
+        // we inherit across fork. With SIG_IGN, waitpid returns ECHILD
+        // instead of the exit status, breaking child exit detection.
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = sigterm_handler as *const () as usize;
         sa.sa_flags = libc::SA_RESTART;
@@ -274,14 +280,21 @@ fn run(
                     libc::fcntl(pty_master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
                 }
                 drain_pty(&mut pty_reader, &mut vte, &mut client);
+                // Notify the connected workspace before exiting.
+                if let Some(ref mut cc) = client {
+                    let _ = cc.write_message(&Message::ChildExited {
+                        exit_code: status.exit_code(),
+                    });
+                }
                 cleanup(socket_path, pid_file);
-                // Exit with the child's exit code so the workspace can
-                // detect failed sessions via waitpid on the shepherd.
                 std::process::exit(status.exit_code() as i32);
             }
             Ok(None) => {} // still running
             Err(_) => {
                 // Error checking child status -- treat as exited.
+                if let Some(ref mut cc) = client {
+                    let _ = cc.write_message(&Message::ChildExited { exit_code: 1 });
+                }
                 cleanup(socket_path, pid_file);
                 return Ok(());
             }
@@ -390,33 +403,10 @@ fn run(
                             });
                             resize_both_screens(&mut vte, new_rows, new_cols);
 
-                            // Check if the child has already exited before
-                            // completing the handshake. Without this, a child
-                            // that crashes during init would still get a
-                            // successful handshake, causing the workspace to
-                            // persist a session UUID for a dead conversation.
-                            //
-                            // Note: try_wait() reaps the exit status. We store
-                            // it so the main loop's exit handler can use it
-                            // instead of calling try_wait() again.
-                            if let Ok(Some(status)) = child.try_wait() {
-                                // Child is dead — drop the connection
-                                // without sending InitialState, then
-                                // clean up and exit.
-                                drop(handshake_stream);
-                                unsafe {
-                                    let flags = libc::fcntl(pty_master_fd, libc::F_GETFL);
-                                    libc::fcntl(
-                                        pty_master_fd,
-                                        libc::F_SETFL,
-                                        flags | libc::O_NONBLOCK,
-                                    );
-                                }
-                                drain_pty(&mut pty_reader, &mut vte, &mut client);
-                                cleanup(socket_path, pid_file);
-                                std::process::exit(status.exit_code() as i32);
-                            }
-
+                            // Always send InitialState. If the child has
+                            // already exited, the main loop's try_wait()
+                            // will detect it on the next iteration and
+                            // send ChildExited before exiting.
                             let restore = build_restore_sequence(&mut vte);
                             if protocol::write_message(
                                 &mut handshake_stream,

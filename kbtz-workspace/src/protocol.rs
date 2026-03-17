@@ -14,6 +14,10 @@ pub enum Message {
     InitialState(Vec<u8>),
     /// Request graceful shutdown (workspace -> shepherd). Type 0x05.
     Shutdown,
+    /// Child process exited (shepherd -> workspace). Type 0x06.
+    /// Sent before the shepherd itself exits so the workspace gets an
+    /// explicit notification instead of having to infer death from EOF.
+    ChildExited { exit_code: u32 },
 }
 
 const TYPE_PTY_OUTPUT: u8 = 0x01;
@@ -21,6 +25,7 @@ const TYPE_PTY_INPUT: u8 = 0x02;
 const TYPE_RESIZE: u8 = 0x03;
 const TYPE_INITIAL_STATE: u8 = 0x04;
 const TYPE_SHUTDOWN: u8 = 0x05;
+const TYPE_CHILD_EXITED: u8 = 0x06;
 
 /// Serialize a message to bytes using the wire format:
 /// `[4 bytes big-endian length] [1 byte type] [payload]`
@@ -42,6 +47,14 @@ pub fn encode(msg: &Message) -> Vec<u8> {
         }
         Message::InitialState(data) => (TYPE_INITIAL_STATE, data.as_slice()),
         Message::Shutdown => (TYPE_SHUTDOWN, [].as_slice()),
+        Message::ChildExited { exit_code } => {
+            let mut buf = Vec::with_capacity(4 + 1 + 4);
+            let length: u32 = 1 + 4;
+            buf.extend_from_slice(&length.to_be_bytes());
+            buf.push(TYPE_CHILD_EXITED);
+            buf.extend_from_slice(&exit_code.to_be_bytes());
+            return buf;
+        }
     };
 
     let length: u32 = 1 + payload.len() as u32; // type byte + payload
@@ -77,6 +90,17 @@ pub fn decode(buf: &[u8]) -> Result<Message> {
         }
         TYPE_INITIAL_STATE => Ok(Message::InitialState(payload.to_vec())),
         TYPE_SHUTDOWN => Ok(Message::Shutdown),
+        TYPE_CHILD_EXITED => {
+            if payload.len() < 4 {
+                bail!(
+                    "child_exited payload too short: expected 4 bytes, got {}",
+                    payload.len()
+                );
+            }
+            let exit_code =
+                u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(Message::ChildExited { exit_code })
+        }
         _ => bail!("unknown message type: 0x{:02x}", type_byte),
     }
 }
@@ -156,6 +180,14 @@ mod tests {
     #[test]
     fn roundtrip_shutdown() {
         let msg = Message::Shutdown;
+        let encoded = encode(&msg);
+        let decoded = decode(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn roundtrip_child_exited() {
+        let msg = Message::ChildExited { exit_code: 42 };
         let encoded = encode(&msg);
         let decoded = decode(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
