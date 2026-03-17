@@ -133,8 +133,16 @@ fn main() {
     let command = &args[5];
     let command_args: Vec<&str> = args[6..].iter().map(|s| s.as_str()).collect();
 
+    kbtz::debug_log::log(&format!(
+        "shepherd: starting pid={} socket={} command={command} args={command_args:?} rows={rows} cols={cols}",
+        std::process::id(),
+        socket_path.display(),
+    ));
     if let Err(e) = run(&socket_path, &pid_file, rows, cols, command, &command_args) {
-        eprintln!("kbtz-shepherd: {e:#}");
+        kbtz::debug_log::log(&format!(
+            "shepherd: run() failed pid={}: {e:#}",
+            std::process::id()
+        ));
         cleanup(&socket_path, &pid_file);
         std::process::exit(1);
     }
@@ -215,6 +223,9 @@ fn run(
     drop(pair.slave);
 
     let child_pid = child.process_id();
+    kbtz::debug_log::log(&format!(
+        "shepherd: child spawned, child_pid={child_pid:?}"
+    ));
 
     // Write child PID so force_kill() can kill the agent, not just the shepherd.
     if let Some(pid) = child_pid {
@@ -241,12 +252,21 @@ fn run(
         .ok_or_else(|| anyhow::anyhow!("cannot get PTY master fd"))?;
 
     // 5. Create Unix socket listener.
-    if socket_path.exists() {
+    let stale_socket = socket_path.exists();
+    if stale_socket {
+        kbtz::debug_log::log(&format!(
+            "shepherd: removing stale socket at {}",
+            socket_path.display()
+        ));
         std::fs::remove_file(socket_path)?;
     }
     let listener = UnixListener::bind(socket_path)?;
     listener.set_nonblocking(true)?;
     let listener_fd = listener.as_raw_fd();
+    kbtz::debug_log::log(&format!(
+        "shepherd: socket created at {} (stale_existed={stale_socket})",
+        socket_path.display()
+    ));
 
     // 6. VTE parser with scrollback — this is the authoritative scrollback
     // store, like tmux's server-side pane history.  No raw byte buffer.
@@ -267,6 +287,11 @@ fn run(
         // Check if child has exited.
         match child.try_wait() {
             Ok(Some(status)) => {
+                kbtz::debug_log::log(&format!(
+                    "shepherd: child exited in main loop, exit_code={:?} pid={}",
+                    status.exit_code(),
+                    std::process::id()
+                ));
                 // Child exited. Set PTY reader non-blocking so drain_pty
                 // can't hang waiting for data that will never arrive.
                 unsafe {
@@ -280,7 +305,11 @@ fn run(
                 std::process::exit(status.exit_code() as i32);
             }
             Ok(None) => {} // still running
-            Err(_) => {
+            Err(e) => {
+                kbtz::debug_log::log(&format!(
+                    "shepherd: try_wait error pid={}: {e}",
+                    std::process::id()
+                ));
                 // Error checking child status -- treat as exited.
                 cleanup(socket_path, pid_file);
                 return Ok(());
@@ -365,6 +394,10 @@ fn run(
         if pollfds[1].revents & libc::POLLIN != 0 {
             match listener.accept() {
                 Ok((stream, _addr)) => {
+                    kbtz::debug_log::log(&format!(
+                        "shepherd: accepted connection pid={}",
+                        std::process::id()
+                    ));
                     // Close existing client if any.
                     client = None;
 
@@ -381,6 +414,10 @@ fn run(
                             rows: new_rows,
                             cols: new_cols,
                         })) => {
+                            kbtz::debug_log::log(&format!(
+                                "shepherd: received Resize({new_rows}x{new_cols}) pid={}",
+                                std::process::id()
+                            ));
                             // Resize VTE and PTY to match the workspace's terminal.
                             let _ = pair.master.resize(PtySize {
                                 rows: new_rows,
@@ -400,6 +437,11 @@ fn run(
                             // it so the main loop's exit handler can use it
                             // instead of calling try_wait() again.
                             if let Ok(Some(status)) = child.try_wait() {
+                                kbtz::debug_log::log(&format!(
+                                    "shepherd: child dead during handshake, exit_code={:?} pid={}",
+                                    status.exit_code(),
+                                    std::process::id()
+                                ));
                                 // Child is dead — drop the connection
                                 // without sending InitialState, then
                                 // clean up and exit.
@@ -418,22 +460,51 @@ fn run(
                             }
 
                             let restore = build_restore_sequence(&mut vte);
+                            kbtz::debug_log::log(&format!(
+                                "shepherd: sending InitialState ({} bytes) pid={}",
+                                restore.len(),
+                                std::process::id()
+                            ));
                             if protocol::write_message(
                                 &mut handshake_stream,
                                 &Message::InitialState(restore),
                             )
                             .is_err()
                             {
+                                kbtz::debug_log::log(&format!(
+                                    "shepherd: failed to send InitialState pid={}",
+                                    std::process::id()
+                                ));
                                 // Failed to send; drop connection.
                             } else {
                                 // Handshake complete — switch to non-blocking.
                                 if let Ok(cc) = ClientConn::new(handshake_stream) {
+                                    kbtz::debug_log::log(&format!(
+                                        "shepherd: handshake complete pid={}",
+                                        std::process::id()
+                                    ));
                                     client = Some(cc);
                                 }
                             }
                         }
-                        _ => {
-                            // Client didn't send Resize first — drop it.
+                        Ok(Some(other)) => {
+                            kbtz::debug_log::log(&format!(
+                                "shepherd: expected Resize, got {:?} pid={}",
+                                std::mem::discriminant(&other),
+                                std::process::id()
+                            ));
+                        }
+                        Ok(None) => {
+                            kbtz::debug_log::log(&format!(
+                                "shepherd: client disconnected before sending Resize pid={}",
+                                std::process::id()
+                            ));
+                        }
+                        Err(e) => {
+                            kbtz::debug_log::log(&format!(
+                                "shepherd: error reading handshake: {e} pid={}",
+                                std::process::id()
+                            ));
                         }
                     }
                 }
