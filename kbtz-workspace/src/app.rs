@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -62,6 +62,12 @@ pub struct App {
     pub tree: TreeView,
     pub tree_dirty: bool,
     pub notes_panel: Option<NotesPanel>,
+
+    // Unread tracking
+    /// Session IDs that have had state changes since the user last viewed them.
+    pub unread: HashSet<String>,
+    /// The session_id currently being viewed in passthrough mode (None in tree view).
+    pub zoomed_session: Option<String>,
 }
 
 pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
@@ -168,6 +174,8 @@ impl App {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
         app.refresh_tree()?;
         if persistent_sessions {
@@ -679,6 +687,10 @@ impl App {
                         new_status.label(),
                         ts.handle.task_name()
                     ));
+                    // Mark unread if the user is not currently viewing this session.
+                    if self.zoomed_session.as_deref() != Some(session_id.as_str()) {
+                        self.unread.insert(session_id.clone());
+                    }
                 }
                 ts.handle.set_status(new_status);
             }
@@ -723,6 +735,7 @@ impl App {
             if self.task_to_session.get(&task_name).map(String::as_str) == Some(session_id) {
                 self.task_to_session.remove(&task_name);
             }
+            self.unread.remove(session_id);
             cleanup_session_files(&self.status_dir, session_id);
 
             // Only treat a non-zero exit as a crash if we never requested
@@ -972,6 +985,30 @@ impl App {
         self.sessions
             .get(sid)
             .map(|ts| ts.handle.task_name().to_string())
+    }
+
+    /// Find the next unread session, cycling from current_task.
+    /// Returns the task name if found.
+    pub fn next_unread_session(&self, current_task: Option<&str>) -> Option<String> {
+        let ids = self.session_ids_ordered();
+        let unread: Vec<&String> = ids
+            .iter()
+            .filter(|id| self.unread.contains(*id))
+            .collect();
+        if unread.is_empty() {
+            return None;
+        }
+        let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
+        let idx = cycle_after(&unread, current_sid.as_ref());
+        let sid = unread[idx];
+        self.sessions
+            .get(sid)
+            .map(|ts| ts.handle.task_name().to_string())
+    }
+
+    /// Mark a session as read (clear unread flag). Called when zooming in.
+    pub fn mark_read(&mut self, session_id: &str) {
+        self.unread.remove(session_id);
     }
 
     /// Kill and release a session for a task so it can be respawned.
@@ -1273,6 +1310,8 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -1596,6 +1635,8 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -1975,6 +2016,8 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -2134,6 +2177,8 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
 
         // Create a task with agent="gemini" and one with no agent.
@@ -2464,6 +2509,8 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            unread: HashSet::new(),
+            zoomed_session: None,
         };
 
         app.shutdown();

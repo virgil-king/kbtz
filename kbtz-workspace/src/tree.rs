@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
@@ -24,22 +24,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 struct SessionDecorator<'a> {
     task_to_session: &'a HashMap<String, String>,
     sessions: &'a HashMap<String, TrackedSession>,
+    unread: &'a HashSet<String>,
 }
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
     fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
-        // Workspace session: 🤖 + status indicator + session ID
+        // Workspace session: 🤖 + status indicator + session ID (+ unread marker)
         if let Some(sid) = self.task_to_session.get(&row.name) {
             if let Some(ts) = self.sessions.get(sid) {
+                let mut after_name = vec![Span::styled(
+                    format!(" {sid}"),
+                    Style::default().fg(Color::Cyan),
+                )];
+                if self.unread.contains(sid) {
+                    after_name.push(Span::styled(" \u{25cf}", Style::default().fg(Color::Blue)));
+                }
                 return ui::RowDecoration {
                     icon_override: Some((
                         format!("\u{1f916}{} ", ts.handle.status().indicator()),
                         ui::status_style(&row.status),
                     )),
-                    after_name: vec![Span::styled(
-                        format!(" {sid}"),
-                        Style::default().fg(Color::Cyan),
-                    )],
+                    after_name,
                 };
             }
         }
@@ -75,6 +80,7 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     let decorator = SessionDecorator {
         task_to_session: &app.task_to_session,
         sessions: &app.sessions,
+        unread: &app.unread,
     };
     let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, &decorator);
 
@@ -166,7 +172,7 @@ pub fn render_help(frame: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  Tab        ", Style::default().fg(Color::Cyan)),
-            Span::raw("Jump to needs-input session"),
+            Span::raw("Jump to needs-input/unread session"),
         ]),
         Line::from(vec![
             Span::styled("  s          ", Style::default().fg(Color::Cyan)),
@@ -235,7 +241,7 @@ pub fn render_help(frame: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  ^B Tab     ", Style::default().fg(Color::Cyan)),
-            Span::raw("Jump to needs-input session"),
+            Span::raw("Jump to needs-input/unread session"),
         ]),
         Line::from(vec![
             Span::styled("  ^B ^B      ", Style::default().fg(Color::Cyan)),

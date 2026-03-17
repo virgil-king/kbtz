@@ -67,7 +67,7 @@ CONFIG FILE:
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
     Enter           Zoom into session
-    Tab             Jump to next session needing input
+    Tab             Jump to next needs-input/unread session
     s               Spawn session for task
     c               Switch to task manager session
     Space           Collapse/expand
@@ -82,7 +82,7 @@ ZOOMED MODE / TASK MANAGER:
     ^B t            Return to tree
     ^B c            Switch to task manager session
     ^B n/p          Next/prev session
-    ^B Tab          Jump to next session needing input
+    ^B Tab          Jump to next needs-input/unread session
     ^B [            Scroll mode (also: Shift+Up, PgUp, left-click)
     ^B ^B           Send literal Ctrl-B
     ^B ?            Help
@@ -365,6 +365,7 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
 
         match action {
             Action::Continue | Action::ReturnToTree => {
+                app.zoomed_session = None;
                 action = tree_mode(app, running)?;
             }
             Action::ZoomIn(ref task) => {
@@ -376,6 +377,8 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
                         continue;
                     }
                 };
+                app.zoomed_session = Some(sid.clone());
+                app.mark_read(&sid);
                 let kind = SessionKind::Worker {
                     session_id: &sid,
                     task: &task,
@@ -386,6 +389,7 @@ fn main_loop(app: &mut App, running: &Arc<AtomicBool>) -> Result<()> {
                 }
             }
             Action::TopLevel => {
+                app.zoomed_session = None;
                 action = passthrough_mode(app, &SessionKind::TopLevel, running)?;
             }
             Action::NextSession | Action::PrevSession => {
@@ -704,6 +708,8 @@ fn tree_loop(
                         KeyCode::Tab => {
                             if let Some(task) = app.next_needs_input_session(None) {
                                 return Ok(Action::ZoomIn(task));
+                            } else if let Some(task) = app.next_unread_session(None) {
+                                return Ok(Action::ZoomIn(task));
                             } else {
                                 app.tree.error = Some("no sessions need input".into());
                             }
@@ -835,7 +841,10 @@ fn handle_prefix_command(
                 SessionKind::Worker { task, .. } => Some(*task),
                 SessionKind::TopLevel => None,
             };
-            if let Some(next_task) = app.next_needs_input_session(exclude) {
+            if let Some(next_task) = app
+                .next_needs_input_session(exclude)
+                .or_else(|| app.next_unread_session(exclude))
+            {
                 if scroll.active {
                     exit_scroll_mode(app, sid, scroll)?;
                 }
