@@ -460,6 +460,9 @@ impl App {
         }
 
         let task = ops::get_task(&self.conn, task_name)?;
+        if task.status != "open" {
+            bail!("task '{task_name}' is {}, not open", task.status);
+        }
         let agent_type = self.resolve_agent_type(&task).to_string();
 
         self.counter += 1;
@@ -2063,6 +2066,33 @@ mod tests {
         let _ = app.spawn_for_task("custom-task");
         assert!(app.backends.contains_key("custom-tool"));
         assert_eq!(app.backends["custom-tool"].command(), "custom-tool");
+    }
+
+    #[test]
+    fn spawn_for_task_rejects_non_open_tasks() {
+        let (mut app, _dir) = test_app();
+        for (name, paused) in [("paused-task", true), ("done-task", false)] {
+            ops::add_task(
+                &app.conn,
+                ops::AddTaskParams {
+                    name,
+                    description: "test",
+                    paused,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        ops::mark_done(&app.conn, "done-task").unwrap();
+
+        let err = app.spawn_for_task("paused-task").unwrap_err();
+        assert!(err.to_string().contains("paused"), "{err}");
+
+        let err = app.spawn_for_task("done-task").unwrap_err();
+        assert!(err.to_string().contains("done"), "{err}");
+
+        assert_eq!(app.counter, 0);
+        assert!(app.task_to_session.is_empty());
     }
 
     #[test]
