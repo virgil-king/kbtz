@@ -1,84 +1,45 @@
 use std::io::{Read, Write};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Protocol version. Sent as the first byte from the workspace to the shepherd
+/// during connection setup. Bump this when the wire format changes.
+pub const PROTOCOL_VERSION: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
-    /// PTY output from child (shepherd -> workspace). Type 0x01.
-    PtyOutput(Vec<u8>),
-    /// Keyboard input to child (workspace -> shepherd). Type 0x02.
-    PtyInput(Vec<u8>),
-    /// Terminal resize (workspace -> shepherd). Type 0x03.
+    /// PTY output from child (shepherd -> workspace).
+    PtyOutput(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// Keyboard input to child (workspace -> shepherd).
+    PtyInput(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// Terminal resize (workspace -> shepherd).
     Resize { rows: u16, cols: u16 },
-    /// Full output buffer for state recovery on connect (shepherd -> workspace). Type 0x04.
-    InitialState(Vec<u8>),
-    /// Request graceful shutdown (workspace -> shepherd). Type 0x05.
+    /// Full output buffer for state recovery on connect (shepherd -> workspace).
+    /// Includes the shepherd's session ID so the workspace can verify it
+    /// connected to the right process (prevents PID-reuse misconnection).
+    InitialState {
+        session_id: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    /// Request graceful shutdown (workspace -> shepherd).
     Shutdown,
 }
 
-const TYPE_PTY_OUTPUT: u8 = 0x01;
-const TYPE_PTY_INPUT: u8 = 0x02;
-const TYPE_RESIZE: u8 = 0x03;
-const TYPE_INITIAL_STATE: u8 = 0x04;
-const TYPE_SHUTDOWN: u8 = 0x05;
-
-/// Serialize a message to bytes using the wire format:
-/// `[4 bytes big-endian length] [1 byte type] [payload]`
-///
-/// Length includes the type byte but NOT the 4-byte length prefix.
+/// Serialize a message using postcard, prefixed with a 4-byte big-endian length.
 pub fn encode(msg: &Message) -> Vec<u8> {
-    let (type_byte, payload) = match msg {
-        Message::PtyOutput(data) => (TYPE_PTY_OUTPUT, data.as_slice()),
-        Message::PtyInput(data) => (TYPE_PTY_INPUT, data.as_slice()),
-        Message::Resize { rows, cols } => {
-            // Handled specially below since we need to build the payload.
-            let mut buf = Vec::with_capacity(4 + 1 + 4);
-            let length: u32 = 1 + 4; // type byte + 4 bytes payload
-            buf.extend_from_slice(&length.to_be_bytes());
-            buf.push(TYPE_RESIZE);
-            buf.extend_from_slice(&rows.to_be_bytes());
-            buf.extend_from_slice(&cols.to_be_bytes());
-            return buf;
-        }
-        Message::InitialState(data) => (TYPE_INITIAL_STATE, data.as_slice()),
-        Message::Shutdown => (TYPE_SHUTDOWN, [].as_slice()),
-    };
-
-    let length: u32 = 1 + payload.len() as u32; // type byte + payload
-    let mut buf = Vec::with_capacity(4 + length as usize);
+    let payload = postcard::to_allocvec(msg).expect("postcard serialization failed");
+    let length = payload.len() as u32;
+    let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&length.to_be_bytes());
-    buf.push(type_byte);
-    buf.extend_from_slice(payload);
+    buf.extend_from_slice(&payload);
     buf
 }
 
-/// Deserialize a message from a complete frame buffer (type byte + payload, no length prefix).
+/// Deserialize a message from a postcard-encoded buffer (no length prefix).
 pub fn decode(buf: &[u8]) -> Result<Message> {
-    if buf.is_empty() {
-        bail!("empty frame buffer");
-    }
-
-    let type_byte = buf[0];
-    let payload = &buf[1..];
-
-    match type_byte {
-        TYPE_PTY_OUTPUT => Ok(Message::PtyOutput(payload.to_vec())),
-        TYPE_PTY_INPUT => Ok(Message::PtyInput(payload.to_vec())),
-        TYPE_RESIZE => {
-            if payload.len() < 4 {
-                bail!(
-                    "resize payload too short: expected 4 bytes, got {}",
-                    payload.len()
-                );
-            }
-            let rows = u16::from_be_bytes([payload[0], payload[1]]);
-            let cols = u16::from_be_bytes([payload[2], payload[3]]);
-            Ok(Message::Resize { rows, cols })
-        }
-        TYPE_INITIAL_STATE => Ok(Message::InitialState(payload.to_vec())),
-        TYPE_SHUTDOWN => Ok(Message::Shutdown),
-        _ => bail!("unknown message type: 0x{:02x}", type_byte),
-    }
+    postcard::from_bytes(buf).context("failed to decode message")
 }
 
 /// Read one framed message from a reader. Returns `None` on clean EOF
@@ -114,6 +75,32 @@ pub fn write_message(writer: &mut impl Write, msg: &Message) -> Result<()> {
     Ok(())
 }
 
+/// Write the protocol version byte.
+pub fn write_version(writer: &mut impl Write) -> Result<()> {
+    writer
+        .write_all(&[PROTOCOL_VERSION])
+        .context("failed to write protocol version")?;
+    writer.flush().context("failed to flush protocol version")?;
+    Ok(())
+}
+
+/// Read and validate the protocol version byte.
+pub fn read_version(reader: &mut impl Read) -> Result<u8> {
+    let mut buf = [0u8; 1];
+    reader
+        .read_exact(&mut buf)
+        .context("failed to read protocol version")?;
+    let version = buf[0];
+    if version != PROTOCOL_VERSION {
+        bail!(
+            "protocol version mismatch: expected {}, got {}",
+            PROTOCOL_VERSION,
+            version
+        );
+    }
+    Ok(version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,7 +110,6 @@ mod tests {
     fn roundtrip_pty_output() {
         let msg = Message::PtyOutput(b"hello world".to_vec());
         let encoded = encode(&msg);
-        // Skip the 4-byte length prefix for decode
         let decoded = decode(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
     }
@@ -147,7 +133,21 @@ mod tests {
     #[test]
     fn roundtrip_initial_state() {
         let data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
-        let msg = Message::InitialState(data);
+        let msg = Message::InitialState {
+            session_id: "ws/42".to_string(),
+            data,
+        };
+        let encoded = encode(&msg);
+        let decoded = decode(&encoded[4..]).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn roundtrip_initial_state_empty_session_id() {
+        let msg = Message::InitialState {
+            session_id: String::new(),
+            data: b"restore".to_vec(),
+        };
         let encoded = encode(&msg);
         let decoded = decode(&encoded[4..]).unwrap();
         assert_eq!(msg, decoded);
@@ -164,14 +164,6 @@ mod tests {
     #[test]
     fn decode_empty_fails() {
         let result = decode(&[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decode_truncated_fails() {
-        // Resize needs 4 bytes of payload but we only give 2
-        let buf = [TYPE_RESIZE, 0x00, 0x18];
-        let result = decode(&buf);
         assert!(result.is_err());
     }
 
@@ -202,5 +194,22 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let decoded = read_message(&mut cursor).unwrap().unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn version_roundtrip() {
+        let mut buf = Vec::new();
+        write_version(&mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let version = read_version(&mut cursor).unwrap();
+        assert_eq!(version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn version_mismatch_fails() {
+        let mut cursor = Cursor::new(vec![0xFF]);
+        let result = read_version(&mut cursor);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("protocol version mismatch"));
     }
 }

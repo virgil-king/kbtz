@@ -158,6 +158,11 @@ fn run(
     command: &str,
     command_args: &[&str],
 ) -> anyhow::Result<()> {
+    // Read session ID from environment before redirecting stderr to /dev/null,
+    // so the error message is visible if the env var is missing.
+    let session_id = std::env::var("KBTZ_SESSION_ID")
+        .map_err(|_| anyhow::anyhow!("KBTZ_SESSION_ID not set in environment"))?;
+
     // 1. Detach from parent session.
     unsafe {
         if libc::setsid() == -1 {
@@ -369,12 +374,17 @@ fn run(
                     client = None;
 
                     // Use a blocking read timeout for the handshake only.
-                    // The handshake is a single Resize→InitialState exchange
-                    // that must complete before entering the non-blocking
+                    // The handshake is: version byte → Resize → InitialState,
+                    // which must complete before entering the non-blocking
                     // main loop. 5 seconds is generous for a local socket.
                     let mut handshake_stream = stream;
                     let _ =
                         handshake_stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+                    // Validate protocol version before reading messages.
+                    if protocol::read_version(&mut handshake_stream).is_err() {
+                        continue;
+                    }
 
                     match protocol::read_message(&mut handshake_stream) {
                         Ok(Some(Message::Resize {
@@ -420,7 +430,10 @@ fn run(
                             let restore = build_restore_sequence(&mut vte);
                             if protocol::write_message(
                                 &mut handshake_stream,
-                                &Message::InitialState(restore),
+                                &Message::InitialState {
+                                    session_id: session_id.clone(),
+                                    data: restore,
+                                },
                             )
                             .is_err()
                             {
