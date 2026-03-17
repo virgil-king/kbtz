@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
@@ -24,7 +24,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 struct SessionDecorator<'a> {
     task_to_session: &'a HashMap<String, String>,
     sessions: &'a HashMap<String, TrackedSession>,
-    unread: &'a HashSet<String>,
 }
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
@@ -36,8 +35,8 @@ impl ui::TreeDecorator for SessionDecorator<'_> {
                     format!(" {sid}"),
                     Style::default().fg(Color::Cyan),
                 )];
-                if self.unread.contains(sid) {
-                    after_name.push(Span::styled(" \u{25cf}", Style::default().fg(Color::Blue)));
+                if ts.unread {
+                    after_name.push(Span::styled(" \u{1f440}", Style::default()));
                 }
                 return ui::RowDecoration {
                     icon_override: Some((
@@ -80,7 +79,6 @@ fn render_tree(frame: &mut Frame, app: &mut App, area: Rect) {
     let decorator = SessionDecorator {
         task_to_session: &app.task_to_session,
         sessions: &app.sessions,
-        unread: &app.unread,
     };
     let items = ui::build_tree_items(&app.tree.rows, &app.tree.collapsed, &decorator);
 
