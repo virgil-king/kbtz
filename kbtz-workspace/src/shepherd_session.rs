@@ -156,6 +156,13 @@ fn shepherd_reader_thread(
                     }
                 }
             }
+            Ok(Some(Message::ChildExited { exit_code })) => {
+                exit_reason = "child exited";
+                kbtz::debug_log::log(&format!(
+                    "shepherd_reader_thread({session_id}): child exited with code {exit_code}"
+                ));
+                break;
+            }
             Ok(Some(_)) => {} // Ignore unexpected messages
             Ok(None) => {
                 exit_reason = "EOF";
