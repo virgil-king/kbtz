@@ -2069,6 +2069,33 @@ mod tests {
     }
 
     #[test]
+    fn spawn_for_task_rejects_non_open_tasks() {
+        let (mut app, _dir) = test_app();
+        for (name, paused) in [("paused-task", true), ("done-task", false)] {
+            ops::add_task(
+                &app.conn,
+                ops::AddTaskParams {
+                    name,
+                    description: "test",
+                    paused,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        ops::mark_done(&app.conn, "done-task").unwrap();
+
+        let err = app.spawn_for_task("paused-task").unwrap_err();
+        assert!(err.to_string().contains("paused"), "{err}");
+
+        let err = app.spawn_for_task("done-task").unwrap_err();
+        assert!(err.to_string().contains("done"), "{err}");
+
+        assert_eq!(app.counter, 0);
+        assert!(app.task_to_session.is_empty());
+    }
+
+    #[test]
     fn spawn_sets_kbtz_agent_type_env_var() {
         let status_dir = TempDir::new().unwrap();
         let claude_sessions_dir = status_dir.path().join("claude-sessions");
