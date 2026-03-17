@@ -97,8 +97,7 @@ pub fn decode(buf: &[u8]) -> Result<Message> {
                     payload.len()
                 );
             }
-            let exit_code =
-                u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let exit_code = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(Message::ChildExited { exit_code })
         }
         _ => bail!("unknown message type: 0x{:02x}", type_byte),
