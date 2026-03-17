@@ -850,6 +850,14 @@ impl App {
                                 "reconnect: connect FAILED for {session_id} \
                                  (task={task_name}): {e:#}"
                             ));
+                            // Kill child and shepherd before deleting PID files,
+                            // otherwise they become permanently orphaned.
+                            kill_child_from_pid_file(&pid_path);
+                            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                                }
+                            }
                             cleanup_session_files(&self.status_dir, &session_id);
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                         }
