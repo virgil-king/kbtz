@@ -711,7 +711,7 @@ fn tree_loop(
                             } else if let Some(task) = app.next_unread_session(None) {
                                 return Ok(Action::ZoomIn(task));
                             } else {
-                                app.tree.error = Some("no sessions need input".into());
+                                app.tree.error = Some("no sessions to jump to".into());
                             }
                         }
                         KeyCode::Char('c') => {
@@ -857,7 +857,7 @@ fn handle_prefix_command(
                     cols,
                     kind,
                     last_status,
-                    Some("no sessions need input"),
+                    Some("no sessions to jump to"),
                 );
                 Ok(None)
             }
