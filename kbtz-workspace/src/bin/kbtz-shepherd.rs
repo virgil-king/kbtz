@@ -158,6 +158,11 @@ fn run(
     command: &str,
     command_args: &[&str],
 ) -> anyhow::Result<()> {
+    // Read session ID from environment before redirecting stderr to /dev/null,
+    // so the error message is visible if the env var is missing.
+    let session_id = std::env::var("KBTZ_SESSION_ID")
+        .map_err(|_| anyhow::anyhow!("KBTZ_SESSION_ID not set in environment"))?;
+
     // 1. Detach from parent session.
     unsafe {
         if libc::setsid() == -1 {
@@ -251,11 +256,6 @@ fn run(
     // 6. VTE parser with scrollback — this is the authoritative scrollback
     // store, like tmux's server-side pane history.  No raw byte buffer.
     let mut vte = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
-
-    // Read session ID from environment for handshake validation.
-    // This must be set — without it we can't prove our identity to the workspace.
-    let session_id = std::env::var("KBTZ_SESSION_ID")
-        .map_err(|_| anyhow::anyhow!("KBTZ_SESSION_ID not set in environment"))?;
 
     let mut client: Option<ClientConn> = None;
     let mut shutdown_requested = false;
