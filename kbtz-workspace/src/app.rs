@@ -766,19 +766,26 @@ impl App {
             let pid_path = path.with_extension("pid");
 
             // Verify the shepherd process is still alive before attempting to connect.
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            let pid_result = std::fs::read_to_string(&pid_path);
+            if pid_result.is_err() {
+                kbtz::debug_log::log(&format!(
+                    "reconnect: no PID file for {session_id} at {}, skipping",
+                    pid_path.display()
+                ));
+                cleanup_session_files(&self.status_dir, &session_id);
+                continue;
+            }
+            if let Ok(pid_str) = pid_result {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                    let ret = unsafe { libc::kill(pid, 0) };
+                    let errno = std::io::Error::last_os_error();
+                    let alive =
+                        ret == 0 || (ret == -1 && errno.raw_os_error() == Some(libc::EPERM));
+                    kbtz::debug_log::log(&format!(
+                        "reconnect: checking {session_id} shepherd pid={pid} \
+                         kill(0)={ret} errno={errno} alive={alive}"
+                    ));
                     if !alive {
-                        let err = std::io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::EPERM) {
-                            kbtz::debug_log::log(&format!(
-                                "reconnect_sessions: kill({pid}, 0) returned EPERM"
-                            ));
-                        }
-                        kbtz::debug_log::log(&format!(
-                            "reconnect: shepherd dead for {session_id} (pid={pid}), cleaning up"
-                        ));
                         // Shepherd died — clean up stale files and kill orphaned child
                         kill_child_from_pid_file(&pid_path);
                         cleanup_session_files(&self.status_dir, &session_id);
@@ -830,7 +837,8 @@ impl App {
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
-                                "reconnect: stale socket for {session_id} (task={task_name}): {e}"
+                                "reconnect: connect FAILED for {session_id} \
+                                 (task={task_name}): {e:#}"
                             ));
                             cleanup_session_files(&self.status_dir, &session_id);
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
