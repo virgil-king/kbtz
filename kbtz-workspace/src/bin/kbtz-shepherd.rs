@@ -472,14 +472,12 @@ fn run(
                                 restore.len(),
                                 std::process::id()
                             ));
-                            if protocol::write_message(
+                            if let Err(e) = protocol::write_message(
                                 &mut handshake_stream,
                                 &Message::InitialState(restore),
-                            )
-                            .is_err()
-                            {
+                            ) {
                                 kbtz::debug_log::log(&format!(
-                                    "shepherd: failed to send InitialState pid={}",
+                                    "shepherd: failed to send InitialState pid={}: {e:#}",
                                     std::process::id()
                                 ));
                                 // Failed to send; drop connection.
