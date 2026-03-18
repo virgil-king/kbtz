@@ -509,7 +509,7 @@ fn run(
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
-                                "shepherd: error reading handshake: {e} pid={}",
+                                "shepherd: error reading handshake: {e:#} pid={}",
                                 std::process::id()
                             ));
                         }
