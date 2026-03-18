@@ -408,11 +408,13 @@ fn run(
                     // Close existing client if any.
                     client = None;
 
-                    // Use a blocking read timeout for the handshake only.
-                    // The handshake is a single Resize→InitialState exchange
-                    // that must complete before entering the non-blocking
-                    // main loop. 5 seconds is generous for a local socket.
+                    // The handshake uses blocking I/O (read_exact,
+                    // write_all).  On BSD/macOS, accepted sockets inherit
+                    // O_NONBLOCK from the listener — explicitly switch to
+                    // blocking mode.  After the handshake, ClientConn::new
+                    // switches back to non-blocking for the main loop.
                     let mut handshake_stream = stream;
+                    let _ = handshake_stream.set_nonblocking(false);
                     let _ =
                         handshake_stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
