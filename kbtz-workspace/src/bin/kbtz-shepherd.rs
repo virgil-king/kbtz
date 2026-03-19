@@ -110,18 +110,21 @@ extern "C" fn sigterm_handler(_sig: libc::c_int) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: kbtz-shepherd <socket-path> <pid-file> <rows> <cols> <command> [args...]");
+    eprintln!(
+        "usage: kbtz-shepherd <socket-path> <state-file> <rows> <cols> \
+         <task> <agent-type> <session-id> <command> [args...]"
+    );
     std::process::exit(1);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 6 {
+    if args.len() < 9 {
         usage();
     }
 
     let socket_path = PathBuf::from(&args[1]);
-    let pid_file = PathBuf::from(&args[2]);
+    let state_file = PathBuf::from(&args[2]);
     let rows: u16 = args[3].parse().unwrap_or_else(|_| {
         eprintln!("kbtz-shepherd: invalid rows: {}", args[3]);
         std::process::exit(1);
@@ -130,39 +133,50 @@ fn main() {
         eprintln!("kbtz-shepherd: invalid cols: {}", args[4]);
         std::process::exit(1);
     });
-    let command = &args[5];
-    let command_args: Vec<&str> = args[6..].iter().map(|s| s.as_str()).collect();
+    let task = args[5].clone();
+    let agent_type = args[6].clone();
+    let session_id = args[7].clone();
+    let command = &args[8];
+    let command_args: Vec<&str> = args[9..].iter().map(|s| s.as_str()).collect();
 
     kbtz::debug_log::log(&format!(
         "shepherd: starting pid={} socket={} command={command} args={command_args:?} rows={rows} cols={cols}",
         std::process::id(),
         socket_path.display(),
     ));
-    if let Err(e) = run(&socket_path, &pid_file, rows, cols, command, &command_args) {
+    if let Err(e) = run(
+        &socket_path,
+        &state_file,
+        rows,
+        cols,
+        &task,
+        &agent_type,
+        &session_id,
+        command,
+        &command_args,
+    ) {
         kbtz::debug_log::log(&format!(
             "shepherd: run() failed pid={}: {e:#}",
             std::process::id()
         ));
-        cleanup(&socket_path, &pid_file);
+        cleanup(&socket_path, &state_file);
         std::process::exit(1);
     }
 }
 
-fn child_pid_path(pid_file: &Path) -> PathBuf {
-    pid_file.with_extension("child-pid")
-}
-
-fn cleanup(socket_path: &Path, pid_file: &Path) {
+fn cleanup(socket_path: &Path, state_file: &Path) {
     let _ = std::fs::remove_file(socket_path);
-    let _ = std::fs::remove_file(pid_file);
-    let _ = std::fs::remove_file(child_pid_path(pid_file));
+    let _ = std::fs::remove_file(state_file);
 }
 
 fn run(
     socket_path: &Path,
-    pid_file: &Path,
+    state_file: &Path,
     rows: u16,
     cols: u16,
+    task: &str,
+    agent_type: &str,
+    session_id: &str,
     command: &str,
     command_args: &[&str],
 ) -> anyhow::Result<()> {
@@ -195,10 +209,7 @@ fn run(
     }
     drop(dev_null);
 
-    // 2. Write PID file.
-    std::fs::write(pid_file, format!("{}", std::process::id()))?;
-
-    // 3. Install SIGTERM handler.
+    // 2. Install SIGTERM handler.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = sigterm_handler as *const () as usize;
@@ -207,7 +218,7 @@ fn run(
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 
-    // 4. Create PTY and spawn child.
+    // 3. Create PTY and spawn child.
     let pty_system = native_pty_system();
     let pty_size = PtySize {
         rows,
@@ -234,10 +245,18 @@ fn run(
     let child_pid = child.process_id();
     kbtz::debug_log::log(&format!("shepherd: child spawned, child_pid={child_pid:?}"));
 
-    // Write child PID so force_kill() can kill the agent, not just the shepherd.
-    if let Some(pid) = child_pid {
-        std::fs::write(child_pid_path(pid_file), format!("{pid}"))?;
-    }
+    // 4. Write atomic state file with all session metadata.
+    let state = kbtz_workspace::ShepherdState {
+        shepherd_pid: std::process::id(),
+        child_pid,
+        socket_path: socket_path.to_string_lossy().to_string(),
+        task: task.to_string(),
+        agent_type: agent_type.to_string(),
+        session_id: session_id.to_string(),
+    };
+    state
+        .write_atomic(state_file)
+        .map_err(|e| anyhow::anyhow!("failed to write state file: {e}"))?;
 
     let mut pty_writer = pair
         .master
@@ -306,7 +325,7 @@ fn run(
                     libc::fcntl(pty_master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
                 }
                 drain_pty(&mut pty_reader, &mut vte, &mut client);
-                cleanup(socket_path, pid_file);
+                cleanup(socket_path, state_file);
                 // Exit with the child's exit code so the workspace can
                 // detect failed sessions via waitpid on the shepherd.
                 std::process::exit(status.exit_code() as i32);
@@ -318,7 +337,7 @@ fn run(
                     std::process::id()
                 ));
                 // Error checking child status -- treat as exited.
-                cleanup(socket_path, pid_file);
+                cleanup(socket_path, state_file);
                 return Ok(());
             }
         }
@@ -360,7 +379,7 @@ fn run(
                 continue;
             }
             // Unexpected poll error.
-            cleanup(socket_path, pid_file);
+            cleanup(socket_path, state_file);
             return Err(err.into());
         }
 
@@ -464,7 +483,7 @@ fn run(
                                     );
                                 }
                                 drain_pty(&mut pty_reader, &mut vte, &mut client);
-                                cleanup(socket_path, pid_file);
+                                cleanup(socket_path, state_file);
                                 std::process::exit(status.exit_code() as i32);
                             }
 
@@ -758,14 +777,6 @@ mod tests {
 
         let msg = Message::PtyOutput(b"data".to_vec());
         assert!(cc.write_message(&msg).is_err());
-    }
-
-    #[test]
-    fn child_pid_path_derives_extension() {
-        assert_eq!(
-            child_pid_path(Path::new("/tmp/ws-1.pid")),
-            PathBuf::from("/tmp/ws-1.child-pid")
-        );
     }
 
     #[test]

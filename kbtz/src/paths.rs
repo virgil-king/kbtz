@@ -101,9 +101,9 @@ mod tests {
 
     #[test]
     fn is_session_filename_matches_with_extensions() {
-        assert!(is_session_filename("ws-0.sock"));
-        assert!(is_session_filename("ws-1.pid"));
-        assert!(is_session_filename("ws-2.child-pid"));
+        assert!(is_session_filename("ws-0.state"));
+        assert!(is_session_filename("ws-1.sock"));
+        assert!(is_session_filename("ws-2.state"));
     }
 
     #[test]
