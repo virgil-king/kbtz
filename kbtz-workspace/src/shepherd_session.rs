@@ -1,6 +1,6 @@
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -9,9 +9,9 @@ use anyhow::{bail, Context, Result};
 
 use crate::session::{Passthrough, SessionHandle, SessionStatus};
 use kbtz_workspace::protocol::{self, Message};
+use kbtz_workspace::ShepherdState;
 
 pub struct ShepherdSession {
-    socket_path: PathBuf,
     writer: Mutex<BufWriter<UnixStream>>,
     passthrough: Arc<Mutex<Passthrough>>,
     status: SessionStatus,
@@ -33,31 +33,23 @@ pub struct ShepherdSession {
 
 impl ShepherdSession {
     pub fn connect(
-        socket_path: &Path,
-        pid_path: &Path,
-        task_name: &str,
-        session_id: &str,
+        state: &ShepherdState,
         rows: u16,
         cols: u16,
         process: Option<std::process::Child>,
     ) -> Result<Self> {
-        let pid_str = std::fs::read_to_string(pid_path)
-            .with_context(|| format!("failed to read shepherd PID from {}", pid_path.display()))?;
-        let shepherd_pid: u32 = pid_str
-            .trim()
-            .parse()
-            .with_context(|| format!("invalid PID in {}: {:?}", pid_path.display(), pid_str))?;
-
-        let child_pid: Option<u32> = std::fs::read_to_string(pid_path.with_extension("child-pid"))
-            .ok()
-            .and_then(|s| s.trim().parse().ok());
+        let shepherd_pid = state.shepherd_pid;
+        let child_pid = state.child_pid;
+        let socket_path = PathBuf::from(&state.socket_path);
+        let task_name = &state.task;
+        let session_id = &state.session_id;
 
         kbtz::debug_log::log(&format!(
             "connect({session_id}): shepherd_pid={shepherd_pid} child_pid={child_pid:?} socket={}",
             socket_path.display()
         ));
 
-        let stream = UnixStream::connect(socket_path).with_context(|| {
+        let stream = UnixStream::connect(&socket_path).with_context(|| {
             format!("failed to connect to shepherd at {}", socket_path.display())
         })?;
         kbtz::debug_log::log(&format!("connect({session_id}): socket connected"));
@@ -123,7 +115,6 @@ impl ShepherdSession {
         std::thread::spawn(move || shepherd_reader_thread(reader, pt_clone, ra, reader_sid));
 
         Ok(ShepherdSession {
-            socket_path: socket_path.to_path_buf(),
             writer,
             passthrough,
             status: SessionStatus::Starting,
@@ -216,13 +207,12 @@ impl SessionHandle for ShepherdSession {
     }
 
     fn is_alive(&mut self) -> bool {
-        // Check process liveness first: if the shepherd was SIGKILLed its
-        // cleanup code never ran and the socket file is left behind.
+        // Check process liveness: if the shepherd was SIGKILLed its
+        // cleanup code never ran and the state file is left behind.
         // EPERM means the process exists but we can't signal it — treat as alive.
         let ret = unsafe { libc::kill(self.shepherd_pid as libc::pid_t, 0) };
-        let process_alive = ret == 0
-            || (ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
-        process_alive && self.socket_path.exists()
+        ret == 0
+            || (ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
     }
 
     fn mark_stopping(&mut self) {
@@ -372,7 +362,7 @@ mod tests {
 
     /// Helper: create a ShepherdSession with one end of a UnixStream pair,
     /// simulating the size-first handshake.
-    fn make_test_session(socket_path: &Path) -> (ShepherdSession, BufReader<UnixStream>) {
+    fn make_test_session() -> (ShepherdSession, BufReader<UnixStream>) {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
 
         // Simulate the shepherd side: it will receive a Resize first,
@@ -410,7 +400,6 @@ mod tests {
         });
 
         let session = ShepherdSession {
-            socket_path: socket_path.to_path_buf(),
             writer: Mutex::new(BufWriter::new(write_stream)),
             passthrough,
             status: SessionStatus::Starting,
@@ -428,15 +417,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_alive_with_socket_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-
-        // Create a file at the socket path
-        std::fs::write(&socket_path, "").unwrap();
-
+    fn test_is_alive_process_check() {
         let session = ShepherdSession {
-            socket_path: socket_path.clone(),
             writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
             passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
             status: SessionStatus::Starting,
@@ -449,28 +431,27 @@ mod tests {
             process: None,
         };
 
-        // is_alive takes &mut self
         let mut session = session;
-        assert!(session.is_alive(), "socket file exists, should be alive");
+        assert!(
+            session.is_alive(),
+            "current process should be detected as alive"
+        );
 
-        std::fs::remove_file(&socket_path).unwrap();
+        // Get a guaranteed-dead PID by spawning and waiting for a process.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        session.shepherd_pid = dead_pid;
         assert!(
             !session.is_alive(),
-            "socket file removed, should not be alive"
+            "dead process should not be detected as alive"
         );
     }
 
     #[test]
     fn test_write_input_sends_pty_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
+        let (mut session, mut server_reader) = make_test_session();
 
-        let (mut session, mut server_reader) = make_test_session(&socket_path);
-
-        // First message from session construction is the Resize that the reader
-        // thread might have consumed — but in our test helper we don't send a
-        // Resize during construction. We just write input directly.
         session.write_input(b"hello").unwrap();
 
         let msg = protocol::read_message(&mut server_reader).unwrap().unwrap();
@@ -479,11 +460,7 @@ mod tests {
 
     #[test]
     fn test_resize_sends_resize_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
-        let (session, mut server_reader) = make_test_session(&socket_path);
+        let (session, mut server_reader) = make_test_session();
 
         session.resize(25, 80).unwrap();
 
@@ -493,11 +470,7 @@ mod tests {
 
     #[test]
     fn write_input_ok_after_disconnect() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
-        let (mut session, server_reader) = make_test_session(&socket_path);
+        let (mut session, server_reader) = make_test_session();
 
         // Drop the server — subsequent writes hit a broken pipe.
         drop(server_reader);
@@ -509,11 +482,7 @@ mod tests {
 
     #[test]
     fn resize_ok_after_disconnect() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
-        let (session, server_reader) = make_test_session(&socket_path);
+        let (session, server_reader) = make_test_session();
 
         drop(server_reader);
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -524,11 +493,7 @@ mod tests {
 
     #[test]
     fn reader_alive_false_after_server_closes() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
-        let (session, server_reader) = make_test_session(&socket_path);
+        let (session, server_reader) = make_test_session();
         assert!(session.reader_alive(), "reader should be alive initially");
 
         // Drop the server side — the reader thread sees EOF and exits.
@@ -559,17 +524,12 @@ mod tests {
 
     #[test]
     fn force_kill_kills_child_process_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
         let mut child = spawn_isolated_sleep();
         let child_pid = child.id();
         let mut shepherd = spawn_isolated_sleep();
         let shepherd_pid = shepherd.id();
 
         let mut session = ShepherdSession {
-            socket_path,
             writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
             passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
             status: SessionStatus::Starting,
@@ -596,15 +556,10 @@ mod tests {
 
     #[test]
     fn force_kill_without_child_pid_only_kills_shepherd() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        std::fs::write(&socket_path, "").unwrap();
-
         let mut shepherd = spawn_isolated_sleep();
         let shepherd_pid = shepherd.id();
 
         let mut session = ShepherdSession {
-            socket_path,
             writer: Mutex::new(BufWriter::new(UnixStream::pair().unwrap().0)),
             passthrough: Arc::new(Mutex::new(Passthrough::new(24, 80))),
             status: SessionStatus::Starting,

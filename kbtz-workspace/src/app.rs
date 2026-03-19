@@ -81,22 +81,20 @@ fn session_id_to_filename(session_id: &str) -> String {
     kbtz::paths::session_id_to_filename(session_id)
 }
 
-/// Remove the status, socket, PID, and child-PID files for a session.
+/// Remove the status and state files for a session.
 fn cleanup_session_files(status_dir: &Path, session_id: &str) {
     let filename = session_id_to_filename(session_id);
     let _ = std::fs::remove_file(status_dir.join(&filename));
+    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.state")));
+    // Also clean up socket file — the shepherd removes it on exit, but
+    // if it was SIGKILLed the socket may be left behind.
     let _ = std::fs::remove_file(status_dir.join(format!("{filename}.sock")));
-    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.pid")));
-    let _ = std::fs::remove_file(status_dir.join(format!("{filename}.child-pid")));
 }
 
-/// Kill the agent child process group from the `.child-pid` file next to a shepherd `.pid` file.
-fn kill_child_from_pid_file(pid_path: &Path) {
-    let child_pid_path = pid_path.with_extension("child-pid");
-    if let Ok(pid_str) = std::fs::read_to_string(&child_pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
-        }
+/// Kill the agent child process group using the state file.
+fn kill_child_from_state(state: &kbtz_workspace::ShepherdState) {
+    if let Some(pid) = state.child_pid {
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
     }
 }
 
@@ -516,6 +514,7 @@ impl App {
             &arg_refs,
             "toplevel",
             session_id,
+            &self.default_backend,
             self.term.rows,
             self.term.cols,
             &env_vars,
@@ -619,6 +618,7 @@ impl App {
             &arg_refs,
             &task.name,
             session_id,
+            agent_type,
             self.term.rows,
             self.term.cols,
             &env_vars,
@@ -758,62 +758,56 @@ impl App {
         let entries = std::fs::read_dir(&self.status_dir)?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            if path.extension().and_then(|e| e.to_str()) != Some("state") {
                 continue;
             }
             let stem = path.file_stem().unwrap().to_string_lossy();
             let session_id = kbtz::paths::filename_to_session_id(&stem);
-            let pid_path = path.with_extension("pid");
+
+            // Read the state file to get all session metadata.
+            let state = match kbtz_workspace::ShepherdState::read(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    kbtz::debug_log::log(&format!(
+                        "reconnect: failed to read state file for {session_id} at {}: {e}",
+                        path.display()
+                    ));
+                    cleanup_session_files(&self.status_dir, &session_id);
+                    continue;
+                }
+            };
 
             // Verify the shepherd process is still alive before attempting to connect.
-            let pid_result = std::fs::read_to_string(&pid_path);
-            if pid_result.is_err() {
-                kbtz::debug_log::log(&format!(
-                    "reconnect: no PID file for {session_id} at {}, skipping",
-                    pid_path.display()
-                ));
+            let pid = state.shepherd_pid as i32;
+            let ret = unsafe { libc::kill(pid, 0) };
+            let errno = std::io::Error::last_os_error();
+            let alive = ret == 0 || (ret == -1 && errno.raw_os_error() == Some(libc::EPERM));
+            kbtz::debug_log::log(&format!(
+                "reconnect: checking {session_id} shepherd pid={pid} \
+                 kill(0)={ret} errno={errno} alive={alive}"
+            ));
+            if !alive {
+                // Shepherd died — clean up stale files and kill orphaned child
+                kill_child_from_state(&state);
                 cleanup_session_files(&self.status_dir, &session_id);
-                continue;
-            }
-            if let Ok(pid_str) = pid_result {
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    let ret = unsafe { libc::kill(pid, 0) };
-                    let errno = std::io::Error::last_os_error();
-                    let alive =
-                        ret == 0 || (ret == -1 && errno.raw_os_error() == Some(libc::EPERM));
-                    kbtz::debug_log::log(&format!(
-                        "reconnect: checking {session_id} shepherd pid={pid} \
-                         kill(0)={ret} errno={errno} alive={alive}"
-                    ));
-                    if !alive {
-                        // Shepherd died — clean up stale files and kill orphaned child
-                        kill_child_from_pid_file(&pid_path);
-                        cleanup_session_files(&self.status_dir, &session_id);
-                        if let Some(task_name) = self.find_task_for_session(&session_id) {
-                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
-                        }
-                        continue;
-                    }
+                if let Some(task_name) = self.find_task_for_session(&session_id) {
+                    let _ = ops::release_task(&self.conn, &task_name, &session_id);
                 }
+                continue;
             }
 
             // Look up the task claim in the DB
             match self.find_task_for_session(&session_id) {
                 Some(task_name) => {
                     match ShepherdSession::connect(
-                        &path,
-                        &pid_path,
-                        &task_name,
-                        &session_id,
+                        &state,
                         self.term.rows,
                         self.term.cols,
                         None, // no Child handle for reconnected sessions
                     ) {
                         Ok(session) => {
-                            // Resolve agent type from the task's agent field.
-                            let agent_type = ops::get_task(&self.conn, &task_name)
-                                .map(|t| t.agent.unwrap_or_else(|| self.default_backend.clone()))
-                                .unwrap_or_else(|_| self.default_backend.clone());
+                            // Use agent type from state file.
+                            let agent_type = state.agent_type.clone();
                             // Ensure a backend exists for this agent type so
                             // execute_actions can find it at exit time.
                             self.ensure_backend(&agent_type);
@@ -850,12 +844,8 @@ impl App {
                         "reconnect: orphaned shepherd {session_id}, killing"
                     ));
                     // No task claim -- orphaned shepherd. Kill child and shepherd, clean up.
-                    kill_child_from_pid_file(&pid_path);
-                    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                            unsafe { libc::kill(pid, libc::SIGKILL) };
-                        }
-                    }
+                    kill_child_from_state(&state);
+                    unsafe { libc::kill(state.shepherd_pid as libc::pid_t, libc::SIGKILL) };
                     cleanup_session_files(&self.status_dir, &session_id);
                 }
             }
@@ -1048,9 +1038,7 @@ impl App {
                     continue;
                 }
                 let ext = path.extension().and_then(|e| e.to_str());
-                if self.persistent_sessions
-                    && (ext == Some("sock") || ext == Some("pid") || ext == Some("child-pid"))
-                {
+                if self.persistent_sessions && (ext == Some("state") || ext == Some("sock")) {
                     continue;
                 }
                 let _ = std::fs::remove_file(path);
@@ -1187,6 +1175,7 @@ mod tests {
             _args: &[&str],
             task_name: &str,
             session_id: &str,
+            _agent_type: &str,
             _rows: u16,
             _cols: u16,
             _env_vars: &[(&str, &str)],
@@ -1228,6 +1217,7 @@ mod tests {
             _args: &[&str],
             task_name: &str,
             session_id: &str,
+            _agent_type: &str,
             _rows: u16,
             _cols: u16,
             env_vars: &[(&str, &str)],
@@ -2205,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_session_cleans_up_child_pid_file() {
+    fn remove_session_cleans_up_state_file() {
         let (mut app, _dir) = test_app();
         ops::add_task(
             &app.conn,
@@ -2218,10 +2208,18 @@ mod tests {
         .unwrap();
         ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
 
-        // Create the child-pid file that the shepherd would write.
+        // Create the state file that the shepherd would write.
         let filename = session_id_to_filename("ws/1");
-        let child_pid_file = app.status_dir.join(format!("{filename}.child-pid"));
-        std::fs::write(&child_pid_file, "12345").unwrap();
+        let state_file = app.status_dir.join(format!("{filename}.state"));
+        let state = kbtz_workspace::ShepherdState {
+            shepherd_pid: std::process::id(),
+            child_pid: Some(12345),
+            socket_path: "/tmp/test.sock".to_string(),
+            task: "task-a".to_string(),
+            agent_type: "claude".to_string(),
+            session_id: "ws/1".to_string(),
+        };
+        state.write_atomic(&state_file).unwrap();
 
         app.sessions.insert(
             "ws/1".to_string(),
@@ -2235,26 +2233,12 @@ mod tests {
 
         app.remove_session("ws/1");
 
-        assert!(
-            !child_pid_file.exists(),
-            ".child-pid file should be removed"
-        );
+        assert!(!state_file.exists(), ".state file should be removed");
     }
 
     #[test]
-    fn kill_child_from_pid_file_missing_file_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("nonexistent.pid");
-        // Should not panic when the file doesn't exist.
-        kill_child_from_pid_file(&pid_path);
-    }
-
-    #[test]
-    fn kill_child_from_pid_file_kills_process_group() {
+    fn kill_child_from_state_kills_process_group() {
         use std::os::unix::process::CommandExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("test.pid");
 
         // Spawn a sleep in its own process group.
         let mut child = unsafe {
@@ -2269,13 +2253,34 @@ mod tests {
         };
         let child_pid = child.id();
 
-        std::fs::write(pid_path.with_extension("child-pid"), format!("{child_pid}")).unwrap();
+        let state = kbtz_workspace::ShepherdState {
+            shepherd_pid: std::process::id(),
+            child_pid: Some(child_pid),
+            socket_path: "/tmp/test.sock".to_string(),
+            task: "test".to_string(),
+            agent_type: "claude".to_string(),
+            session_id: "ws/1".to_string(),
+        };
 
-        kill_child_from_pid_file(&pid_path);
+        kill_child_from_state(&state);
 
         // wait() reaps the zombie and confirms the process exited.
         let exited = child.wait().unwrap().code().is_none(); // killed by signal → no code
         assert!(exited, "child should have been killed by signal");
+    }
+
+    #[test]
+    fn kill_child_from_state_no_child_is_noop() {
+        let state = kbtz_workspace::ShepherdState {
+            shepherd_pid: std::process::id(),
+            child_pid: None,
+            socket_path: "/tmp/test.sock".to_string(),
+            task: "test".to_string(),
+            agent_type: "claude".to_string(),
+            session_id: "ws/1".to_string(),
+        };
+        // Should not panic when no child PID.
+        kill_child_from_state(&state);
     }
 
     #[test]
@@ -2434,8 +2439,8 @@ mod tests {
         // Create session files that SHOULD be cleaned up.
         let status_file = status_dir.path().join("ws-1");
         std::fs::write(&status_file, b"active").unwrap();
-        let sock_file = status_dir.path().join("ws-1.sock");
-        std::fs::write(&sock_file, b"").unwrap();
+        let state_file = status_dir.path().join("ws-1.state");
+        std::fs::write(&state_file, b"{}").unwrap();
 
         // Create an unrelated file that must NOT be cleaned up.
         let unrelated = status_dir.path().join("something-else.txt");
@@ -2477,13 +2482,13 @@ mod tests {
             "session status file should be cleaned up"
         );
         assert!(
-            !sock_file.exists(),
-            "session socket file should be cleaned up"
+            !state_file.exists(),
+            "session state file should be cleaned up"
         );
     }
 
-    /// When reconnect_sessions encounters a dead shepherd, the orchestrator
-    /// files should be cleaned up but the claude-sessions/<task> file must
+    /// When reconnect_sessions encounters a dead shepherd, the state
+    /// file should be cleaned up but the claude-sessions/<task> file must
     /// be preserved so the next spawn can resume the conversation.
     #[test]
     fn reconnect_dead_shepherd_preserves_session_file() {
@@ -2509,13 +2514,22 @@ mod tests {
         let session_file = app.claude_sessions_dir.join(task_name);
         std::fs::write(&session_file, uuid).unwrap();
 
-        // Create orchestrator files simulating a previously running shepherd.
+        // Create state file simulating a previously running shepherd with a dead PID.
         let filename = session_id_to_filename(session_id);
-        let sock_path = app.status_dir.join(format!("{filename}.sock"));
-        let pid_path = app.status_dir.join(format!("{filename}.pid"));
-        std::fs::write(&sock_path, "").unwrap();
-        // Use an impossible PID so the alive check fails (dead shepherd).
-        std::fs::write(&pid_path, "999999999").unwrap();
+        let state_path = app.status_dir.join(format!("{filename}.state"));
+        let state = kbtz_workspace::ShepherdState {
+            shepherd_pid: 999999999,
+            child_pid: None,
+            socket_path: app
+                .status_dir
+                .join(format!("{filename}.sock"))
+                .to_string_lossy()
+                .to_string(),
+            task: task_name.to_string(),
+            agent_type: "claude".to_string(),
+            session_id: session_id.to_string(),
+        };
+        state.write_atomic(&state_path).unwrap();
 
         app.reconnect_sessions().unwrap();
 
@@ -2530,9 +2544,8 @@ mod tests {
             "session UUID must be intact"
         );
 
-        // Orchestrator files should be cleaned up.
-        assert!(!sock_path.exists(), "stale socket should be removed");
-        assert!(!pid_path.exists(), "stale pid file should be removed");
+        // State file should be cleaned up.
+        assert!(!state_path.exists(), "stale state file should be removed");
 
         // Task should be released (available for re-spawn).
         let task = ops::get_task(&app.conn, task_name).unwrap();
@@ -2568,13 +2581,21 @@ mod tests {
         let session_file = app.claude_sessions_dir.join(task_name);
         std::fs::write(&session_file, uuid).unwrap();
 
-        // Create a .sock as a regular file (not a real socket) so connect fails.
-        // Use the current process PID so the alive check passes.
+        // Create a state file with socket pointing to a regular file (not a
+        // real socket) so connect fails. Use current PID so alive check passes.
         let filename = session_id_to_filename(session_id);
         let sock_path = app.status_dir.join(format!("{filename}.sock"));
-        let pid_path = app.status_dir.join(format!("{filename}.pid"));
         std::fs::write(&sock_path, "").unwrap();
-        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        let state_path = app.status_dir.join(format!("{filename}.state"));
+        let state = kbtz_workspace::ShepherdState {
+            shepherd_pid: std::process::id(),
+            child_pid: None,
+            socket_path: sock_path.to_string_lossy().to_string(),
+            task: task_name.to_string(),
+            agent_type: "claude".to_string(),
+            session_id: session_id.to_string(),
+        };
+        state.write_atomic(&state_path).unwrap();
 
         app.reconnect_sessions().unwrap();
 
@@ -2589,9 +2610,8 @@ mod tests {
             "session UUID must be intact"
         );
 
-        // Orchestrator files should be cleaned up.
-        assert!(!sock_path.exists(), "stale socket should be removed");
-        assert!(!pid_path.exists(), "stale pid file should be removed");
+        // State file should be cleaned up.
+        assert!(!state_path.exists(), "stale state file should be removed");
 
         // Task should be released.
         let task = ops::get_task(&app.conn, task_name).unwrap();

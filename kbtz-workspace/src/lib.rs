@@ -2,6 +2,44 @@ pub mod prompt;
 pub mod protocol;
 
 use std::io::{BufWriter, StdoutLock, Write};
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+/// Atomic state file written by the shepherd process.
+///
+/// Replaces the scattered `.sock`, `.pid`, and `.child-pid` files with a
+/// single JSON file that is written atomically (write temp + rename).
+/// The shepherd owns the file lifecycle — creates on start, removes on exit.
+/// The workspace reads it for reconnection and deletes only when the
+/// shepherd is confirmed dead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShepherdState {
+    pub shepherd_pid: u32,
+    pub child_pid: Option<u32>,
+    pub socket_path: String,
+    pub task: String,
+    pub agent_type: String,
+    pub session_id: String,
+}
+
+impl ShepherdState {
+    /// Write the state file atomically: write to a temp file, then rename.
+    pub fn write_atomic(&self, path: &Path) -> std::io::Result<()> {
+        let tmp = path.with_extension("state.tmp");
+        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Read a state file from disk.
+    pub fn read(path: &Path) -> std::io::Result<Self> {
+        let data = std::fs::read_to_string(path)?;
+        serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
 
 /// Max scrollback rows retained per session for the scroll-back viewer.
 /// Shared between the workspace (session.rs) and the shepherd.

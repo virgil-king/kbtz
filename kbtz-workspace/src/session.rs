@@ -64,6 +64,7 @@ pub trait SessionSpawner: Send {
         args: &[&str],
         task_name: &str,
         session_id: &str,
+        agent_type: &str,
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
@@ -80,6 +81,7 @@ impl SessionSpawner for PtySpawner {
         args: &[&str],
         task_name: &str,
         session_id: &str,
+        _agent_type: &str,
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
@@ -103,6 +105,7 @@ impl SessionSpawner for ShepherdSpawner {
         args: &[&str],
         task_name: &str,
         session_id: &str,
+        agent_type: &str,
         rows: u16,
         cols: u16,
         env_vars: &[(&str, &str)],
@@ -110,7 +113,7 @@ impl SessionSpawner for ShepherdSpawner {
     ) -> Result<Box<dyn SessionHandle>> {
         let filename = session_id.replace('/', "-");
         let socket_path = self.status_dir.join(format!("{filename}.sock"));
-        let pid_path = self.status_dir.join(format!("{filename}.pid"));
+        let state_path = self.status_dir.join(format!("{filename}.state"));
 
         // Find kbtz-shepherd binary next to the current executable
         let self_exe = std::env::current_exe().context("failed to get current executable path")?;
@@ -122,12 +125,16 @@ impl SessionSpawner for ShepherdSpawner {
             );
         }
 
-        // Build shepherd command: kbtz-shepherd <socket> <pid> <rows> <cols> <command> [args...]
+        // Build shepherd command:
+        // kbtz-shepherd <socket> <state-file> <rows> <cols> <task> <agent-type> <session-id> <command> [args...]
         let mut cmd = std::process::Command::new(&shepherd_bin);
         cmd.arg(&socket_path)
-            .arg(&pid_path)
+            .arg(&state_path)
             .arg(rows.to_string())
             .arg(cols.to_string())
+            .arg(task_name)
+            .arg(agent_type)
+            .arg(session_id)
             .arg(command)
             .args(args);
         cmd.current_dir(cwd);
@@ -152,48 +159,44 @@ impl SessionSpawner for ShepherdSpawner {
             "spawn({session_id}): shepherd process started, os_pid={shepherd_os_pid}"
         ));
 
-        // Wait for socket to appear (shepherd needs a moment to start)
-        let socket_preexisted = socket_path.exists();
-        if socket_preexisted {
+        // Wait for state file to appear (shepherd writes it atomically after spawning)
+        let state_preexisted = state_path.exists();
+        if state_preexisted {
             kbtz::debug_log::log(&format!(
-                "spawn({session_id}): WARNING socket already exists at {} before shepherd started",
-                socket_path.display()
+                "spawn({session_id}): WARNING state file already exists at {} before shepherd started",
+                state_path.display()
             ));
         }
         let wait_start = Instant::now();
         let deadline = wait_start + Duration::from_secs(5);
-        while !socket_path.exists() {
+        while !state_path.exists() {
             if Instant::now() >= deadline {
                 bail!(
-                    "shepherd did not create socket at {} within 5 seconds",
-                    socket_path.display()
+                    "shepherd did not create state file at {} within 5 seconds",
+                    state_path.display()
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         let wait_ms = wait_start.elapsed().as_millis();
         kbtz::debug_log::log(&format!(
-            "spawn({session_id}): socket appeared after {wait_ms}ms (preexisted={socket_preexisted})"
+            "spawn({session_id}): state file appeared after {wait_ms}ms (preexisted={state_preexisted})"
         ));
+
+        // Read the state file to get socket path and PIDs
+        let state = kbtz_workspace::ShepherdState::read(&state_path)
+            .with_context(|| format!("failed to read state file at {}", state_path.display()))?;
 
         // Connect to the shepherd, passing the Child handle so the
         // workspace can reap it and read its exit code later.
-        ShepherdSession::connect(
-            &socket_path,
-            &pid_path,
-            task_name,
-            session_id,
-            rows,
-            cols,
-            Some(child),
-        )
-        .map_err(|e| {
-            kbtz::debug_log::log(&format!(
-                "spawn({session_id}): handshake FAILED (os_pid={shepherd_os_pid}): {e:#}"
-            ));
-            e
-        })
-        .map(|s| Box::new(s) as Box<dyn SessionHandle>)
+        ShepherdSession::connect(&state, rows, cols, Some(child))
+            .map_err(|e| {
+                kbtz::debug_log::log(&format!(
+                    "spawn({session_id}): handshake FAILED (os_pid={shepherd_os_pid}): {e:#}"
+                ));
+                e
+            })
+            .map(|s| Box::new(s) as Box<dyn SessionHandle>)
     }
 }
 
