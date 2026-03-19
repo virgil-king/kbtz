@@ -28,12 +28,13 @@ struct SessionDecorator<'a> {
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
     fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
-        // Workspace session: 🤖 + status indicator + session ID
+        // Workspace session: 🤖 + status indicator (+ unread marker) + session ID
         if let Some(sid) = self.task_to_session.get(&row.name) {
             if let Some(ts) = self.sessions.get(sid) {
+                let unread = if ts.unread { "\u{1f440}" } else { "" };
                 return ui::RowDecoration {
                     icon_override: Some((
-                        format!("\u{1f916}{} ", ts.handle.status().indicator()),
+                        format!("\u{1f916}{}{unread} ", ts.handle.status().indicator()),
                         ui::status_style(&row.status),
                     )),
                     after_name: vec![Span::styled(
@@ -166,7 +167,7 @@ pub fn render_help(frame: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  Tab        ", Style::default().fg(Color::Cyan)),
-            Span::raw("Jump to needs-input session"),
+            Span::raw("Jump to needs-input/unread session"),
         ]),
         Line::from(vec![
             Span::styled("  s          ", Style::default().fg(Color::Cyan)),
@@ -235,7 +236,7 @@ pub fn render_help(frame: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  ^B Tab     ", Style::default().fg(Color::Cyan)),
-            Span::raw("Jump to needs-input session"),
+            Span::raw("Jump to needs-input/unread session"),
         ]),
         Line::from(vec![
             Span::styled("  ^B ^B      ", Style::default().fg(Color::Cyan)),

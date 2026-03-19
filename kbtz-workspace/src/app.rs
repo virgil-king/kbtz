@@ -26,6 +26,7 @@ pub struct TermSize {
 pub struct TrackedSession {
     pub handle: Box<dyn SessionHandle>,
     pub agent_type: String,
+    pub unread: bool,
 }
 
 pub struct App {
@@ -62,6 +63,9 @@ pub struct App {
     pub tree: TreeView,
     pub tree_dirty: bool,
     pub notes_panel: Option<NotesPanel>,
+
+    /// The session_id currently being viewed in passthrough mode (None in tree view).
+    pub zoomed_session: Option<String>,
 }
 
 pub const TOPLEVEL_SESSION_ID: &str = "ws/toplevel";
@@ -168,6 +172,7 @@ impl App {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
         app.refresh_tree()?;
         if persistent_sessions {
@@ -430,7 +435,7 @@ impl App {
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
                             self.sessions
-                                .insert(session_id, TrackedSession { handle, agent_type });
+                                .insert(session_id, TrackedSession { handle, agent_type, unread: false });
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -483,7 +488,7 @@ impl App {
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
                 self.sessions
-                    .insert(session_id, TrackedSession { handle, agent_type });
+                    .insert(session_id, TrackedSession { handle, agent_type, unread: false });
                 Ok(())
             }
             Err(e) => {
@@ -679,6 +684,10 @@ impl App {
                         new_status.label(),
                         ts.handle.task_name()
                     ));
+                    // Mark unread if the user is not currently viewing this session.
+                    if self.zoomed_session.as_deref() != Some(session_id.as_str()) {
+                        ts.unread = true;
+                    }
                 }
                 ts.handle.set_status(new_status);
             }
@@ -832,6 +841,7 @@ impl App {
                                 TrackedSession {
                                     handle: Box::new(session),
                                     agent_type,
+                                    unread: false,
                                 },
                             );
                         }
@@ -840,6 +850,14 @@ impl App {
                                 "reconnect: connect FAILED for {session_id} \
                                  (task={task_name}): {e:#}"
                             ));
+                            // Kill child and shepherd before deleting PID files,
+                            // otherwise they become permanently orphaned.
+                            kill_child_from_pid_file(&pid_path);
+                            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                                }
+                            }
                             cleanup_session_files(&self.status_dir, &session_id);
                             let _ = ops::release_task(&self.conn, &task_name, &session_id);
                         }
@@ -972,6 +990,32 @@ impl App {
         self.sessions
             .get(sid)
             .map(|ts| ts.handle.task_name().to_string())
+    }
+
+    /// Find the next unread session, cycling from current_task.
+    /// Returns the task name if found.
+    pub fn next_unread_session(&self, current_task: Option<&str>) -> Option<String> {
+        let ids = self.session_ids_ordered();
+        let unread: Vec<&String> = ids
+            .iter()
+            .filter(|id| self.sessions.get(*id).is_some_and(|ts| ts.unread))
+            .collect();
+        if unread.is_empty() {
+            return None;
+        }
+        let current_sid = current_task.and_then(|task| self.task_to_session.get(task));
+        let idx = cycle_after(&unread, current_sid.as_ref());
+        let sid = unread[idx];
+        self.sessions
+            .get(sid)
+            .map(|ts| ts.handle.task_name().to_string())
+    }
+
+    /// Mark a session as read (clear unread flag). Called when zooming in.
+    pub fn mark_read(&mut self, session_id: &str) {
+        if let Some(ts) = self.sessions.get_mut(session_id) {
+            ts.unread = false;
+        }
     }
 
     /// Kill and release a session for a task so it can be respawned.
@@ -1273,6 +1317,7 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -1296,6 +1341,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1330,6 +1376,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
 
@@ -1363,6 +1410,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1407,6 +1455,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1596,6 +1645,7 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -1680,6 +1730,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1719,6 +1770,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1756,6 +1808,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1793,6 +1846,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(stub),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1834,6 +1888,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(stub),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1872,6 +1927,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(stub),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1908,6 +1964,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", true)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -1975,6 +2032,7 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
         (app, status_dir)
     }
@@ -2134,6 +2192,7 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
 
         // Create a task with agent="gemini" and one with no agent.
@@ -2193,6 +2252,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -2228,6 +2288,7 @@ mod tests {
             TrackedSession {
                 handle: Box::new(StubSession::new("task-a", "ws/1", false)),
                 agent_type: "claude".to_string(),
+                unread: false,
             },
         );
         app.task_to_session
@@ -2332,6 +2393,7 @@ mod tests {
                 TrackedSession {
                     handle: Box::new(StubSession::new(&name, &sid, true)),
                     agent_type: "claude".to_string(),
+                    unread: false,
                 },
             );
             app.task_to_session.insert(name, sid);
@@ -2383,6 +2445,7 @@ mod tests {
                 TrackedSession {
                     handle: Box::new(StubSession::new(&name, &sid, true)),
                     agent_type: "claude".to_string(),
+                    unread: false,
                 },
             );
             app.task_to_session.insert(name, sid);
@@ -2464,6 +2527,7 @@ mod tests {
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
             tree_dirty: false,
             notes_panel: None,
+            zoomed_session: None,
         };
 
         app.shutdown();
