@@ -169,6 +169,7 @@ fn cleanup(socket_path: &Path, state_file: &Path) {
     let _ = std::fs::remove_file(state_file);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     socket_path: &Path,
     state_file: &Path,

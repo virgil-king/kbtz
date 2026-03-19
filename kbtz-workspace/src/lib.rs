@@ -28,7 +28,7 @@ impl ShepherdState {
     pub fn write_atomic(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_extension("state.tmp");
         let json = serde_json::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())

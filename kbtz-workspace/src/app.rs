@@ -781,8 +781,7 @@ impl App {
             let pid = state.shepherd_pid as i32;
             let ret = unsafe { libc::kill(pid, 0) };
             let errno = std::io::Error::last_os_error();
-            let alive =
-                ret == 0 || (ret == -1 && errno.raw_os_error() == Some(libc::EPERM));
+            let alive = ret == 0 || (ret == -1 && errno.raw_os_error() == Some(libc::EPERM));
             kbtz::debug_log::log(&format!(
                 "reconnect: checking {session_id} shepherd pid={pid} \
                  kill(0)={ret} errno={errno} alive={alive}"
@@ -1039,9 +1038,7 @@ impl App {
                     continue;
                 }
                 let ext = path.extension().and_then(|e| e.to_str());
-                if self.persistent_sessions
-                    && (ext == Some("state") || ext == Some("sock"))
-                {
+                if self.persistent_sessions && (ext == Some("state") || ext == Some("sock")) {
                     continue;
                 }
                 let _ = std::fs::remove_file(path);
@@ -2236,10 +2233,7 @@ mod tests {
 
         app.remove_session("ws/1");
 
-        assert!(
-            !state_file.exists(),
-            ".state file should be removed"
-        );
+        assert!(!state_file.exists(), ".state file should be removed");
     }
 
     #[test]
@@ -2526,7 +2520,11 @@ mod tests {
         let state = kbtz_workspace::ShepherdState {
             shepherd_pid: 999999999,
             child_pid: None,
-            socket_path: app.status_dir.join(format!("{filename}.sock")).to_string_lossy().to_string(),
+            socket_path: app
+                .status_dir
+                .join(format!("{filename}.sock"))
+                .to_string_lossy()
+                .to_string(),
             task: task_name.to_string(),
             agent_type: "claude".to_string(),
             session_id: session_id.to_string(),

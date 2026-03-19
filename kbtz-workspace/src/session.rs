@@ -184,9 +184,8 @@ impl SessionSpawner for ShepherdSpawner {
         ));
 
         // Read the state file to get socket path and PIDs
-        let state = kbtz_workspace::ShepherdState::read(&state_path).with_context(|| {
-            format!("failed to read state file at {}", state_path.display())
-        })?;
+        let state = kbtz_workspace::ShepherdState::read(&state_path)
+            .with_context(|| format!("failed to read state file at {}", state_path.display()))?;
 
         // Connect to the shepherd, passing the Child handle so the
         // workspace can reap it and read its exit code later.
