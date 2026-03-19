@@ -115,6 +115,20 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/pane-title.sh error StopFailure"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-status.sh error StopFailure"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

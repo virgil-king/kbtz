@@ -540,6 +540,7 @@ pub enum SessionStatus {
     Active,
     Idle,
     NeedsInput,
+    Error,
 }
 
 impl SessionStatus {
@@ -548,6 +549,7 @@ impl SessionStatus {
             "active" => Self::Active,
             "idle" => Self::Idle,
             "needs_input" | "needs input" => Self::NeedsInput,
+            "error" => Self::Error,
             _ => Self::Starting,
         }
     }
@@ -558,6 +560,7 @@ impl SessionStatus {
             Self::Active => "active",
             Self::Idle => "idle",
             Self::NeedsInput => "needs input",
+            Self::Error => "error",
         }
     }
 
@@ -567,6 +570,7 @@ impl SessionStatus {
             Self::Active => "active",
             Self::Idle => "idle",
             Self::NeedsInput => "needs_input",
+            Self::Error => "error",
         })
     }
 }
@@ -864,6 +868,7 @@ mod tests {
             SessionStatus::from_str("needs_input"),
             SessionStatus::NeedsInput
         );
+        assert_eq!(SessionStatus::from_str("error"), SessionStatus::Error);
     }
 
     #[test]
@@ -893,6 +898,10 @@ mod tests {
             SessionStatus::from_str(SessionStatus::NeedsInput.label()),
             SessionStatus::NeedsInput
         );
+        assert_eq!(
+            SessionStatus::from_str(SessionStatus::Error.label()),
+            SessionStatus::Error
+        );
     }
 
     #[test]
@@ -902,6 +911,7 @@ mod tests {
             SessionStatus::Active,
             SessionStatus::Idle,
             SessionStatus::NeedsInput,
+            SessionStatus::Error,
         ];
         for v in &variants {
             assert!(!v.indicator().is_empty(), "{:?} has empty indicator", v);
