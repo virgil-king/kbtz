@@ -27,8 +27,7 @@ impl ShepherdState {
     /// Write the state file atomically: write to a temp file, then rename.
     pub fn write_atomic(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_extension("state.tmp");
-        let json = serde_json::to_string(self)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
