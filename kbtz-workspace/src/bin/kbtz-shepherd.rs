@@ -161,7 +161,15 @@ fn run(
     // 1. Detach from parent session.
     unsafe {
         if libc::setsid() == -1 {
-            anyhow::bail!("setsid failed: {:?}", io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EPERM) {
+                // Already a process group leader — likely already a session
+                // leader (e.g. launched via `setsid`, systemd, or inside a
+                // container).  Safe to continue.
+                eprintln!("kbtz-shepherd: setsid: EPERM (already session leader), continuing");
+            } else {
+                anyhow::bail!("setsid failed: {err:?}");
+            }
         }
     }
 
