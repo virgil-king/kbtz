@@ -140,13 +140,28 @@ fn spawn_manager_window(session: &str, config: &Config) -> Result<()> {
 
     let db_path = paths::db_path();
 
+    let mut prompt = TOPLEVEL_PROMPT.to_string();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let additional_prompt_path = format!("{home}/.kbtz/ADDITIONAL_MANAGER_PROMPT.md");
+    match fs::read_to_string(&additional_prompt_path) {
+        Ok(additional) => {
+            prompt.push('\n');
+            prompt.push_str(&additional);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to read {additional_prompt_path}"));
+        }
+    }
+
     let mut args: Vec<String> = Vec::new();
     if let Some(cfg) = agent_cfg {
         args.extend(cfg.prefix_args().iter().map(|s| s.to_string()));
     }
     args.extend([
         "--append-system-prompt".into(),
-        TOPLEVEL_PROMPT.into(),
+        prompt,
         "You are the task manager. Help the user organize work.".into(),
     ]);
     if let Some(cfg) = agent_cfg {
