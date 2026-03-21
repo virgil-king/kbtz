@@ -150,8 +150,7 @@ fn spawn_manager_window(session: &str, config: &Config) -> Result<()> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(e)
-                .with_context(|| format!("failed to read {additional_prompt_path}"));
+            return Err(e).with_context(|| format!("failed to read {additional_prompt_path}"));
         }
     }
 
