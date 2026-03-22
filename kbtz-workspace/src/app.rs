@@ -434,8 +434,14 @@ impl App {
                             ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions
-                                .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                            self.sessions.insert(
+                                session_id,
+                                TrackedSession {
+                                    handle,
+                                    agent_type,
+                                    unread: false,
+                                },
+                            );
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -487,8 +493,14 @@ impl App {
                 ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions
-                    .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                self.sessions.insert(
+                    session_id,
+                    TrackedSession {
+                        handle,
+                        agent_type,
+                        unread: false,
+                    },
+                );
                 Ok(())
             }
             Err(e) => {
