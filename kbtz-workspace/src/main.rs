@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod hooks;
 mod lifecycle;
 mod session;
 mod shepherd_session;
