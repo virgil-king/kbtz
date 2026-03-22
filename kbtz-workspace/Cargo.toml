@@ -8,6 +8,7 @@ repository = "https://github.com/virgil-king/kbtz"
 
 [dependencies]
 kbtz = { path = "../kbtz" }
+kbtz-workspace-core = { path = "../kbtz-workspace-core" }
 ratatui = { version = "0.30", features = ["crossterm_0_28"] }
 crossterm = "0.28"
 portable-pty = "0.9"

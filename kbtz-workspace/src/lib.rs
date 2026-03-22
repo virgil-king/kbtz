@@ -1,4 +1,5 @@
-pub mod prompt;
+pub use kbtz_workspace_core::lifecycle;
+pub use kbtz_workspace_core::prompt;
 pub mod protocol;
 
 use std::io::{BufWriter, StdoutLock, Write};
