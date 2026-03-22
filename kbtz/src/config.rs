@@ -19,6 +19,12 @@ pub struct Config {
 pub struct LifecycleConfig {
     pub before_start: Option<String>,
     pub after_end: Option<String>,
+    /// Agent type for headless hook execution (references [agent.*]).
+    /// Falls back to the workspace default when unset.
+    pub agent: Option<String>,
+    /// Agent type for interactive error-resolution sessions.
+    /// Falls back to the workspace default when unset.
+    pub resolution_agent: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -425,5 +431,38 @@ Return the directory path.
         let prompt = config.lifecycle.before_start.unwrap();
         assert!(prompt.contains("working directory"));
         assert!(prompt.contains("Acquire worktrees"));
+    }
+
+    #[test]
+    fn parse_lifecycle_agent_fields() {
+        let toml = r#"
+[lifecycle]
+before_start = "Setup."
+agent = "claude"
+resolution_agent = "gemini"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert_eq!(config.lifecycle.agent.as_deref(), Some("claude"));
+        assert_eq!(
+            config.lifecycle.resolution_agent.as_deref(),
+            Some("gemini")
+        );
+    }
+
+    #[test]
+    fn lifecycle_agent_fields_default_to_none() {
+        let toml = r#"
+[lifecycle]
+before_start = "Setup."
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.lifecycle.agent.is_none());
+        assert!(config.lifecycle.resolution_agent.is_none());
     }
 }
