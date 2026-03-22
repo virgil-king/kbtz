@@ -11,7 +11,7 @@ use kbtz::ops;
 use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
-use crate::lifecycle::{
+use kbtz_workspace_core::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
@@ -511,7 +511,7 @@ impl App {
         let initial_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
         let backend = self.default_backend();
-        let args = backend.toplevel_args(crate::prompt::TOPLEVEL_PROMPT, initial_prompt);
+        let args = backend.toplevel_args(kbtz_workspace_core::prompt::TOPLEVEL_PROMPT, initial_prompt);
         let command = backend.command().to_string();
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = TOPLEVEL_SESSION_ID;
@@ -550,7 +550,7 @@ impl App {
         session_id: &str,
     ) -> Result<Box<dyn SessionHandle>> {
         let initial_prompt = format!("Work on task '{}': {}", task.name, task.description);
-        let system_instructions = crate::prompt::AGENT_PROMPT;
+        let system_instructions = kbtz_workspace_core::prompt::AGENT_PROMPT;
         let session_file = self.claude_sessions_dir.join(&task.name);
 
         // Try to resume a previous session if one exists.

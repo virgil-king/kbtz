@@ -1,0 +1,10 @@
+[package]
+name = "kbtz-workspace-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared lifecycle logic and prompts for kbtz workspace implementations"
+license = "Apache-2.0"
+repository = "https://github.com/virgil-king/kbtz"
+
+[dependencies]
+# lifecycle.rs only needs std (Duration, Instant) — no external deps

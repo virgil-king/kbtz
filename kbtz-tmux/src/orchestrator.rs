@@ -9,7 +9,7 @@ use rusqlite::Connection;
 
 use kbtz::config::Config;
 use kbtz::{db, ops, paths, watch};
-use kbtz_workspace::prompt::AGENT_PROMPT;
+use kbtz_workspace_core::prompt::AGENT_PROMPT;
 
 use kbtz_tmux::lifecycle::{
     self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot,

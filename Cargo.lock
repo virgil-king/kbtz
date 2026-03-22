@@ -898,7 +898,7 @@ dependencies = [
  "env_logger",
  "exec",
  "kbtz",
- "kbtz-workspace",
+ "kbtz-workspace-core",
  "libc",
  "log",
  "rusqlite",
@@ -913,6 +913,7 @@ dependencies = [
  "crossterm 0.28.1",
  "ctrlc",
  "kbtz",
+ "kbtz-workspace-core",
  "libc",
  "notify",
  "portable-pty",
@@ -923,6 +924,10 @@ dependencies = [
  "uuid",
  "vt100",
 ]
+
+[[package]]
+name = "kbtz-workspace-core"
+version = "0.1.0"
 
 [[package]]
 name = "kqueue"

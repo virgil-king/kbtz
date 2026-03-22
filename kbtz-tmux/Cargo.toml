@@ -8,7 +8,7 @@ repository = "https://github.com/virgil-king/kbtz"
 
 [dependencies]
 kbtz = { path = "../kbtz" }
-kbtz-workspace = { path = "../kbtz-workspace" }
+kbtz-workspace-core = { path = "../kbtz-workspace-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }

@@ -10,6 +10,21 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub agent: HashMap<String, AgentConfig>,
+    pub web: Option<WebConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    pub bind: Option<String>,
+    /// Max events buffered per shepherd session. Default: 10,000.
+    pub event_history_limit: Option<usize>,
+}
+
+impl WebConfig {
+    pub fn event_history_limit(&self) -> usize {
+        self.event_history_limit.unwrap_or(10_000)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -299,6 +314,61 @@ args = ["--dangerously-skip-permissions"]
         assert_eq!(agent.backend.as_deref(), Some("claude"));
         assert_eq!(agent.binary(), Some("claude"));
         assert_eq!(agent.args, vec!["--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn parses_web_section() {
+        let toml = r#"
+[web]
+bind = "0.0.0.0:9090"
+event_history_limit = 5000
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let web = config.web.unwrap();
+        assert_eq!(web.bind.as_deref(), Some("0.0.0.0:9090"));
+        assert_eq!(web.event_history_limit(), 5000);
+    }
+
+    #[test]
+    fn web_section_is_optional() {
+        let toml = r#"
+[workspace]
+concurrency = 2
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.web.is_none());
+    }
+
+    #[test]
+    fn web_event_history_limit_default() {
+        let toml = r#"
+[web]
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let web = config.web.unwrap();
+        assert_eq!(web.event_history_limit(), 10_000);
+    }
+
+    #[test]
+    fn misspelled_web_field_rejected() {
+        let toml = r#"
+[web]
+bindd = "0.0.0.0:9090"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let result = Config::load_from(f.path());
+        assert!(result.is_err());
     }
 
     #[test]

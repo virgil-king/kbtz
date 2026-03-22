@@ -36,7 +36,7 @@ the appropriate path below depending on whether the repository has a remote.
 2. Iterate until CI passes. Poll `gh pr checks <URL>` periodically
    (e.g. every 60 seconds). If any check fails, investigate the failure,
    push a fix, and continue polling. Do not proceed until all checks pass.
-3. Display the diff so the user can review it from the TUI:
+3. Display the diff so the user can review it:
    ```
    gh pr diff <URL> --color always
    ```

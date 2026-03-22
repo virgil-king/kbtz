@@ -1,4 +1,3 @@
-pub mod prompt;
 pub mod protocol;
 
 use std::io::{BufWriter, StdoutLock, Write};
