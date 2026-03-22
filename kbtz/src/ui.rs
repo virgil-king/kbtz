@@ -561,6 +561,7 @@ pub fn session_indicator(status: &str) -> &'static str {
         "active" => "\u{26a1}",       // ⚡
         "idle" => "\u{1f4a4}",        // 💤
         "needs_input" => "\u{1f514}", // 🔔
+        "error" => "\u{274c}",        // ❌
         _ => "\u{1f680}",             // 🚀
     }
 }
@@ -1641,6 +1642,7 @@ mod tests {
         assert_eq!(session_indicator("active"), "\u{26a1}");
         assert_eq!(session_indicator("idle"), "\u{1f4a4}");
         assert_eq!(session_indicator("needs_input"), "\u{1f514}");
+        assert_eq!(session_indicator("error"), "\u{274c}");
     }
 
     #[test]

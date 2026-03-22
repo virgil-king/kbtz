@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Report session state to kbtz-workspace via status file.
-# Usage: bash workspace-status.sh <idle|active|needs_input> [hook_event]
+# Usage: bash workspace-status.sh <idle|active|needs_input|error> [hook_event]
 #
 # When running under kbtz-workspace, KBTZ_WORKSPACE_DIR and KBTZ_SESSION_ID
 # are set. The workspace watches KBTZ_WORKSPACE_DIR with inotify and reads
@@ -11,7 +11,7 @@ set -euo pipefail
 [ -n "${KBTZ_WORKSPACE_DIR:-}" ] || exit 0
 [ -n "${KBTZ_SESSION_ID:-}" ] || exit 0
 
-state="${1:?Usage: workspace-status.sh <idle|active|needs_input> [hook_event]}"
+state="${1:?Usage: workspace-status.sh <idle|active|needs_input|error> [hook_event]}"
 event="${2:-unknown}"
 
 # Diagnostic logging (enabled by KBTZ_DEBUG=<path>)
@@ -30,8 +30,8 @@ prev=""
 
 _hook_log "workspace-status: event=$event sid=$KBTZ_SESSION_ID state=$state prev=${prev:-<none>} task=${KBTZ_TASK:-?}"
 
-# Don't let Stop (idle) overwrite needs_input — this guard exists for
-# AskUserQuestion, where the sequence is:
+# Don't let Stop (idle) overwrite needs_input or error — this guard
+# exists for AskUserQuestion, where the sequence is:
 #   PreToolUse → active, Notification → needs_input, Stop → idle
 # Without it the session would show idle when it's actually waiting.
 #
@@ -41,9 +41,13 @@ _hook_log "workspace-status: event=$event sid=$KBTZ_SESSION_ID state=$state prev
 # PostToolUse clears needs_input after approval, so Stop sees prev=active
 # and correctly sets idle.
 #
-# SessionEnd bypasses this (a dead session can't need input).
+# Error state is sticky — once set by StopFailure, only active/SessionEnd
+# should clear it. The session will resume on the next user prompt.
+#
+# SessionEnd bypasses this (a dead session can't need input or be errored).
 if [ "$state" = "idle" ] && [ "$event" != "SessionEnd" ]; then
   [ "$prev" = "needs_input" ] && exit 0
+  [ "$prev" = "error" ] && exit 0
 fi
 
 printf '%s' "$state" > "$status_file"

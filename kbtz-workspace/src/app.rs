@@ -434,8 +434,14 @@ impl App {
                             ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions
-                                .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                            self.sessions.insert(
+                                session_id,
+                                TrackedSession {
+                                    handle,
+                                    agent_type,
+                                    unread: false,
+                                },
+                            );
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -487,8 +493,14 @@ impl App {
                 ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions
-                    .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                self.sessions.insert(
+                    session_id,
+                    TrackedSession {
+                        handle,
+                        agent_type,
+                        unread: false,
+                    },
+                );
                 Ok(())
             }
             Err(e) => {
@@ -2633,12 +2645,13 @@ mod tests {
         std::fs::write(&session_file, uuid).unwrap();
 
         // Create a .sock as a regular file (not a real socket) so connect fails.
-        // Use the current process PID so the alive check passes.
+        // Use PID 1 (init) so the alive check passes (EPERM counts as alive)
+        // but SIGKILL in the cleanup path is harmless (also EPERM, ignored).
         let filename = session_id_to_filename(session_id);
         let sock_path = app.status_dir.join(format!("{filename}.sock"));
         let pid_path = app.status_dir.join(format!("{filename}.pid"));
         std::fs::write(&sock_path, "").unwrap();
-        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        std::fs::write(&pid_path, "1").unwrap();
 
         app.reconnect_sessions().unwrap();
 

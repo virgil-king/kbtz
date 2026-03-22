@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Set tmux pane title to show Claude Code state and current kbtz task.
-# Usage: bash pane-title.sh <idle|active|needs_input> [hook_event]
+# Usage: bash pane-title.sh <idle|active|needs_input|error> [hook_event]
 
 set -euo pipefail
 
@@ -9,7 +9,7 @@ set -euo pipefail
 # Only set titles for task agent windows (those with KBTZ_TASK set).
 [ -n "${KBTZ_TASK:-}" ] || exit 0
 
-state="${1:?Usage: pane-title.sh <idle|active|needs_input> [hook_event]}"
+state="${1:?Usage: pane-title.sh <idle|active|needs_input|error> [hook_event]}"
 event="${2:-unknown}"
 
 # Diagnostic logging (enabled by KBTZ_DEBUG=<path>)
@@ -24,12 +24,14 @@ if [ "$state" = "idle" ] && [ -n "${KBTZ_WORKSPACE_DIR:-}" ] && [ -n "${KBTZ_SES
   filename="${KBTZ_SESSION_ID//\//-}"
   current=$(cat "${KBTZ_WORKSPACE_DIR}/${filename}" 2>/dev/null) || true
   [ "$current" = "needs_input" ] && exit 0
+  [ "$current" = "error" ] && exit 0
 fi
 
 case "$state" in
   idle)        emoji="🟡" ;;
   active)      emoji="🟢" ;;
   needs_input) emoji="🔔" ;;
+  error)       emoji="❌" ;;
   *)           echo "Unknown state: $state" >&2; exit 1 ;;
 esac
 
