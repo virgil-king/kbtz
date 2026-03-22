@@ -368,3 +368,367 @@ while true; do sleep 1; done
         }
     }
 }
+
+#[test]
+fn shepherd_client_replacement_gets_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("shepherd.sock");
+    let state_path = dir.path().join("state.json");
+
+    // Agent emits events then waits forever.
+    let mock_script = dir.path().join("mock-agent.sh");
+    std::fs::write(
+        &mock_script,
+        r#"#!/bin/bash
+echo '{"n":1}'
+echo '{"n":2}'
+trap 'exit 0' TERM
+while true; do sleep 1; done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &mock_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (mut child, read_pipe) = spawn_shepherd(
+        &socket_path,
+        &state_path,
+        "web/test-replace",
+        "100",
+        &mock_script,
+    );
+    wait_ready(read_pipe);
+
+    // Wait for events.
+    let start = Instant::now();
+    loop {
+        if let Ok(s) = ShepherdState::read_state_file(&state_path) {
+            if s.event_count >= 2 {
+                break;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // First client connects and reads EventBatch.
+    let stream1 = UnixStream::connect(&socket_path).expect("first connect failed");
+    stream1
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader1 = BufReader::new(stream1.try_clone().unwrap());
+    let msg = protocol::read_message(&mut reader1).unwrap().unwrap();
+    let batch1_len = match msg {
+        Message::EventBatch { ref events } => events.len(),
+        other => panic!("expected EventBatch, got {:?}", other),
+    };
+    assert!(batch1_len >= 2);
+
+    // Second client connects — should replace first and get same history.
+    let stream2 = UnixStream::connect(&socket_path).expect("second connect failed");
+    stream2
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader2 = BufReader::new(stream2.try_clone().unwrap());
+    let msg = protocol::read_message(&mut reader2).unwrap().unwrap();
+    match msg {
+        Message::EventBatch { events } => {
+            assert_eq!(
+                events.len(),
+                batch1_len,
+                "replacement client should get same history"
+            );
+            assert_eq!(events[0].data["n"], 1);
+            assert_eq!(events[1].data["n"], 2);
+        }
+        other => panic!("expected EventBatch, got {:?}", other),
+    }
+
+    // First client should be disconnected — reads should fail or EOF.
+    // Give the shepherd a poll cycle to drop the old client.
+    std::thread::sleep(Duration::from_millis(200));
+    let result = protocol::read_message(&mut reader1);
+    assert!(
+        result.is_err() || result.unwrap().is_none(),
+        "first client should be disconnected after replacement"
+    );
+
+    // Clean up.
+    let mut writer2 = stream2;
+    protocol::write_message(&mut writer2, &Message::Shutdown).unwrap();
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > Duration::from_secs(10) => {
+                child.kill().unwrap();
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+#[test]
+fn shepherd_reconnect_after_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("shepherd.sock");
+    let state_path = dir.path().join("state.json");
+
+    let mock_script = dir.path().join("mock-agent.sh");
+    std::fs::write(
+        &mock_script,
+        r#"#!/bin/bash
+echo '{"phase":"init"}'
+# Wait for input to produce a second event
+read -r line
+echo '{"phase":"after_reconnect"}'
+# Wait for another input then exit
+read -r line
+sleep 0.1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &mock_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (mut child, read_pipe) = spawn_shepherd(
+        &socket_path,
+        &state_path,
+        "web/test-reconnect",
+        "100",
+        &mock_script,
+    );
+    wait_ready(read_pipe);
+
+    // Wait for first event.
+    let start = Instant::now();
+    loop {
+        if let Ok(s) = ShepherdState::read_state_file(&state_path) {
+            if s.event_count >= 1 {
+                break;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // First connection: read EventBatch, then disconnect.
+    {
+        let stream = UnixStream::connect(&socket_path).expect("first connect failed");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let msg = protocol::read_message(&mut reader).unwrap().unwrap();
+        match msg {
+            Message::EventBatch { events } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].data["phase"], "init");
+            }
+            other => panic!("expected EventBatch, got {:?}", other),
+        }
+        // Send input to produce second event.
+        let mut writer = stream.try_clone().unwrap();
+        protocol::write_message(
+            &mut writer,
+            &Message::Input {
+                data: "go\n".into(),
+            },
+        )
+        .unwrap();
+    }
+    // stream dropped — client disconnects.
+
+    // Wait for the second event.
+    let start = Instant::now();
+    loop {
+        if let Ok(s) = ShepherdState::read_state_file(&state_path) {
+            if s.event_count >= 2 {
+                break;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Reconnect: should get both events in the EventBatch.
+    let stream = UnixStream::connect(&socket_path).expect("reconnect failed");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let msg = protocol::read_message(&mut reader).unwrap().unwrap();
+    match msg {
+        Message::EventBatch { events } => {
+            assert_eq!(events.len(), 2, "reconnect should replay full history");
+            assert_eq!(events[0].data["phase"], "init");
+            assert_eq!(events[1].data["phase"], "after_reconnect");
+        }
+        other => panic!("expected EventBatch, got {:?}", other),
+    }
+
+    // Trigger agent exit.
+    let mut writer = stream.try_clone().unwrap();
+    protocol::write_message(
+        &mut writer,
+        &Message::Input {
+            data: "done\n".into(),
+        },
+    )
+    .unwrap();
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > Duration::from_secs(10) => {
+                child.kill().unwrap();
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+#[test]
+fn shepherd_invalid_json_wrapped_as_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("shepherd.sock");
+    let state_path = dir.path().join("state.json");
+
+    let mock_script = dir.path().join("mock-agent.sh");
+    std::fs::write(
+        &mock_script,
+        r#"#!/bin/bash
+echo 'this is not json'
+echo '{"valid":true}'
+echo ''
+echo 'another non-json line'
+sleep 0.1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &mock_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (mut child, read_pipe) = spawn_shepherd(
+        &socket_path,
+        &state_path,
+        "web/test-invalid-json",
+        "100",
+        &mock_script,
+    );
+    wait_ready(read_pipe);
+
+    // Wait for events (3 non-empty lines = 3 events; empty line skipped).
+    let start = Instant::now();
+    loop {
+        if let Ok(s) = ShepherdState::read_state_file(&state_path) {
+            if s.event_count >= 3 {
+                break;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let stream = UnixStream::connect(&socket_path).expect("connect failed");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let msg = protocol::read_message(&mut reader).unwrap().unwrap();
+    match msg {
+        Message::EventBatch { events } => {
+            assert_eq!(events.len(), 3, "empty lines should be skipped");
+
+            // Non-JSON should be wrapped as a JSON string.
+            assert_eq!(events[0].data, serde_json::json!("this is not json"));
+            // Valid JSON preserved as-is.
+            assert_eq!(events[1].data, serde_json::json!({"valid": true}));
+            // Another non-JSON wrapped.
+            assert_eq!(events[2].data, serde_json::json!("another non-json line"));
+        }
+        other => panic!("expected EventBatch, got {:?}", other),
+    }
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > Duration::from_secs(10) => {
+                child.kill().unwrap();
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+#[test]
+fn shepherd_child_crash_propagates_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("shepherd.sock");
+    let state_path = dir.path().join("state.json");
+
+    let mock_script = dir.path().join("mock-agent.sh");
+    std::fs::write(
+        &mock_script,
+        r#"#!/bin/bash
+echo '{"type":"before_crash"}'
+sleep 0.1
+exit 42
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &mock_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (mut child, read_pipe) = spawn_shepherd(
+        &socket_path,
+        &state_path,
+        "web/test-crash",
+        "100",
+        &mock_script,
+    );
+    wait_ready(read_pipe);
+
+    // Wait for shepherd to exit.
+    let start = Instant::now();
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().unwrap();
+                    panic!("shepherd did not exit after child crash");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("try_wait error: {e}"),
+        }
+    };
+
+    // Shepherd should propagate the child's exit code.
+    assert_eq!(
+        exit_status.code(),
+        Some(42),
+        "shepherd should propagate child exit code"
+    );
+
+    // Socket and state should be cleaned up.
+    assert!(!socket_path.exists());
+    assert!(!state_path.exists());
+}
