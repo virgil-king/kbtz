@@ -2939,6 +2939,77 @@ mod tests {
     }
 
     #[test]
+    fn spawn_uses_task_directory_when_no_hook_state() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                directory: Some("/custom/task/dir"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // No hook state — resolve_session_dir should pick task.directory
+        // over default_directory.
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            dir_for_task(&captured, "task-a"),
+            Some(PathBuf::from("/custom/task/dir")),
+            "should use task.directory when no hook state"
+        );
+    }
+
+    #[test]
+    fn spawn_up_to_skips_non_ready_and_spawns_next() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        // task-a has a running hook and is pre-claimed (as lifecycle-integration
+        // will do), task-b has no hooks. spawn_up_to should only spawn task-b.
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "first",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-b",
+                description: "second",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Pre-claim task-a so claim_next_task won't return it.
+        // This matches real usage: lifecycle-integration claims tasks
+        // before setting RunningBeforeStart to prevent the spawn loop
+        // from grabbing them.
+        ops::claim_task(&app.conn, "task-a", "hook/1").unwrap();
+        app.hook_states
+            .insert("task-a".to_string(), HookState::RunningBeforeStart);
+
+        app.spawn_up_to(2).unwrap();
+
+        assert_eq!(app.sessions.len(), 1, "only task-b should be spawned");
+        assert!(
+            dir_for_task(&captured, "task-b").is_some(),
+            "task-b should have been spawned"
+        );
+        assert!(
+            dir_for_task(&captured, "task-a").is_none(),
+            "task-a should not have been spawned"
+        );
+    }
+
+    #[test]
     fn spawn_for_task_rejects_non_ready_hook_state() {
         let (mut app, _dir, _captured) = test_app_with_dir_capture();
         ops::add_task(
