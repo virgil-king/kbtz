@@ -17,7 +17,7 @@ use log::{error, info};
 use kbtz::config::Config;
 use kbtz::paths;
 use kbtz_tmux::tmux;
-use kbtz_workspace::prompt::TOPLEVEL_PROMPT;
+use kbtz_workspace_core::prompt::TOPLEVEL_PROMPT;
 
 use crate::orchestrator::Orchestrator;
 
