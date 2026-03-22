@@ -11,12 +11,12 @@ use kbtz::ops;
 use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
+use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
+use crate::shepherd_session::ShepherdSession;
 use kbtz_workspace_core::lifecycle::{
     self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
-use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
-use crate::shepherd_session::ShepherdSession;
 
 pub struct TermSize {
     pub rows: u16,
@@ -434,8 +434,14 @@ impl App {
                             ));
                             self.task_to_session
                                 .insert(task_name.clone(), session_id.clone());
-                            self.sessions
-                                .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                            self.sessions.insert(
+                                session_id,
+                                TrackedSession {
+                                    handle,
+                                    agent_type,
+                                    unread: false,
+                                },
+                            );
                         }
                         Err(e) => {
                             kbtz::debug_log::log(&format!(
@@ -487,8 +493,14 @@ impl App {
                 ));
                 self.task_to_session
                     .insert(task_name.to_string(), session_id.clone());
-                self.sessions
-                    .insert(session_id, TrackedSession { handle, agent_type, unread: false });
+                self.sessions.insert(
+                    session_id,
+                    TrackedSession {
+                        handle,
+                        agent_type,
+                        unread: false,
+                    },
+                );
                 Ok(())
             }
             Err(e) => {
@@ -511,7 +523,8 @@ impl App {
         let initial_prompt =
             "You are the top-level task management agent. Help the user manage the kbtz task list.";
         let backend = self.default_backend();
-        let args = backend.toplevel_args(kbtz_workspace_core::prompt::TOPLEVEL_PROMPT, initial_prompt);
+        let args =
+            backend.toplevel_args(kbtz_workspace_core::prompt::TOPLEVEL_PROMPT, initial_prompt);
         let command = backend.command().to_string();
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let session_id = TOPLEVEL_SESSION_ID;
