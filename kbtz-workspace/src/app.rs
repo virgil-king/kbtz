@@ -12,7 +12,7 @@ use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
-    self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
+    self, HookState, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
@@ -55,6 +55,11 @@ pub struct App {
     /// Default working directory for agent sessions.
     /// Resolved at startup: config directory > workspace cwd.
     pub default_directory: PathBuf,
+
+    // Lifecycle hook state machine
+    /// Per-task lifecycle hook state. Only tasks with configured lifecycle hooks
+    /// are tracked here. Tasks not present use the default spawn path.
+    pub hook_states: HashMap<String, HookState>,
 
     // Top-level task management session (not tied to any task)
     pub toplevel: Option<Box<dyn SessionHandle>>,
@@ -167,6 +172,7 @@ impl App {
             spawner,
             persistent_sessions,
             default_directory,
+            hook_states: HashMap::new(),
             toplevel: None,
             term,
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -261,6 +267,16 @@ impl App {
     /// Get the default backend (used for toplevel session and request_exit fallback).
     fn default_backend(&self) -> &dyn Backend {
         self.backends[&self.default_backend].as_ref()
+    }
+
+    /// Resolve the session working directory.
+    ///
+    /// Priority: hook directory (from lifecycle Ready state) > task.directory > default_directory.
+    fn resolve_session_dir(&self, hook_dir: Option<&Path>, task: &Task) -> PathBuf {
+        hook_dir
+            .map(PathBuf::from)
+            .or_else(|| task.directory.as_ref().map(PathBuf::from))
+            .unwrap_or_else(|| self.default_directory.clone())
     }
 
     /// Build a snapshot of the current world for the pure tick function.
@@ -421,13 +437,36 @@ impl App {
                 };
             match claim {
                 Some(task_name) => {
+                    // Gate on lifecycle hook state: only spawn tasks that are
+                    // Ready or not tracked (no hooks configured).
+                    let hook_dir = match self.hook_states.get(&task_name) {
+                        Some(HookState::Ready { .. }) => {
+                            // Consume the Ready state and extract directory.
+                            match self.hook_states.remove(&task_name) {
+                                Some(HookState::Ready { directory }) => Some(directory),
+                                _ => unreachable!(),
+                            }
+                        }
+                        Some(_) => {
+                            // Task has a hook in progress — release claim, skip.
+                            kbtz::debug_log::log(&format!(
+                                "spawn: {task_name} not ready (hook in progress), releasing claim"
+                            ));
+                            let _ = ops::release_task(&self.conn, &task_name, &session_id);
+                            self.counter -= 1;
+                            continue;
+                        }
+                        None => None, // No hooks configured — use default path.
+                    };
+
                     kbtz::debug_log::log(&format!("spawn: claimed {task_name} as {session_id}"));
                     let task = ops::get_task(&self.conn, &task_name)?;
+                    let session_dir = self.resolve_session_dir(hook_dir.as_deref(), &task);
                     let agent_type = self.resolve_agent_type(&task).to_string();
                     self.ensure_backend(&agent_type);
                     let backend = self.backends[&agent_type].as_ref();
 
-                    match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
+                    match self.spawn_session_with(backend, &agent_type, &task, &session_id, &session_dir) {
                         Ok(handle) => {
                             kbtz::debug_log::log(&format!(
                                 "spawn: session started for {task_name} ({session_id}, agent={agent_type})"
@@ -470,10 +509,23 @@ impl App {
             bail!("task already has an active session");
         }
 
+        // Gate on lifecycle hook state.
+        match self.hook_states.get(task_name) {
+            Some(HookState::Ready { .. }) => {} // will consume below
+            Some(_) => bail!("task '{task_name}' is not ready (lifecycle hook in progress)"),
+            None => {} // no hooks configured
+        }
+
+        let hook_dir = match self.hook_states.remove(task_name) {
+            Some(HookState::Ready { directory }) => Some(directory),
+            _ => None,
+        };
+
         let task = ops::get_task(&self.conn, task_name)?;
         if task.status != "open" {
             bail!("task '{task_name}' is {}, not open", task.status);
         }
+        let session_dir = self.resolve_session_dir(hook_dir.as_deref(), &task);
         let agent_type = self.resolve_agent_type(&task).to_string();
 
         self.counter += 1;
@@ -486,7 +538,7 @@ impl App {
 
         self.ensure_backend(&agent_type);
         let backend = self.backends[&agent_type].as_ref();
-        match self.spawn_session_with(backend, &agent_type, &task, &session_id) {
+        match self.spawn_session_with(backend, &agent_type, &task, &session_id, &session_dir) {
             Ok(handle) => {
                 kbtz::debug_log::log(&format!(
                     "spawn_for_task: session started for {task_name} ({session_id}, agent={agent_type})"
@@ -560,6 +612,7 @@ impl App {
         agent_type: &str,
         task: &Task,
         session_id: &str,
+        directory: &Path,
     ) -> Result<Box<dyn SessionHandle>> {
         let initial_prompt = format!("Work on task '{}': {}", task.name, task.description);
         let system_instructions = crate::prompt::AGENT_PROMPT;
@@ -625,12 +678,6 @@ impl App {
         if !debug_path.is_empty() {
             env_vars.push(("KBTZ_DEBUG", &debug_path));
         }
-        // Resolve session working directory: task override > config default
-        let session_dir = task
-            .directory
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.default_directory.clone());
         let result = self.spawner.spawn(
             command,
             &arg_refs,
@@ -639,7 +686,7 @@ impl App {
             self.term.rows,
             self.term.cols,
             &env_vars,
-            &session_dir,
+            directory,
         );
 
         match &result {
@@ -765,6 +812,9 @@ impl App {
                 }
                 let _ = std::fs::remove_file(self.claude_sessions_dir.join(&task_name));
             }
+
+            // Clean up lifecycle hook state for this task.
+            self.hook_states.remove(&task_name);
         }
     }
 
@@ -1324,6 +1374,7 @@ mod tests {
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -1652,6 +1703,7 @@ mod tests {
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -1677,7 +1729,7 @@ mod tests {
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
         let backend = app.default_backend();
-        app.spawn_session_with(backend, "claude", &task, "ws/1")
+        app.spawn_session_with(backend, "claude", &task, "ws/1", &app.default_directory.clone())
             .unwrap();
 
         let session_file = app.claude_sessions_dir.join("task-a");
@@ -1710,7 +1762,7 @@ mod tests {
         // Spawn should read the stored UUID (resume path)
         let backend = app.default_backend();
         let session = app
-            .spawn_session_with(backend, "claude", &task, "ws/1")
+            .spawn_session_with(backend, "claude", &task, "ws/1", &app.default_directory.clone())
             .unwrap();
         assert_eq!(session.task_name(), "task-a");
 
@@ -2004,7 +2056,7 @@ mod tests {
         let task = ops::get_task(&app.conn, "task-a").unwrap();
 
         let backend = app.default_backend();
-        app.spawn_session_with(backend, "claude", &task, "ws/1")
+        app.spawn_session_with(backend, "claude", &task, "ws/1", &app.default_directory.clone())
             .unwrap();
 
         let session_file = app.claude_sessions_dir.join("task-a");
@@ -2039,6 +2091,7 @@ mod tests {
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -2199,6 +2252,7 @@ mod tests {
             spawner: Box::new(spawner),
             persistent_sessions: false,
             default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -2534,6 +2588,7 @@ mod tests {
             spawner: Box::new(StubSpawner),
             persistent_sessions: false,
             default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
             toplevel: None,
             term: TermSize { rows: 24, cols: 80 },
             tree: TreeView::new(ActiveTaskPolicy::Confirm),
@@ -2674,6 +2729,387 @@ mod tests {
         assert_eq!(
             task.status, "open",
             "task should be released after reconnect failure"
+        );
+    }
+
+    // ── Lifecycle hook state tests ─────────────────────────────────────
+
+    type CapturedDirs = std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>;
+
+    /// Spawner that captures the working directory for each spawned session.
+    struct DirCapturingSpawner {
+        captured_dirs: CapturedDirs,
+    }
+
+    impl DirCapturingSpawner {
+        fn new() -> (Self, CapturedDirs) {
+            let captured: CapturedDirs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let spawner = Self {
+                captured_dirs: captured.clone(),
+            };
+            (spawner, captured)
+        }
+    }
+
+    impl SessionSpawner for DirCapturingSpawner {
+        fn spawn(
+            &self,
+            _command: &str,
+            _args: &[&str],
+            task_name: &str,
+            session_id: &str,
+            _rows: u16,
+            _cols: u16,
+            _env_vars: &[(&str, &str)],
+            cwd: &std::path::Path,
+        ) -> Result<Box<dyn SessionHandle>> {
+            self.captured_dirs
+                .lock()
+                .unwrap()
+                .push((task_name.to_string(), cwd.to_path_buf()));
+            Ok(Box::new(StubSession::new(task_name, session_id, true)))
+        }
+    }
+
+    fn dir_for_task(captured: &CapturedDirs, task_name: &str) -> Option<PathBuf> {
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name == task_name)
+            .map(|(_, dir)| dir.clone())
+    }
+
+    fn test_app_with_dir_capture() -> (App, TempDir, CapturedDirs) {
+        let status_dir = TempDir::new().unwrap();
+        let claude_sessions_dir = status_dir.path().join("claude-sessions");
+        std::fs::create_dir_all(&claude_sessions_dir).unwrap();
+        let conn = kbtz::db::open_memory().unwrap();
+        let mut backends: HashMap<String, Box<dyn Backend>> = HashMap::new();
+        backends.insert("claude".to_string(), Box::new(StubBackend));
+        let (spawner, captured) = DirCapturingSpawner::new();
+        let app = App {
+            db_path: ":memory:".to_string(),
+            conn,
+            sessions: HashMap::new(),
+            task_to_session: HashMap::new(),
+            counter: 0,
+            status_dir: status_dir.path().to_path_buf(),
+            claude_sessions_dir,
+            max_concurrency: 2,
+            manual: false,
+            prefer: None,
+            backends,
+            default_backend: "claude".to_string(),
+            spawner: Box::new(spawner),
+            persistent_sessions: false,
+            default_directory: std::env::current_dir().unwrap(),
+            hook_states: HashMap::new(),
+            toplevel: None,
+            term: TermSize { rows: 24, cols: 80 },
+            tree: TreeView::new(ActiveTaskPolicy::Confirm),
+            tree_dirty: false,
+            notes_panel: None,
+            zoomed_session: None,
+        };
+        (app, status_dir, captured)
+    }
+
+    #[test]
+    fn spawn_up_to_skips_task_with_running_hook() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Set hook state to RunningBeforeStart — task should not be spawned.
+        app.hook_states
+            .insert("task-a".to_string(), HookState::RunningBeforeStart);
+
+        app.spawn_up_to(1).unwrap();
+
+        assert!(
+            app.sessions.is_empty(),
+            "no session should be spawned for task with running hook"
+        );
+        assert!(
+            dir_for_task(&captured, "task-a").is_none(),
+            "spawner should not have been called"
+        );
+        // Task should have been released back to open.
+        let task = ops::get_task(&app.conn, "task-a").unwrap();
+        assert_eq!(task.status, "open");
+        // Hook state should still be present.
+        assert!(app.hook_states.contains_key("task-a"));
+    }
+
+    #[test]
+    fn spawn_up_to_skips_task_with_error_hook_state() {
+        let (mut app, _dir, _captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        app.hook_states.insert(
+            "task-a".to_string(),
+            HookState::BeforeStartError {
+                error: "hook failed".to_string(),
+            },
+        );
+
+        app.spawn_up_to(1).unwrap();
+
+        assert!(
+            app.sessions.is_empty(),
+            "no session should be spawned for task with error hook state"
+        );
+        assert!(app.hook_states.contains_key("task-a"));
+    }
+
+    #[test]
+    fn spawn_up_to_uses_ready_hook_directory() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let hook_dir = PathBuf::from("/tmp/hook-workspace");
+        app.hook_states.insert(
+            "task-a".to_string(),
+            HookState::Ready {
+                directory: hook_dir.clone(),
+            },
+        );
+
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1, "session should be spawned");
+        assert_eq!(
+            dir_for_task(&captured, "task-a"),
+            Some(hook_dir),
+            "should use directory from Ready hook state"
+        );
+        // Hook state should be consumed.
+        assert!(
+            !app.hook_states.contains_key("task-a"),
+            "Ready state should be consumed after spawn"
+        );
+    }
+
+    #[test]
+    fn spawn_up_to_uses_default_dir_without_hook_state() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // No hook state set — should use default directory.
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            dir_for_task(&captured, "task-a"),
+            Some(app.default_directory.clone()),
+            "should use default directory when no hook state"
+        );
+    }
+
+    #[test]
+    fn spawn_uses_task_directory_when_no_hook_state() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                directory: Some("/custom/task/dir"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // No hook state — resolve_session_dir should pick task.directory
+        // over default_directory.
+        app.spawn_up_to(1).unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            dir_for_task(&captured, "task-a"),
+            Some(PathBuf::from("/custom/task/dir")),
+            "should use task.directory when no hook state"
+        );
+    }
+
+    #[test]
+    fn spawn_up_to_skips_non_ready_and_spawns_next() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        // task-a has a running hook and is pre-claimed (as lifecycle-integration
+        // will do), task-b has no hooks. spawn_up_to should only spawn task-b.
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "first",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-b",
+                description: "second",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Pre-claim task-a so claim_next_task won't return it.
+        // This matches real usage: lifecycle-integration claims tasks
+        // before setting RunningBeforeStart to prevent the spawn loop
+        // from grabbing them.
+        ops::claim_task(&app.conn, "task-a", "hook/1").unwrap();
+        app.hook_states
+            .insert("task-a".to_string(), HookState::RunningBeforeStart);
+
+        app.spawn_up_to(2).unwrap();
+
+        assert_eq!(app.sessions.len(), 1, "only task-b should be spawned");
+        assert!(
+            dir_for_task(&captured, "task-b").is_some(),
+            "task-b should have been spawned"
+        );
+        assert!(
+            dir_for_task(&captured, "task-a").is_none(),
+            "task-a should not have been spawned"
+        );
+    }
+
+    #[test]
+    fn spawn_for_task_rejects_non_ready_hook_state() {
+        let (mut app, _dir, _captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        app.hook_states
+            .insert("task-a".to_string(), HookState::RunningBeforeStart);
+
+        let result = app.spawn_for_task("task-a");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not ready"),
+            "error should mention task is not ready"
+        );
+    }
+
+    #[test]
+    fn spawn_for_task_uses_ready_hook_directory() {
+        let (mut app, _dir, captured) = test_app_with_dir_capture();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let hook_dir = PathBuf::from("/tmp/hook-workspace");
+        app.hook_states.insert(
+            "task-a".to_string(),
+            HookState::Ready {
+                directory: hook_dir.clone(),
+            },
+        );
+
+        app.spawn_for_task("task-a").unwrap();
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            dir_for_task(&captured, "task-a"),
+            Some(hook_dir),
+            "should use directory from Ready hook state"
+        );
+        assert!(
+            !app.hook_states.contains_key("task-a"),
+            "Ready state should be consumed"
+        );
+    }
+
+    #[test]
+    fn remove_session_cleans_up_hook_state() {
+        let (mut app, _dir) = test_app();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+
+        // Pre-populate a hook state (simulating a hook that completed but
+        // session is being removed before cleanup).
+        app.hook_states.insert(
+            "task-a".to_string(),
+            HookState::Ready {
+                directory: PathBuf::from("/tmp/test"),
+            },
+        );
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+                unread: false,
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            !app.hook_states.contains_key("task-a"),
+            "hook state should be cleaned up on session removal"
         );
     }
 }

@@ -1,6 +1,33 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(5);
+
+// ── Per-task lifecycle hook state ─────────────────────────────────────
+
+/// Tracks the lifecycle preparation phase for a task.
+///
+/// Tasks that have lifecycle hooks configured go through this state machine
+/// before a session can be spawned. Tasks without hooks are never tracked
+/// here — they proceed directly through the normal spawn path.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Variants used by lifecycle-integration (not yet wired).
+pub enum HookState {
+    /// The before_start hook is currently executing.
+    RunningBeforeStart,
+    /// The task has passed lifecycle checks and is ready for session spawn.
+    Ready { directory: PathBuf },
+    /// The before_start hook failed.
+    BeforeStartError { error: String },
+    /// An interactive session is resolving a before_start hook error.
+    ResolvingBefore,
+    /// The after_end hook is currently executing (post-session teardown).
+    RunningAfterEnd,
+    /// The after_end hook failed.
+    AfterEndError { error: String },
+    /// An interactive session is resolving an after_end hook error.
+    ResolvingAfter,
+}
 
 // ── Snapshot types (pure data, no IO) ──────────────────────────────────
 
