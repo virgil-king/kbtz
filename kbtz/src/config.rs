@@ -446,10 +446,7 @@ resolution_agent = "gemini"
 
         let config = Config::load_from(f.path()).unwrap();
         assert_eq!(config.lifecycle.agent.as_deref(), Some("claude"));
-        assert_eq!(
-            config.lifecycle.resolution_agent.as_deref(),
-            Some("gemini")
-        );
+        assert_eq!(config.lifecycle.resolution_agent.as_deref(), Some("gemini"));
     }
 
     #[test]
