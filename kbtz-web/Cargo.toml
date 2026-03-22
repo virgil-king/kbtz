@@ -1,0 +1,25 @@
+[package]
+name = "kbtz-web"
+version = "0.1.0"
+edition = "2021"
+description = "JSON-based shepherd protocol and binary for kbtz web interface"
+license = "Apache-2.0"
+repository = "https://github.com/virgil-king/kbtz"
+
+[lib]
+name = "kbtz_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kbtz-json-shepherd"
+path = "src/bin/kbtz-json-shepherd.rs"
+
+[dependencies]
+kbtz = { path = "../kbtz" }
+anyhow = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

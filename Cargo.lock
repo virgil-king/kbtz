@@ -905,6 +905,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbtz-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kbtz",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "kbtz-workspace"
 version = "0.1.0"
 dependencies = [
