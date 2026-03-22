@@ -9,7 +9,22 @@ pub struct Config {
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     #[serde(default)]
+    pub lifecycle: LifecycleConfig,
+    #[serde(default)]
     pub agent: HashMap<String, AgentConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleConfig {
+    pub before_start: Option<String>,
+    pub after_end: Option<String>,
+    /// Agent type for headless hook execution (references [agent.*]).
+    /// Falls back to the workspace default when unset.
+    pub agent: Option<String>,
+    /// Agent type for interactive error-resolution sessions.
+    /// Falls back to the workspace default when unset.
+    pub resolution_agent: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -313,5 +328,138 @@ command = "gemini-cli"
         let config = Config::load_from(f.path()).unwrap();
         let agent = config.agent.get("gemini").unwrap();
         assert!(agent.backend.is_none());
+    }
+
+    #[test]
+    fn parse_lifecycle_config() {
+        let toml = r#"
+[lifecycle]
+before_start = "Set up worktree for task '{name}'."
+after_end = "Tear down worktree for task '{name}'."
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert_eq!(
+            config.lifecycle.before_start.as_deref(),
+            Some("Set up worktree for task '{name}'.")
+        );
+        assert_eq!(
+            config.lifecycle.after_end.as_deref(),
+            Some("Tear down worktree for task '{name}'.")
+        );
+    }
+
+    #[test]
+    fn parse_lifecycle_with_workspace() {
+        let toml = r#"
+[workspace]
+concurrency = 2
+
+[lifecycle]
+before_start = "Setup."
+
+[agent.claude]
+command = "claude"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert_eq!(config.workspace.concurrency, Some(2));
+        assert_eq!(config.lifecycle.before_start.as_deref(), Some("Setup."));
+        assert!(config.lifecycle.after_end.is_none());
+        assert!(config.agent.contains_key("claude"));
+    }
+
+    #[test]
+    fn parse_partial_lifecycle() {
+        let toml = r#"
+[lifecycle]
+after_end = "Cleanup."
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.lifecycle.before_start.is_none());
+        assert_eq!(config.lifecycle.after_end.as_deref(), Some("Cleanup."));
+    }
+
+    #[test]
+    fn lifecycle_defaults_to_none() {
+        let toml = r#"
+[workspace]
+concurrency = 1
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.lifecycle.before_start.is_none());
+        assert!(config.lifecycle.after_end.is_none());
+    }
+
+    #[test]
+    fn misspelled_lifecycle_field_rejected() {
+        let toml = r#"
+[lifecycle]
+before_strat = "typo"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let result = Config::load_from(f.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_multiline_lifecycle_prompts() {
+        let toml = r#"
+[lifecycle]
+before_start = """
+Create a working directory for task '{name}'.
+Acquire worktrees for ~/kbtz and ~/agents.
+Return the directory path.
+"""
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        let prompt = config.lifecycle.before_start.unwrap();
+        assert!(prompt.contains("working directory"));
+        assert!(prompt.contains("Acquire worktrees"));
+    }
+
+    #[test]
+    fn parse_lifecycle_agent_fields() {
+        let toml = r#"
+[lifecycle]
+before_start = "Setup."
+agent = "claude"
+resolution_agent = "gemini"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert_eq!(config.lifecycle.agent.as_deref(), Some("claude"));
+        assert_eq!(config.lifecycle.resolution_agent.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn lifecycle_agent_fields_default_to_none() {
+        let toml = r#"
+[lifecycle]
+before_start = "Setup."
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+
+        let config = Config::load_from(f.path()).unwrap();
+        assert!(config.lifecycle.agent.is_none());
+        assert!(config.lifecycle.resolution_agent.is_none());
     }
 }
