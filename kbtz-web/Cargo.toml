@@ -14,12 +14,27 @@ path = "src/lib.rs"
 name = "kbtz-json-shepherd"
 path = "src/bin/kbtz-json-shepherd.rs"
 
+[[bin]]
+name = "kbtz-web-server"
+path = "src/bin/kbtz-web-server.rs"
+
 [dependencies]
 kbtz = { path = "../kbtz" }
+kbtz-workspace-core = { path = "../kbtz-workspace-core" }
 anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+rand = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
