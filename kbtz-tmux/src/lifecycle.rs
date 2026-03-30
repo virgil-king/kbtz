@@ -10,19 +10,11 @@ pub enum WindowPhase {
 }
 
 #[derive(Debug, Clone)]
-pub struct TaskSnapshot {
-    pub status: String,
-    pub assignee: Option<String>,
-    pub blocked: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct WindowSnapshot {
     pub session_id: String,
     pub task_name: String,
     pub window_id: String,
     pub phase: WindowPhase,
-    pub task: Option<TaskSnapshot>,
 }
 
 pub struct WorldSnapshot {
@@ -33,7 +25,6 @@ pub struct WorldSnapshot {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
-    RequestExit { session_id: String },
     ForceKill { session_id: String },
     Remove { session_id: String },
     SpawnUpTo { count: usize },
@@ -61,13 +52,9 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                 }
             }
             WindowPhase::Running => {
-                if should_reap(window) {
-                    actions.push(Action::RequestExit {
-                        session_id: window.session_id.clone(),
-                    });
-                } else {
-                    running_count += 1;
-                }
+                // Never auto-kill running sessions. The user decides
+                // when to close them.
+                running_count += 1;
             }
         }
     }
@@ -81,51 +68,17 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
     actions
 }
 
-fn should_reap(window: &WindowSnapshot) -> bool {
-    match &window.task {
-        None => true,
-        Some(task) => match task.status.as_str() {
-            "done" | "paused" => true,
-            "active" => task.blocked || task.assignee.as_deref() != Some(&window.session_id),
-            "open" => true,
-            _ => false,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn snapshot(
-        session_id: &str,
-        task_name: &str,
-        phase: WindowPhase,
-        task: Option<TaskSnapshot>,
-    ) -> WindowSnapshot {
+    fn snapshot(session_id: &str, task_name: &str, phase: WindowPhase) -> WindowSnapshot {
         WindowSnapshot {
             session_id: session_id.into(),
             task_name: task_name.into(),
             window_id: "@0".into(),
             phase,
-            task,
         }
-    }
-
-    fn active_task(assignee: &str) -> Option<TaskSnapshot> {
-        Some(TaskSnapshot {
-            status: "active".into(),
-            assignee: Some(assignee.into()),
-            blocked: false,
-        })
-    }
-
-    fn task_with_status(status: &str) -> Option<TaskSnapshot> {
-        Some(TaskSnapshot {
-            status: status.into(),
-            assignee: Some("ws/1".into()),
-            blocked: false,
-        })
     }
 
     fn world(windows: Vec<WindowSnapshot>, max: usize) -> WorldSnapshot {
@@ -138,15 +91,7 @@ mod tests {
 
     #[test]
     fn gone_window_removed_and_slot_freed() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Gone,
-                active_task("ws/1"),
-            )],
-            2,
-        );
+        let w = world(vec![snapshot("ws/1", "task-a", WindowPhase::Gone)], 2);
         let actions = tick(&w);
         assert_eq!(
             actions,
@@ -160,48 +105,9 @@ mod tests {
     }
 
     #[test]
-    fn done_task_triggers_request_exit() {
+    fn running_session_persists() {
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Running,
-                task_with_status("done"),
-            )],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
-    }
-
-    #[test]
-    fn paused_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Running,
-                task_with_status("paused"),
-            )],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
-    }
-
-    #[test]
-    fn healthy_session_no_reap() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Running,
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", "task-a", WindowPhase::Running)],
             2,
         );
         let actions = tick(&w);
@@ -217,7 +123,6 @@ mod tests {
                 WindowPhase::Stopping {
                     since: Instant::now(),
                 },
-                active_task("ws/1"),
             )],
             2,
         );
@@ -233,7 +138,6 @@ mod tests {
                 "ws/1",
                 "task-a",
                 WindowPhase::Stopping { since: past },
-                active_task("ws/1"),
             )],
             2,
         );
@@ -250,8 +154,8 @@ mod tests {
     fn at_capacity_no_spawn() {
         let w = world(
             vec![
-                snapshot("ws/0", "task-a", WindowPhase::Running, active_task("ws/0")),
-                snapshot("ws/1", "task-b", WindowPhase::Running, active_task("ws/1")),
+                snapshot("ws/0", "task-a", WindowPhase::Running),
+                snapshot("ws/1", "task-b", WindowPhase::Running),
             ],
             2,
         );
@@ -260,67 +164,16 @@ mod tests {
     }
 
     #[test]
-    fn deleted_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot("ws/1", "task-a", WindowPhase::Running, None)],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
-    }
-
-    #[test]
-    fn reassigned_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Running,
-                active_task("ws/2"),
-            )],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
-    }
-
-    #[test]
-    fn blocked_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                "task-a",
-                WindowPhase::Running,
-                Some(TaskSnapshot {
-                    status: "active".into(),
-                    assignee: Some("ws/1".into()),
-                    blocked: true,
-                }),
-            )],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
-    }
-
-    #[test]
     fn stopping_windows_dont_count_toward_concurrency() {
         let w = world(
             vec![
-                snapshot("ws/0", "task-a", WindowPhase::Running, active_task("ws/0")),
+                snapshot("ws/0", "task-a", WindowPhase::Running),
                 snapshot(
                     "ws/1",
                     "task-b",
                     WindowPhase::Stopping {
                         since: Instant::now(),
                     },
-                    active_task("ws/1"),
                 ),
             ],
             2,

@@ -12,7 +12,7 @@ use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
-    self, SessionAction, SessionPhase, SessionSnapshot, TaskSnapshot, WorldSnapshot,
+    self, SessionAction, SessionPhase, SessionSnapshot, WorldSnapshot,
     GRACEFUL_TIMEOUT,
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
@@ -211,7 +211,9 @@ impl App {
     /// Rebuild the tree view from the database.
     pub fn refresh_tree(&mut self) -> Result<()> {
         let mut tasks = ops::list_tasks(&self.conn, None, true, None, None, None)?;
-        self.tree.filter_tasks(&mut tasks);
+        let session_tasks: std::collections::HashSet<String> =
+            self.task_to_session.keys().cloned().collect();
+        self.tree.filter_tasks(&mut tasks, &session_tasks);
         let rows = kbtz::ui::flatten_tree(&tasks, &self.tree.collapsed, &self.conn)?;
         self.tree.rows = match &self.tree.filter {
             Some(query) => kbtz::ui::filter_rows(&rows, query),
@@ -288,24 +290,9 @@ impl App {
                     SessionPhase::Running
                 };
 
-                let task = match ops::get_task(&self.conn, ts.handle.task_name()) {
-                    Ok(t) => {
-                        let blocked = !ops::get_blockers(&self.conn, ts.handle.task_name())
-                            .unwrap_or_default()
-                            .is_empty();
-                        Some(TaskSnapshot {
-                            status: t.status,
-                            assignee: t.assignee,
-                            blocked,
-                        })
-                    }
-                    Err(_) => None, // task was deleted
-                };
-
                 SessionSnapshot {
                     session_id: session_id.clone(),
                     phase,
-                    task,
                 }
             })
             .collect();
@@ -326,23 +313,6 @@ impl App {
 
         for action in actions {
             match action {
-                SessionAction::RequestExit { session_id, reason } => {
-                    if let Some(ts) = self.sessions.get_mut(&session_id) {
-                        kbtz::debug_log::log(&format!(
-                            "action: request_exit {} (task={}, reason={})",
-                            session_id,
-                            ts.handle.task_name(),
-                            reason
-                        ));
-                        let backend = self.backends.get(&ts.agent_type).unwrap_or_else(|| {
-                            panic!(
-                                "BUG: no backend '{}' for session {} — ensure_backend was not called before session insertion",
-                                ts.agent_type, session_id,
-                            )
-                        });
-                        backend.request_exit(ts.handle.as_mut());
-                    }
-                }
                 SessionAction::ForceKill { session_id } => {
                     if let Some(ts) = self.sessions.get_mut(&session_id) {
                         kbtz::debug_log::log(&format!(

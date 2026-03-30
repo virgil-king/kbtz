@@ -17,7 +17,7 @@ fn full_lifecycle_scenario() {
         "empty world should spawn up to max"
     );
 
-    // After spawning, both slots running healthy.
+    // After spawning, both slots running.
     let w = WorldSnapshot {
         windows: vec![
             WindowSnapshot {
@@ -25,61 +25,46 @@ fn full_lifecycle_scenario() {
                 task_name: "task-a".into(),
                 window_id: "@1".into(),
                 phase: WindowPhase::Running,
-                task: Some(TaskSnapshot {
-                    status: "active".into(),
-                    assignee: Some("ws/0".into()),
-                    blocked: false,
-                }),
             },
             WindowSnapshot {
                 session_id: "ws/1".into(),
                 task_name: "task-b".into(),
                 window_id: "@2".into(),
                 phase: WindowPhase::Running,
-                task: Some(TaskSnapshot {
-                    status: "active".into(),
-                    assignee: Some("ws/1".into()),
-                    blocked: false,
-                }),
             },
         ],
         max_concurrency: 2,
         now: Instant::now(),
     };
     let actions = tick(&w);
-    assert!(actions.is_empty(), "at capacity with healthy sessions");
+    assert!(actions.is_empty(), "at capacity with running sessions");
 
-    // task-a completes. Should request exit.
+    // task-a completes. Session persists, still at capacity.
+    // (task state is irrelevant — tick only looks at phase.)
+    let actions = tick(&w);
+    assert!(actions.is_empty(), "sessions are never auto-killed");
+
+    // ws/0 process exits on its own -> Gone. Now a slot opens.
     let w = WorldSnapshot {
         windows: vec![
             WindowSnapshot {
                 session_id: "ws/0".into(),
                 task_name: "task-a".into(),
                 window_id: "@1".into(),
-                phase: WindowPhase::Running,
-                task: Some(TaskSnapshot {
-                    status: "done".into(),
-                    assignee: Some("ws/0".into()),
-                    blocked: false,
-                }),
+                phase: WindowPhase::Gone,
             },
             WindowSnapshot {
                 session_id: "ws/1".into(),
                 task_name: "task-b".into(),
                 window_id: "@2".into(),
                 phase: WindowPhase::Running,
-                task: Some(TaskSnapshot {
-                    status: "active".into(),
-                    assignee: Some("ws/1".into()),
-                    blocked: false,
-                }),
             },
         ],
         max_concurrency: 2,
         now: Instant::now(),
     };
     let actions = tick(&w);
-    assert!(actions.contains(&Action::RequestExit {
+    assert!(actions.contains(&Action::Remove {
         session_id: "ws/0".into()
     }));
     assert!(actions.contains(&Action::SpawnUpTo { count: 1 }));
