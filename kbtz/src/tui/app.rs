@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -103,7 +104,7 @@ impl App {
 
     pub fn refresh(&mut self, conn: &Connection, root: Option<&str>) -> Result<()> {
         let mut tasks = ops::list_tasks(conn, None, true, root, None, None)?;
-        self.tree.filter_tasks(&mut tasks);
+        self.tree.filter_tasks(&mut tasks, &HashSet::new());
         let rows = ui::flatten_tree(&tasks, &self.tree.collapsed, conn)?;
         self.tree.rows = match &self.tree.filter {
             Some(query) => ui::filter_rows(&rows, query),

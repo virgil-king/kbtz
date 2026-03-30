@@ -12,17 +12,9 @@ pub enum SessionPhase {
 }
 
 #[derive(Debug, Clone)]
-pub struct TaskSnapshot {
-    pub status: String,
-    pub assignee: Option<String>,
-    pub blocked: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub session_id: String,
     pub phase: SessionPhase,
-    pub task: Option<TaskSnapshot>,
 }
 
 pub struct WorldSnapshot {
@@ -37,7 +29,6 @@ pub struct WorldSnapshot {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SessionAction {
-    RequestExit { session_id: String, reason: String },
     ForceKill { session_id: String },
     Remove { session_id: String },
     SpawnUpTo { count: usize },
@@ -68,15 +59,9 @@ pub fn tick(world: &WorldSnapshot) -> Vec<SessionAction> {
                 // Stopping sessions do NOT count toward concurrency.
             }
             SessionPhase::Running => {
-                if should_reap_session(session) {
-                    actions.push(SessionAction::RequestExit {
-                        session_id: session.session_id.clone(),
-                        reason: reap_reason(session),
-                    });
-                    // Will transition to Stopping; don't count toward concurrency.
-                } else {
-                    running_count += 1;
-                }
+                // Never auto-kill running sessions. The user decides
+                // when to close them.
+                running_count += 1;
             }
         }
     }
@@ -89,71 +74,16 @@ pub fn tick(world: &WorldSnapshot) -> Vec<SessionAction> {
     actions
 }
 
-/// Should this running session be reaped based on its task state?
-fn should_reap_session(session: &SessionSnapshot) -> bool {
-    match &session.task {
-        None => true, // task was deleted
-        Some(task) => should_reap_task(&session.session_id, task),
-    }
-}
-
-fn should_reap_task(session_id: &str, task: &TaskSnapshot) -> bool {
-    match task.status.as_str() {
-        "done" | "paused" => true,
-        "active" => task.blocked || task.assignee.as_deref() != Some(session_id),
-        "open" => true, // agent released it
-        _ => false,
-    }
-}
-
-/// Human-readable reason why a session is being reaped.
-fn reap_reason(session: &SessionSnapshot) -> String {
-    match &session.task {
-        None => "task deleted".to_string(),
-        Some(task) => match task.status.as_str() {
-            "done" => "task done".to_string(),
-            "paused" => "task paused".to_string(),
-            "open" => "task released (open)".to_string(),
-            "active" if task.blocked => "task blocked".to_string(),
-            "active" => format!(
-                "reassigned to {}",
-                task.assignee.as_deref().unwrap_or("nobody")
-            ),
-            other => format!("unexpected status: {other}"),
-        },
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn snapshot(
-        session_id: &str,
-        phase: SessionPhase,
-        task: Option<TaskSnapshot>,
-    ) -> SessionSnapshot {
+    fn snapshot(session_id: &str, phase: SessionPhase) -> SessionSnapshot {
         SessionSnapshot {
             session_id: session_id.into(),
             phase,
-            task,
         }
-    }
-
-    fn active_task(assignee: &str) -> Option<TaskSnapshot> {
-        Some(TaskSnapshot {
-            status: "active".into(),
-            assignee: Some(assignee.into()),
-            blocked: false,
-        })
-    }
-
-    fn task_with_status(status: &str) -> Option<TaskSnapshot> {
-        Some(TaskSnapshot {
-            status: status.into(),
-            assignee: Some("ws/1".into()),
-            blocked: false,
-        })
     }
 
     fn world(sessions: Vec<SessionSnapshot>, max_concurrency: usize) -> WorldSnapshot {
@@ -164,17 +94,10 @@ mod tests {
         }
     }
 
-    fn has_request_exit(actions: &[SessionAction], session_id: &str) -> bool {
-        actions.iter().any(|a| matches!(a, SessionAction::RequestExit { session_id: sid, .. } if sid == session_id))
-    }
-
     // 1. Exited session -> Remove + SpawnUpTo
     #[test]
     fn exited_session_removed_and_slot_filled() {
-        let w = world(
-            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
-            2,
-        );
+        let w = world(vec![snapshot("ws/1", SessionPhase::Exited)], 2);
         let actions = tick(&w);
         assert_eq!(
             actions,
@@ -187,33 +110,15 @@ mod tests {
         );
     }
 
-    // 2. Done task -> RequestExit
+    // 2. Running session persists, counts toward concurrency
     #[test]
-    fn done_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Running,
-                task_with_status("done"),
-            )],
-            2,
-        );
+    fn running_session_persists() {
+        let w = world(vec![snapshot("ws/1", SessionPhase::Running)], 2);
         let actions = tick(&w);
-        assert!(has_request_exit(&actions, "ws/1"));
+        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 1 }]);
     }
 
-    // 3. Healthy session -> no action (only SpawnUpTo for free slots)
-    #[test]
-    fn healthy_session_no_action() {
-        let w = world(
-            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/1"))],
-            2,
-        );
-        let actions = tick(&w);
-        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 1 },]);
-    }
-
-    // 4. Stopping within timeout -> no ForceKill
+    // 3. Stopping within timeout -> no ForceKill
     #[test]
     fn stopping_within_timeout_no_force_kill() {
         let w = world(
@@ -222,25 +127,19 @@ mod tests {
                 SessionPhase::Stopping {
                     since: Instant::now(),
                 },
-                active_task("ws/1"),
             )],
             2,
         );
         let actions = tick(&w);
-        // Should only get SpawnUpTo (stopping doesn't count toward concurrency)
-        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 2 },]);
+        assert_eq!(actions, vec![SessionAction::SpawnUpTo { count: 2 }]);
     }
 
-    // 5. Stopping past timeout -> ForceKill + Remove
+    // 4. Stopping past timeout -> ForceKill + Remove
     #[test]
     fn stopping_past_timeout_force_killed() {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Stopping { since: past },
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Stopping { since: past })],
             2,
         );
         let actions = tick(&w);
@@ -252,38 +151,31 @@ mod tests {
         }));
     }
 
-    // 6. Stopping sessions don't count toward concurrency
+    // 5. Stopping sessions don't count toward concurrency
     #[test]
     fn stopping_sessions_dont_count_toward_concurrency() {
         let w = world(
             vec![
-                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
+                snapshot("ws/1", SessionPhase::Running),
                 snapshot(
                     "ws/2",
                     SessionPhase::Stopping {
                         since: Instant::now(),
                     },
-                    active_task("ws/2"),
                 ),
             ],
             2,
         );
         let actions = tick(&w);
-        // ws/1 is running (counts as 1), ws/2 is stopping (doesn't count).
-        // So 1 free slot.
         assert!(actions.contains(&SessionAction::SpawnUpTo { count: 1 }));
     }
 
-    // 7. Spawn after force-kill fills the slot
+    // 6. Spawn after force-kill fills the slot
     #[test]
     fn spawn_after_force_kill() {
         let past = Instant::now() - Duration::from_secs(10);
         let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Stopping { since: past },
-                active_task("ws/1"),
-            )],
+            vec![snapshot("ws/1", SessionPhase::Stopping { since: past })],
             1,
         );
         let actions = tick(&w);
@@ -293,13 +185,13 @@ mod tests {
         assert!(actions.contains(&SessionAction::SpawnUpTo { count: 1 }));
     }
 
-    // 8. At capacity -> no SpawnUpTo
+    // 7. At capacity -> no SpawnUpTo
     #[test]
     fn at_capacity_no_spawn() {
         let w = world(
             vec![
-                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
-                snapshot("ws/2", SessionPhase::Running, active_task("ws/2")),
+                snapshot("ws/1", SessionPhase::Running),
+                snapshot("ws/2", SessionPhase::Running),
             ],
             2,
         );
@@ -307,26 +199,7 @@ mod tests {
         assert!(actions.is_empty());
     }
 
-    // 9. Deleted task -> RequestExit
-    #[test]
-    fn deleted_task_triggers_request_exit() {
-        let w = world(vec![snapshot("ws/1", SessionPhase::Running, None)], 2);
-        let actions = tick(&w);
-        assert!(has_request_exit(&actions, "ws/1"));
-    }
-
-    // 10. Reassigned task -> RequestExit
-    #[test]
-    fn reassigned_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot("ws/1", SessionPhase::Running, active_task("ws/2"))],
-            2,
-        );
-        let actions = tick(&w);
-        assert!(has_request_exit(&actions, "ws/1"));
-    }
-
-    // 11. Manual mode (max_concurrency=0) -> no SpawnUpTo
+    // 8. Manual mode (max_concurrency=0) -> no SpawnUpTo
     #[test]
     fn manual_mode_no_auto_spawn() {
         let w = world(vec![], 0);
@@ -334,74 +207,41 @@ mod tests {
         assert!(actions.is_empty());
     }
 
-    // 12. Manual mode still reaps exited sessions
+    // 9. Manual mode still cleans up exited sessions
     #[test]
-    fn manual_mode_still_reaps_exited() {
-        let w = world(
-            vec![snapshot("ws/1", SessionPhase::Exited, active_task("ws/1"))],
-            0,
-        );
+    fn manual_mode_still_cleans_exited() {
+        let w = world(vec![snapshot("ws/1", SessionPhase::Exited)], 0);
         let actions = tick(&w);
         assert_eq!(
             actions,
             vec![SessionAction::Remove {
                 session_id: "ws/1".into()
-            },]
+            }]
         );
     }
 
-    // 13. Blocked task -> RequestExit
+    // 10. Manual mode: running session persists, no auto-spawn
     #[test]
-    fn blocked_task_triggers_request_exit() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Running,
-                Some(TaskSnapshot {
-                    status: "active".into(),
-                    assignee: Some("ws/1".into()),
-                    blocked: true,
-                }),
-            )],
-            2,
-        );
+    fn manual_mode_running_persists() {
+        let w = world(vec![snapshot("ws/1", SessionPhase::Running)], 0);
         let actions = tick(&w);
-        assert!(has_request_exit(&actions, "ws/1"));
+        assert!(actions.is_empty());
     }
 
-    // 14. Manual mode still requests exit for done tasks
-    #[test]
-    fn manual_mode_still_reaps_done() {
-        let w = world(
-            vec![snapshot(
-                "ws/1",
-                SessionPhase::Running,
-                task_with_status("done"),
-            )],
-            0,
-        );
-        let actions = tick(&w);
-        assert!(has_request_exit(&actions, "ws/1"));
-        assert!(!actions
-            .iter()
-            .any(|a| matches!(a, SessionAction::SpawnUpTo { .. })));
-    }
-
-    // 15. Over capacity (reconnected sessions) -> no reaping, no spawning
+    // 11. Over capacity (reconnected sessions) -> no reaping, no spawning
     #[test]
     fn over_capacity_preserves_all_sessions() {
         let w = world(
             vec![
-                snapshot("ws/1", SessionPhase::Running, active_task("ws/1")),
-                snapshot("ws/2", SessionPhase::Running, active_task("ws/2")),
-                snapshot("ws/3", SessionPhase::Running, active_task("ws/3")),
-                snapshot("ws/4", SessionPhase::Running, active_task("ws/4")),
-                snapshot("ws/5", SessionPhase::Running, active_task("ws/5")),
+                snapshot("ws/1", SessionPhase::Running),
+                snapshot("ws/2", SessionPhase::Running),
+                snapshot("ws/3", SessionPhase::Running),
+                snapshot("ws/4", SessionPhase::Running),
+                snapshot("ws/5", SessionPhase::Running),
             ],
-            3, // max_concurrency < running sessions
+            3,
         );
         let actions = tick(&w);
-        // No sessions should be reaped, no new sessions spawned.
         assert!(actions.is_empty());
     }
 }

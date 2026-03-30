@@ -33,7 +33,6 @@ pub struct WorldSnapshot {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
-    RequestExit { session_id: String },
     ForceKill { session_id: String },
     Remove { session_id: String },
     SpawnUpTo { count: usize },
@@ -61,13 +60,9 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                 }
             }
             WindowPhase::Running => {
-                if should_reap(window) {
-                    actions.push(Action::RequestExit {
-                        session_id: window.session_id.clone(),
-                    });
-                } else {
-                    running_count += 1;
-                }
+                // Never auto-kill running sessions. The user decides
+                // when to close them.
+                running_count += 1;
             }
         }
     }
@@ -79,18 +74,6 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
     }
 
     actions
-}
-
-fn should_reap(window: &WindowSnapshot) -> bool {
-    match &window.task {
-        None => true,
-        Some(task) => match task.status.as_str() {
-            "done" | "paused" => true,
-            "active" => task.blocked || task.assignee.as_deref() != Some(&window.session_id),
-            "open" => true,
-            _ => false,
-        },
-    }
 }
 
 #[cfg(test)]
@@ -160,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn done_task_triggers_request_exit() {
+    fn done_task_session_persists() {
         let w = world(
             vec![snapshot(
                 "ws/1",
@@ -171,13 +154,11 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }
 
     #[test]
-    fn paused_task_triggers_request_exit() {
+    fn paused_task_session_persists() {
         let w = world(
             vec![snapshot(
                 "ws/1",
@@ -188,9 +169,7 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }
 
     #[test]
@@ -260,19 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn deleted_task_triggers_request_exit() {
+    fn deleted_task_session_persists() {
         let w = world(
             vec![snapshot("ws/1", "task-a", WindowPhase::Running, None)],
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }
 
     #[test]
-    fn reassigned_task_triggers_request_exit() {
+    fn reassigned_task_session_persists() {
         let w = world(
             vec![snapshot(
                 "ws/1",
@@ -283,13 +260,11 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }
 
     #[test]
-    fn blocked_task_triggers_request_exit() {
+    fn blocked_task_session_persists() {
         let w = world(
             vec![snapshot(
                 "ws/1",
@@ -304,9 +279,7 @@ mod tests {
             2,
         );
         let actions = tick(&w);
-        assert!(actions.contains(&Action::RequestExit {
-            session_id: "ws/1".into()
-        }));
+        assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }
 
     #[test]

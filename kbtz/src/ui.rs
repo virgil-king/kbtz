@@ -299,11 +299,20 @@ impl TreeView {
     }
 
     /// Filter a task list according to the current show_done/show_paused flags.
-    pub fn filter_tasks(&self, tasks: &mut Vec<Task>) {
-        tasks.retain(|t| match t.status.as_str() {
-            "done" => self.show_done,
-            "paused" => self.show_paused,
-            _ => true,
+    ///
+    /// Tasks whose names appear in `keep` are never filtered out, regardless
+    /// of status. This is used to ensure tasks with active sessions remain
+    /// visible in the tree view.
+    pub fn filter_tasks(&self, tasks: &mut Vec<Task>, keep: &HashSet<String>) {
+        tasks.retain(|t| {
+            if keep.contains(&t.name) {
+                return true;
+            }
+            match t.status.as_str() {
+                "done" => self.show_done,
+                "paused" => self.show_paused,
+                _ => true,
+            }
         });
     }
 
@@ -1525,7 +1534,7 @@ mod tests {
             make_task("paused-task", None, "paused"),
             make_task("active-task", None, "active"),
         ];
-        tv.filter_tasks(&mut tasks);
+        tv.filter_tasks(&mut tasks, &HashSet::new());
         let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["open-task", "active-task"]);
     }
@@ -1540,8 +1549,24 @@ mod tests {
             make_task("done-task", None, "done"),
             make_task("paused-task", None, "paused"),
         ];
-        tv.filter_tasks(&mut tasks);
+        tv.filter_tasks(&mut tasks, &HashSet::new());
         assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn filter_tasks_keeps_tasks_in_keep_set() {
+        let tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        let mut tasks = vec![
+            make_task("open-task", None, "open"),
+            make_task("done-task", None, "done"),
+            make_task("paused-task", None, "paused"),
+            make_task("active-task", None, "active"),
+        ];
+        let keep: HashSet<String> =
+            ["done-task", "paused-task"].iter().map(|s| s.to_string()).collect();
+        tv.filter_tasks(&mut tasks, &keep);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["open-task", "done-task", "paused-task", "active-task"]);
     }
 
     #[test]

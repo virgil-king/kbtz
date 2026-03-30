@@ -182,17 +182,6 @@ impl Orchestrator {
 
     fn apply_action(&mut self, action: &Action) {
         match action {
-            Action::RequestExit { session_id } => {
-                if let Some(tw) = self.windows.get_mut(session_id) {
-                    info!("Requesting exit for {} (task={})", session_id, tw.task_name);
-                    if let Ok(Some(pid)) = tmux::pane_pid(&tw.window_id) {
-                        send_signal(pid, libc::SIGTERM);
-                    }
-                    tw.phase = WindowPhase::Stopping {
-                        since: Instant::now(),
-                    };
-                }
-            }
             Action::ForceKill { session_id } => {
                 if let Some(tw) = self.windows.get(session_id) {
                     info!("Force-killing {} (task={})", session_id, tw.task_name);
