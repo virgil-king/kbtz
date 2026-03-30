@@ -11,9 +11,7 @@ use kbtz::config::Config;
 use kbtz::{db, ops, paths, watch};
 use kbtz_workspace::prompt::AGENT_PROMPT;
 
-use kbtz_tmux::lifecycle::{
-    self, Action, TaskSnapshot, WindowPhase, WindowSnapshot, WorldSnapshot,
-};
+use kbtz_tmux::lifecycle::{self, Action, WindowPhase, WindowSnapshot, WorldSnapshot};
 use kbtz_tmux::tmux;
 
 /// Send a signal to a process, logging unexpected errors.
@@ -95,89 +93,24 @@ impl Orchestrator {
         }
     }
 
-    /// Batch-fetch task statuses for all tracked windows in a single SQL query.
-    /// Returns Err on SQL failure so the caller can skip the tick rather than
-    /// misinterpreting missing data as "all tasks deleted" and reaping everything.
-    fn batch_task_statuses(&self) -> Result<HashMap<String, TaskSnapshot>> {
-        if self.windows.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let names: Vec<&str> = self
-            .windows
-            .values()
-            .map(|tw| tw.task_name.as_str())
-            .collect();
-        let placeholders: String = names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT t.name, t.status, t.assignee, \
-                    EXISTS(SELECT 1 FROM task_deps td \
-                           INNER JOIN tasks b ON b.name = td.blocker AND b.status != 'done' \
-                           WHERE td.blocked = t.name) AS blocked \
-             FROM tasks t WHERE t.name IN ({placeholders})"
-        );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .context("failed to prepare batch task query")?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = names
-            .iter()
-            .map(|n| n as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = stmt
-            .query_map(params.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, bool>(3)?,
-                ))
-            })
-            .context("failed to execute batch task query")?;
-        let mut map = HashMap::new();
-        for row in rows {
-            let (name, status, assignee, blocked) = row.context("failed to read task row")?;
-            map.insert(
-                name,
-                TaskSnapshot {
-                    status,
-                    assignee,
-                    blocked,
-                },
-            );
-        }
-        Ok(map)
-    }
-
-    /// Build a world snapshot. Returns None if the batch query fails (caller
-    /// should skip the tick).
-    fn snapshot_world(&self) -> Option<WorldSnapshot> {
-        let task_statuses = match self.batch_task_statuses() {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("Skipping tick: {e}");
-                return None;
-            }
-        };
+    /// Build a world snapshot for the pure tick function.
+    fn snapshot_world(&self) -> WorldSnapshot {
         let windows: Vec<WindowSnapshot> = self
             .windows
             .values()
-            .map(|tw| {
-                let task = task_statuses.get(&tw.task_name).cloned();
-                WindowSnapshot {
-                    session_id: tw.session_id.clone(),
-                    task_name: tw.task_name.clone(),
-                    window_id: tw.window_id.clone(),
-                    phase: tw.phase.clone(),
-                    task,
-                }
+            .map(|tw| WindowSnapshot {
+                session_id: tw.session_id.clone(),
+                task_name: tw.task_name.clone(),
+                window_id: tw.window_id.clone(),
+                phase: tw.phase.clone(),
             })
             .collect();
 
-        Some(WorldSnapshot {
+        WorldSnapshot {
             windows,
             max_concurrency: self.max_concurrent,
             now: Instant::now(),
-        })
+        }
     }
 
     fn apply_action(&mut self, action: &Action) {
@@ -414,13 +347,10 @@ impl Orchestrator {
         while self.running.load(Ordering::SeqCst) {
             self.detect_dead_windows();
 
-            // snapshot_world returns None if the batch query fails (transient
-            // DB error). In that case, skip this tick and wait for the next event.
-            if let Some(world) = self.snapshot_world() {
-                let actions = lifecycle::tick(&world);
-                for action in &actions {
-                    self.apply_action(action);
-                }
+            let world = self.snapshot_world();
+            let actions = lifecycle::tick(&world);
+            for action in &actions {
+                self.apply_action(action);
             }
 
             // If session vanished, stop the loop.

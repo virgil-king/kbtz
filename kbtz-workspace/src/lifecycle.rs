@@ -74,7 +74,6 @@ pub fn tick(world: &WorldSnapshot) -> Vec<SessionAction> {
     actions
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
