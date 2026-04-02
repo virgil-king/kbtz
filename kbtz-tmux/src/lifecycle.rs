@@ -106,10 +106,7 @@ mod tests {
 
     #[test]
     fn running_session_persists() {
-        let w = world(
-            vec![snapshot("ws/1", "task-a", WindowPhase::Running)],
-            2,
-        );
+        let w = world(vec![snapshot("ws/1", "task-a", WindowPhase::Running)], 2);
         let actions = tick(&w);
         assert_eq!(actions, vec![Action::SpawnUpTo { count: 1 }]);
     }

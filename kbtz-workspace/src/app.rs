@@ -12,8 +12,7 @@ use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
-    self, SessionAction, SessionPhase, SessionSnapshot, WorldSnapshot,
-    GRACEFUL_TIMEOUT,
+    self, SessionAction, SessionPhase, SessionSnapshot, WorldSnapshot, GRACEFUL_TIMEOUT,
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
 use crate::shepherd_session::ShepherdSession;
