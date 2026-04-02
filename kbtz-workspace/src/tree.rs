@@ -128,7 +128,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":collapse  "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(":search  "),
-            Span::styled("D/P", Style::default().fg(Color::Cyan)),
+            Span::styled("D/P/S", Style::default().fg(Color::Cyan)),
             Span::raw(":filter  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
@@ -144,7 +144,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 34.min(term.height.saturating_sub(2));
+    let height = 35.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -212,6 +212,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  P          ", Style::default().fg(Color::Cyan)),
             Span::raw("Toggle show paused tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  S          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle sessions-only filter"),
         ]),
         Line::from(vec![
             Span::styled("  q          ", Style::default().fg(Color::Cyan)),
