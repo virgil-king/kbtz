@@ -24,6 +24,7 @@ pub struct TermSize {
 
 pub struct TrackedSession {
     pub handle: Box<dyn SessionHandle>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub agent_type: String,
     pub unread: bool,
 }
