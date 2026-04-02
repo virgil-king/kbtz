@@ -12,8 +12,7 @@ use kbtz::ui::{ActiveTaskPolicy, NotesPanel, TreeView};
 
 use crate::backend::Backend;
 use crate::lifecycle::{
-    self, SessionAction, SessionPhase, SessionSnapshot, WorldSnapshot,
-    GRACEFUL_TIMEOUT,
+    self, SessionAction, SessionPhase, SessionSnapshot, WorldSnapshot, GRACEFUL_TIMEOUT,
 };
 use crate::session::{PtySpawner, SessionHandle, SessionSpawner, SessionStatus, ShepherdSpawner};
 use crate::shepherd_session::ShepherdSession;
@@ -25,6 +24,7 @@ pub struct TermSize {
 
 pub struct TrackedSession {
     pub handle: Box<dyn SessionHandle>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub agent_type: String,
     pub unread: bool,
 }
