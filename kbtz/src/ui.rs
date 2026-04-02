@@ -1665,11 +1665,16 @@ mod tests {
             make_task("paused-task", None, "paused"),
             make_task("active-task", None, "active"),
         ];
-        let keep: HashSet<String> =
-            ["done-task", "paused-task"].iter().map(|s| s.to_string()).collect();
+        let keep: HashSet<String> = ["done-task", "paused-task"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         tv.filter_tasks(&mut tasks, &keep);
         let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["open-task", "done-task", "paused-task", "active-task"]);
+        assert_eq!(
+            names,
+            vec!["open-task", "done-task", "paused-task", "active-task"]
+        );
     }
 
     #[test]
