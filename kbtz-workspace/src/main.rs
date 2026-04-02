@@ -731,6 +731,11 @@ fn tree_loop(
         }
         if let Some(desc) = app.tick()? {
             kbtz::debug_log::log(&format!("tick: {desc}"));
+            // Session removals for done tasks don't write to the DB
+            // (release_task fails because the task is already done), so the
+            // DB watcher never fires and the tree would stay stale.  Refresh
+            // immediately so done tasks disappear when their session ends.
+            app.refresh_tree()?;
         }
     }
 }
