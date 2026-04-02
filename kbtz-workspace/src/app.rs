@@ -679,10 +679,12 @@ impl App {
 
     /// Remove a session, cleaning up its status/socket/pid files and releasing the task.
     ///
-    /// The Claude session file is deleted when the task is done, or when
-    /// the child crashed during init (non-zero exit without a prior
-    /// graceful-exit request). For paused, blocked, and other non-done
-    /// tasks the file is preserved for future resume.
+    /// The Claude session file is preserved across all task states (done,
+    /// paused, blocked, active) so that reopened or re-spawned tasks can
+    /// resume the previous conversation. The file is only deleted when the
+    /// child crashed during init (non-zero exit without a prior graceful-exit
+    /// request), indicating a broken session that would cause a crash loop,
+    /// or when the task has been deleted from the database.
     fn remove_session(&mut self, session_id: &str) {
         if let Some(mut ts) = self.sessions.remove(session_id) {
             let task_name = ts.handle.task_name().to_string();
@@ -691,13 +693,12 @@ impl App {
                 "remove_session: {sid} (task={task_name}, status={})",
                 ts.handle.status().label()
             ));
-            // Check task status before releasing — we need to know if the session
-            // file should be preserved for resume. Distinguish "task deleted"
-            // from transient DB errors (lock contention) — only treat missing
-            // tasks as done. Preserving the session file on DB errors avoids
+            // Check if the task still exists. Distinguish "task deleted" from
+            // transient DB errors (lock contention) — only treat missing tasks
+            // as deleted. Preserving the session file on DB errors avoids
             // losing conversation context due to a transient lock.
-            let task_done = match ops::get_task(&self.conn, &task_name) {
-                Ok(t) => t.status == "done",
+            let task_deleted = match ops::get_task(&self.conn, &task_name) {
+                Ok(_) => false,
                 Err(e) if is_db_busy(&e) => {
                     kbtz::debug_log::log(&format!(
                         "remove_session: DB busy looking up {task_name}, \
@@ -705,7 +706,7 @@ impl App {
                     ));
                     false
                 }
-                Err(_) => true, // task deleted or other error — treat as done
+                Err(_) => true, // task deleted or other error
             };
             let _ = ops::release_task(&self.conn, &task_name, &sid);
             // Only remove the task->session mapping if it still points to this
@@ -726,7 +727,7 @@ impl App {
             let child_failed =
                 !was_requested && ts.handle.exit_code().is_some_and(|code| code != 0);
 
-            if task_done || child_failed {
+            if task_deleted || child_failed {
                 if child_failed {
                     kbtz::debug_log::log(&format!(
                         "remove_session: clearing session file for {task_name} \
@@ -1728,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_session_deletes_file_for_done_task() {
+    fn remove_session_preserves_file_for_done_task() {
         let (mut app, _dir) = test_app_resumable();
         ops::add_task(
             &app.conn,
@@ -1760,10 +1761,10 @@ mod tests {
 
         app.remove_session("ws/1");
 
-        // Session file should be deleted (task is done)
+        // Session file should be preserved so reopened tasks can resume
         assert!(
-            !session_file.exists(),
-            "session file should be deleted for done task"
+            session_file.exists(),
+            "session file should be preserved for done task (enables resume after reopen)"
         );
     }
 
@@ -1920,6 +1921,44 @@ mod tests {
         assert!(
             session_file.exists(),
             "session file should be preserved when child exited with zero code"
+        );
+    }
+
+    #[test]
+    fn remove_session_deletes_file_for_deleted_task() {
+        let (mut app, _dir) = test_app_resumable();
+        ops::add_task(
+            &app.conn,
+            ops::AddTaskParams {
+                name: "task-a",
+                description: "desc",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops::claim_task(&app.conn, "task-a", "ws/1").unwrap();
+        // Delete the task from the database
+        ops::remove_task(&app.conn, "task-a", false).unwrap();
+
+        let session_file = app.claude_sessions_dir.join("task-a");
+        std::fs::write(&session_file, "some-uuid").unwrap();
+
+        app.sessions.insert(
+            "ws/1".to_string(),
+            TrackedSession {
+                handle: Box::new(StubSession::new("task-a", "ws/1", false)),
+                agent_type: "claude".to_string(),
+                unread: false,
+            },
+        );
+        app.task_to_session
+            .insert("task-a".to_string(), "ws/1".to_string());
+
+        app.remove_session("ws/1");
+
+        assert!(
+            !session_file.exists(),
+            "session file should be deleted when task is deleted from database"
         );
     }
 
