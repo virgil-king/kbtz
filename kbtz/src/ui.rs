@@ -247,6 +247,9 @@ pub struct TreeView {
     pub filter: Option<String>,
     pub show_done: bool,
     pub show_paused: bool,
+    /// When false, only tasks with active sessions (those in the `keep`
+    /// set passed to `filter_tasks`) are shown.
+    pub show_inactive: bool,
     /// Task name to select on the next tree refresh (e.g. after returning
     /// from a zoomed session). Consumed by `clamp_cursor`.
     pub pending_select: Option<String>,
@@ -265,6 +268,7 @@ impl TreeView {
             filter: None,
             show_done: false,
             show_paused: false,
+            show_inactive: true,
             pending_select: None,
         }
     }
@@ -298,15 +302,46 @@ impl TreeView {
         self.rows.get(self.cursor).map(|r| r.name.as_str())
     }
 
-    /// Filter a task list according to the current show_done/show_paused flags.
+    /// Filter a task list according to the current visibility flags.
     ///
     /// Tasks whose names appear in `keep` are never filtered out, regardless
     /// of status. This is used to ensure tasks with active sessions remain
     /// visible in the tree view.
+    ///
+    /// When `show_inactive` is false, only tasks in `keep` (and their
+    /// ancestors) are retained.
     pub fn filter_tasks(&self, tasks: &mut Vec<Task>, keep: &HashSet<String>) {
+        // When filtering to active-only, pre-compute the ancestor set so
+        // the tree structure is preserved for kept tasks.
+        let ancestors = if !self.show_inactive {
+            let task_parents: HashMap<&str, Option<&str>> = tasks
+                .iter()
+                .map(|t| (t.name.as_str(), t.parent.as_deref()))
+                .collect();
+            let mut set = HashSet::new();
+            for name in keep {
+                let mut cur = task_parents.get(name.as_str()).copied().flatten();
+                while let Some(parent) = cur {
+                    if !set.insert(parent.to_string()) {
+                        break;
+                    }
+                    cur = task_parents.get(parent).copied().flatten();
+                }
+            }
+            Some(set)
+        } else {
+            None
+        };
+
         tasks.retain(|t| {
             if keep.contains(&t.name) {
                 return true;
+            }
+            if let Some(ref anc) = ancestors {
+                if anc.contains(&t.name) {
+                    return true;
+                }
+                return false;
             }
             match t.status.as_str() {
                 "done" => self.show_done,
@@ -328,9 +363,23 @@ impl TreeView {
         *self.list_state.offset_mut() = 0;
     }
 
+    /// Toggle visibility of tasks without active sessions.
+    pub fn toggle_show_inactive(&mut self) {
+        self.show_inactive = !self.show_inactive;
+        *self.list_state.offset_mut() = 0;
+    }
+
     /// Returns a label describing the current filter state, or `None` if
-    /// using default filtering (hiding done and paused).
+    /// using default filtering (hiding done and paused, showing inactive).
     pub fn filter_label(&self) -> Option<&'static str> {
+        if !self.show_inactive {
+            return match (self.show_done, self.show_paused) {
+                (false, false) => Some("sessions"),
+                (false, true) => Some("sessions+paused"),
+                (true, false) => Some("sessions+done"),
+                (true, true) => Some("sessions+all"),
+            };
+        }
         match (self.show_done, self.show_paused) {
             (false, false) => None,
             (false, true) => Some("+paused"),
@@ -467,6 +516,10 @@ impl TreeView {
                     }
                     KeyCode::Char('P') => {
                         self.toggle_show_paused();
+                        TreeKeyAction::ToggleShowAll
+                    }
+                    KeyCode::Char('S') => {
+                        self.toggle_show_inactive();
                         TreeKeyAction::ToggleShowAll
                     }
                     KeyCode::Char('?') => {
@@ -1583,6 +1636,81 @@ mod tests {
 
         tv.show_paused = true;
         assert_eq!(tv.filter_label(), Some("all"));
+    }
+
+    #[test]
+    fn filter_tasks_show_inactive_false_keeps_only_session_tasks() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_inactive = false;
+        let mut tasks = vec![
+            make_task("a", None, "open"),
+            make_task("b", None, "open"),
+            make_task("c", None, "active"),
+        ];
+        let keep: HashSet<String> = ["b"].iter().map(|s| s.to_string()).collect();
+        tv.filter_tasks(&mut tasks, &keep);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["b"]);
+    }
+
+    #[test]
+    fn filter_tasks_show_inactive_false_preserves_ancestors() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_inactive = false;
+        let mut tasks = vec![
+            make_task("root", None, "open"),
+            make_task("mid", Some("root"), "open"),
+            make_task("leaf", Some("mid"), "active"),
+            make_task("other", None, "open"),
+        ];
+        let keep: HashSet<String> = ["leaf"].iter().map(|s| s.to_string()).collect();
+        tv.filter_tasks(&mut tasks, &keep);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["root", "mid", "leaf"]);
+    }
+
+    #[test]
+    fn filter_tasks_show_inactive_false_keeps_done_ancestors() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_inactive = false;
+        let mut tasks = vec![
+            make_task("root", None, "done"),
+            make_task("mid", Some("root"), "paused"),
+            make_task("leaf", Some("mid"), "active"),
+        ];
+        let keep: HashSet<String> = ["leaf"].iter().map(|s| s.to_string()).collect();
+        tv.filter_tasks(&mut tasks, &keep);
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["root", "mid", "leaf"]);
+    }
+
+    #[test]
+    fn filter_tasks_show_inactive_false_empty_keep_shows_nothing() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_inactive = false;
+        let mut tasks = vec![
+            make_task("a", None, "open"),
+            make_task("b", None, "active"),
+        ];
+        tv.filter_tasks(&mut tasks, &HashSet::new());
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn filter_label_sessions_only() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.show_inactive = false;
+        assert_eq!(tv.filter_label(), Some("sessions"));
+
+        tv.show_done = true;
+        assert_eq!(tv.filter_label(), Some("sessions+done"));
+
+        tv.show_done = false;
+        tv.show_paused = true;
+        assert_eq!(tv.filter_label(), Some("sessions+paused"));
+
+        tv.show_done = true;
+        assert_eq!(tv.filter_label(), Some("sessions+all"));
     }
 
     // ── build_tree_items ──
