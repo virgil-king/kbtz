@@ -316,14 +316,24 @@ impl TreeView {
         });
     }
 
+    /// Save the currently selected task name so it can be restored after a
+    /// refresh (e.g. when filters change). No-op if nothing is selected.
+    fn save_selection(&mut self) {
+        if let Some(name) = self.selected_name() {
+            self.pending_select = Some(name.to_string());
+        }
+    }
+
     /// Toggle visibility of done tasks.
     pub fn toggle_show_done(&mut self) {
+        self.save_selection();
         self.show_done = !self.show_done;
         *self.list_state.offset_mut() = 0;
     }
 
     /// Toggle visibility of paused tasks.
     pub fn toggle_show_paused(&mut self) {
+        self.save_selection();
         self.show_paused = !self.show_paused;
         *self.list_state.offset_mut() = 0;
     }
@@ -398,6 +408,7 @@ impl TreeView {
                 let mut query = query.clone();
                 match key.code {
                     KeyCode::Esc => {
+                        self.save_selection();
                         self.filter = None;
                         self.mode = TreeMode::Normal;
                         TreeKeyAction::Refresh
@@ -418,6 +429,7 @@ impl TreeView {
                         TreeKeyAction::Continue
                     }
                     KeyCode::Backspace => {
+                        self.save_selection();
                         query.pop();
                         self.filter = if query.is_empty() {
                             None
@@ -428,6 +440,7 @@ impl TreeView {
                         TreeKeyAction::Refresh
                     }
                     KeyCode::Char(c) => {
+                        self.save_selection();
                         query.push(c);
                         self.filter = Some(query.clone());
                         self.mode = TreeMode::Search(query);
@@ -479,6 +492,7 @@ impl TreeView {
                         TreeKeyAction::Continue
                     }
                     KeyCode::Esc if self.filter.is_some() => {
+                        self.save_selection();
                         self.filter = None;
                         TreeKeyAction::Refresh
                     }
@@ -1501,6 +1515,95 @@ mod tests {
         *tv.list_state.offset_mut() = 50;
         tv.toggle_show_done();
         assert_eq!(tv.list_state.offset(), 0);
+    }
+
+    #[test]
+    fn toggle_show_done_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 1;
+        tv.toggle_show_done();
+        assert_eq!(tv.pending_select.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn toggle_show_paused_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 1;
+        tv.toggle_show_paused();
+        assert_eq!(tv.pending_select.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn search_esc_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 1;
+        tv.filter = Some("test".into());
+        tv.mode = TreeMode::Search("test".into());
+        let key = KeyEvent::from(KeyCode::Esc);
+        tv.handle_key(key);
+        assert_eq!(tv.pending_select.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn search_typing_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 0;
+        tv.mode = TreeMode::Search(String::new());
+        let key = KeyEvent::from(KeyCode::Char('a'));
+        tv.handle_key(key);
+        assert_eq!(tv.pending_select.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn search_backspace_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 1;
+        tv.filter = Some("ab".into());
+        tv.mode = TreeMode::Search("ab".into());
+        let key = KeyEvent::from(KeyCode::Backspace);
+        tv.handle_key(key);
+        assert_eq!(tv.pending_select.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn normal_esc_clears_filter_saves_selection() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.rows = vec![
+            make_row("alpha", "open", None),
+            make_row("beta", "open", None),
+        ];
+        tv.cursor = 1;
+        tv.filter = Some("test".into());
+        let key = KeyEvent::from(KeyCode::Esc);
+        tv.handle_key(key);
+        assert_eq!(tv.pending_select.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn save_selection_noop_when_empty() {
+        let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
+        tv.toggle_show_done();
+        assert_eq!(tv.pending_select, None);
     }
 
     #[test]
