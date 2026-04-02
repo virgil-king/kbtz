@@ -1784,10 +1784,7 @@ mod tests {
     fn filter_tasks_show_inactive_false_empty_keep_shows_nothing() {
         let mut tv = TreeView::new(ActiveTaskPolicy::Refuse);
         tv.show_inactive = false;
-        let mut tasks = vec![
-            make_task("a", None, "open"),
-            make_task("b", None, "active"),
-        ];
+        let mut tasks = vec![make_task("a", None, "open"), make_task("b", None, "active")];
         tv.filter_tasks(&mut tasks, &HashSet::new());
         assert!(tasks.is_empty());
     }

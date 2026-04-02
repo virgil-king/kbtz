@@ -49,10 +49,7 @@ impl ui::TreeDecorator for SessionDecorator<'_> {
                 return ui::RowDecoration {
                     after_name: vec![
                         Span::raw(" \u{1f47d}"),
-                        Span::styled(
-                            format!(" {assignee}"),
-                            Style::default().fg(Color::Cyan),
-                        ),
+                        Span::styled(format!(" {assignee}"), Style::default().fg(Color::Cyan)),
                     ],
                 };
             }
