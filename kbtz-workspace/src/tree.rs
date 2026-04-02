@@ -28,31 +28,32 @@ struct SessionDecorator<'a> {
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
     fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
-        // Workspace session: 🤖 + status indicator (+ unread marker) + session ID
+        // Workspace session: task icon stays, 🤖 + status indicator (+ unread) + session ID after name
         if let Some(sid) = self.task_to_session.get(&row.name) {
             if let Some(ts) = self.sessions.get(sid) {
                 let unread = if ts.unread { "\u{1f440}" } else { "" };
                 return ui::RowDecoration {
-                    icon_override: Some((
-                        format!("\u{1f916}{}{unread} ", ts.handle.status().indicator()),
-                        ui::status_style(&row.status),
-                    )),
-                    after_name: vec![Span::styled(
-                        format!(" {sid}"),
-                        Style::default().fg(Color::Cyan),
-                    )],
+                    after_name: vec![
+                        Span::styled(
+                            format!(" \u{1f916}{}{unread}", ts.handle.status().indicator()),
+                            Style::default(),
+                        ),
+                        Span::styled(format!(" {sid}"), Style::default().fg(Color::Cyan)),
+                    ],
                 };
             }
         }
-        // Externally-claimed active task: 👽 + assignee name
-        if row.status == "active" {
-            if let Some(ref assignee) = row.assignee {
+        // Externally-claimed active task: task icon stays, 👽 + assignee after name
+        if let Some(ref assignee) = row.assignee {
+            if row.status == "active" {
                 return ui::RowDecoration {
-                    icon_override: Some(("\u{1f47d} ".to_string(), ui::status_style(&row.status))),
-                    after_name: vec![Span::styled(
-                        format!(" {assignee}"),
-                        Style::default().fg(Color::Cyan),
-                    )],
+                    after_name: vec![
+                        Span::raw(" \u{1f47d}"),
+                        Span::styled(
+                            format!(" {assignee}"),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ],
                 };
             }
         }

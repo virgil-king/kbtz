@@ -608,8 +608,6 @@ impl TreeView {
 /// Per-row customization for tree item rendering.
 #[derive(Default)]
 pub struct RowDecoration {
-    /// If set, replaces the default status icon and style.
-    pub icon_override: Option<(String, Style)>,
     /// Extra spans inserted after the task name.
     pub after_name: Vec<Span<'static>>,
 }
@@ -643,8 +641,8 @@ pub fn session_indicator(status: &str) -> &'static str {
 }
 
 /// Decorator that reads session status from workspace status files.
-/// Replaces the task status icon with a session indicator for tasks
-/// that have an active session with a status file.
+/// Appends a session indicator after the task name, preserving the
+/// task status icon so both task state and session state are visible.
 pub struct FileStatusDecorator {
     /// assignee string → status file content (e.g. "active", "idle")
     pub statuses: HashMap<String, String>,
@@ -675,24 +673,19 @@ impl FileStatusDecorator {
 impl TreeDecorator for FileStatusDecorator {
     fn decorate(&self, row: &TreeRow) -> RowDecoration {
         if let Some(ref assignee) = row.assignee {
-            // Known session with status file: 🤖🟢 task-name
+            // Known session with status file: task icon preserved, 🤖+indicator after name
             if let Some(status) = self.statuses.get(assignee) {
                 return RowDecoration {
-                    icon_override: Some((
-                        format!("\u{1f916}{} ", session_indicator(status)),
-                        status_style(&row.status),
-                    )),
-                    after_name: vec![],
+                    after_name: vec![Span::styled(
+                        format!(" \u{1f916}{}", session_indicator(status)),
+                        Style::default(),
+                    )],
                 };
             }
-            // Assigned but no status file (external/stale): 👽⭕  task-name
+            // Assigned but no status file (external/stale): task icon preserved, 👽 after name
             if row.status == "active" {
                 return RowDecoration {
-                    icon_override: Some((
-                        format!("\u{1f47d}{}  ", icon_for_task(row)),
-                        status_style(&row.status),
-                    )),
-                    after_name: vec![],
+                    after_name: vec![Span::raw(" \u{1f47d}")],
                 };
             }
         }
@@ -806,13 +799,8 @@ pub fn build_tree_items(
                 "  "
             };
 
-            let (icon, icon_style) = if let Some((icon, style)) = decoration.icon_override {
-                (icon, style)
-            } else {
-                let icon = icon_for_task(row);
-                let style = status_style(&row.status);
-                (icon, style)
-            };
+            let icon = icon_for_task(row);
+            let icon_style = status_style(&row.status);
 
             let blocked_info = if row.blocked_by.is_empty() {
                 String::new()
@@ -1857,7 +1845,6 @@ mod tests {
         impl TreeDecorator for TestDecorator {
             fn decorate(&self, _row: &TreeRow) -> RowDecoration {
                 RowDecoration {
-                    icon_override: Some(("X ".into(), Style::default())),
                     after_name: vec![Span::raw(" extra")],
                 }
             }
@@ -1921,17 +1908,44 @@ mod tests {
     // ── FileStatusDecorator ──
 
     #[test]
-    fn file_status_decorator_overrides_icon() {
+    fn file_status_decorator_adds_session_after_name() {
         let mut statuses = HashMap::new();
         statuses.insert("ws/1".into(), "active".into());
         let decorator = FileStatusDecorator { statuses };
 
         let row = make_row("task", "active", Some("ws/1"));
         let dec = decorator.decorate(&row);
-        assert!(dec.icon_override.is_some());
-        let (icon, _) = dec.icon_override.unwrap();
-        assert!(icon.contains('\u{1f916}'));
-        assert!(icon.contains('\u{26a1}'));
+        assert!(!dec.after_name.is_empty());
+        let text: String = dec.after_name.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('\u{1f916}'));
+        assert!(text.contains('\u{26a1}'));
+    }
+
+    #[test]
+    fn file_status_decorator_preserves_done_task_icon() {
+        let mut statuses = HashMap::new();
+        statuses.insert("ws/1".into(), "active".into());
+        let decorator = FileStatusDecorator { statuses };
+
+        let row = make_row("task", "done", Some("ws/1"));
+        let dec = decorator.decorate(&row);
+        // Decorator only adds after_name — icon_for_task() still renders ✅
+        assert!(!dec.after_name.is_empty());
+        let icon = icon_for_task(&row);
+        assert!(icon.contains(state_emoji("done")));
+    }
+
+    #[test]
+    fn file_status_decorator_preserves_paused_task_icon() {
+        let mut statuses = HashMap::new();
+        statuses.insert("ws/1".into(), "idle".into());
+        let decorator = FileStatusDecorator { statuses };
+
+        let row = make_row("task", "paused", Some("ws/1"));
+        let dec = decorator.decorate(&row);
+        assert!(!dec.after_name.is_empty());
+        let icon = icon_for_task(&row);
+        assert!(icon.contains(state_emoji("paused")));
     }
 
     #[test]
@@ -1941,7 +1955,6 @@ mod tests {
         };
         let row = make_row("task", "open", None);
         let dec = decorator.decorate(&row);
-        assert!(dec.icon_override.is_none());
         assert!(dec.after_name.is_empty());
     }
 
@@ -1957,7 +1970,7 @@ mod tests {
         assert_eq!(decorator.statuses.get("ws/1").unwrap(), "active\n");
 
         let dec = decorator.decorate(&rows[0]);
-        assert!(dec.icon_override.is_some());
+        assert!(!dec.after_name.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1966,7 +1979,6 @@ mod tests {
     fn default_decorator_returns_default() {
         let row = make_row("t", "open", None);
         let dec = DefaultDecorator.decorate(&row);
-        assert!(dec.icon_override.is_none());
         assert!(dec.after_name.is_empty());
     }
 
