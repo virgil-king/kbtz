@@ -28,13 +28,17 @@ struct SessionDecorator<'a> {
 
 impl ui::TreeDecorator for SessionDecorator<'_> {
     fn decorate(&self, row: &ui::TreeRow) -> ui::RowDecoration {
-        // Workspace session: 🤖 + status indicator (+ unread marker) + session ID
+        // Workspace session: task-state + 🤖+indicator(+unread) before name, session ID after
         if let Some(sid) = self.task_to_session.get(&row.name) {
             if let Some(ts) = self.sessions.get(sid) {
                 let unread = if ts.unread { "\u{1f440}" } else { "" };
                 return ui::RowDecoration {
                     icon_override: Some((
-                        format!("\u{1f916}{}{unread} ", ts.handle.status().indicator()),
+                        format!(
+                            "{}\u{1f916}{}{unread} ",
+                            ui::task_state_prefix(row),
+                            ts.handle.status().indicator(),
+                        ),
                         ui::status_style(&row.status),
                     )),
                     after_name: vec![Span::styled(
@@ -44,9 +48,9 @@ impl ui::TreeDecorator for SessionDecorator<'_> {
                 };
             }
         }
-        // Externally-claimed active task: 👽 + assignee name
-        if row.status == "active" {
-            if let Some(ref assignee) = row.assignee {
+        // Externally-claimed active task: 👽 before name, assignee after
+        if let Some(ref assignee) = row.assignee {
+            if row.status == "active" {
                 return ui::RowDecoration {
                     icon_override: Some(("\u{1f47d} ".to_string(), ui::status_style(&row.status))),
                     after_name: vec![Span::styled(
@@ -128,7 +132,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(":collapse  "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(":search  "),
-            Span::styled("D/P", Style::default().fg(Color::Cyan)),
+            Span::styled("D/P/S", Style::default().fg(Color::Cyan)),
             Span::raw(":filter  "),
             Span::styled("?", Style::default().fg(Color::Cyan)),
             Span::raw(":help  "),
@@ -144,7 +148,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 pub fn render_help(frame: &mut Frame) {
     let term = frame.area();
     let width = 55.min(term.width.saturating_sub(4));
-    let height = 34.min(term.height.saturating_sub(2));
+    let height = 35.min(term.height.saturating_sub(2));
     let area = ui::centered_rect(width, height, term);
     frame.render_widget(Clear, area);
 
@@ -212,6 +216,10 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("  P          ", Style::default().fg(Color::Cyan)),
             Span::raw("Toggle show paused tasks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  S          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle sessions-only filter"),
         ]),
         Line::from(vec![
             Span::styled("  q          ", Style::default().fg(Color::Cyan)),
