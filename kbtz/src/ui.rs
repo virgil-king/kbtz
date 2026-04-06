@@ -707,7 +707,7 @@ impl TreeDecorator for FileStatusDecorator {
             // Assigned but no status file (external/stale): task-state + 👽 before name
             if row.status == "active" {
                 return RowDecoration {
-                    icon_override: Some((format!("\u{1f47d} "), status_style(&row.status))),
+                    icon_override: Some(("\u{1f47d} ".to_string(), status_style(&row.status))),
                     after_name: vec![],
                 };
             }
