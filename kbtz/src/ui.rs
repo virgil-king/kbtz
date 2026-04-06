@@ -608,8 +608,25 @@ impl TreeView {
 /// Per-row customization for tree item rendering.
 #[derive(Default)]
 pub struct RowDecoration {
+    /// If set, replaces the default status icon and style.
+    pub icon_override: Option<(String, Style)>,
     /// Extra spans inserted after the task name.
     pub after_name: Vec<Span<'static>>,
+}
+
+/// Build an icon prefix from a task's non-default states, excluding "active"
+/// (which is the expected default when a session is running).
+///
+/// Returns an empty string when the task is unblocked + active/open.
+pub fn task_state_prefix(row: &TreeRow) -> String {
+    let mut s = String::new();
+    if !row.blocked_by.is_empty() {
+        s.push_str(state_emoji("blocked"));
+    }
+    if row.status != "open" && row.status != "active" {
+        s.push_str(state_emoji(&row.status));
+    }
+    s
 }
 
 /// Extension point for per-row tree customization.
@@ -641,8 +658,8 @@ pub fn session_indicator(status: &str) -> &'static str {
 }
 
 /// Decorator that reads session status from workspace status files.
-/// Appends a session indicator after the task name, preserving the
-/// task status icon so both task state and session state are visible.
+/// Combines task state and session state into a single icon prefix,
+/// so both dimensions are visible before the task name.
 pub struct FileStatusDecorator {
     /// assignee string → status file content (e.g. "active", "idle")
     pub statuses: HashMap<String, String>,
@@ -673,19 +690,25 @@ impl FileStatusDecorator {
 impl TreeDecorator for FileStatusDecorator {
     fn decorate(&self, row: &TreeRow) -> RowDecoration {
         if let Some(ref assignee) = row.assignee {
-            // Known session with status file: task icon preserved, 🤖+indicator after name
+            // Known session: task-state emojis + 🤖+indicator before name
             if let Some(status) = self.statuses.get(assignee) {
                 return RowDecoration {
-                    after_name: vec![Span::styled(
-                        format!(" \u{1f916}{}", session_indicator(status)),
-                        Style::default(),
-                    )],
+                    icon_override: Some((
+                        format!(
+                            "{}\u{1f916}{} ",
+                            task_state_prefix(row),
+                            session_indicator(status)
+                        ),
+                        status_style(&row.status),
+                    )),
+                    after_name: vec![],
                 };
             }
-            // Assigned but no status file (external/stale): task icon preserved, 👽 after name
+            // Assigned but no status file (external/stale): task-state + 👽 before name
             if row.status == "active" {
                 return RowDecoration {
-                    after_name: vec![Span::raw(" \u{1f47d}")],
+                    icon_override: Some((format!("\u{1f47d} "), status_style(&row.status))),
+                    after_name: vec![],
                 };
             }
         }
@@ -799,8 +822,11 @@ pub fn build_tree_items(
                 "  "
             };
 
-            let icon = icon_for_task(row);
-            let icon_style = status_style(&row.status);
+            let (icon, icon_style) = if let Some((icon, style)) = decoration.icon_override {
+                (icon, style)
+            } else {
+                (icon_for_task(row), status_style(&row.status))
+            };
 
             let blocked_info = if row.blocked_by.is_empty() {
                 String::new()
@@ -1842,6 +1868,7 @@ mod tests {
         impl TreeDecorator for TestDecorator {
             fn decorate(&self, _row: &TreeRow) -> RowDecoration {
                 RowDecoration {
+                    icon_override: Some(("X ".into(), Style::default())),
                     after_name: vec![Span::raw(" extra")],
                 }
             }
@@ -1902,47 +1929,94 @@ mod tests {
         assert_eq!(session_indicator(""), "\u{1f680}");
     }
 
+    // ── task_state_prefix ──
+
+    #[test]
+    fn task_state_prefix_active_is_empty() {
+        let row = make_row("t", "active", None);
+        assert_eq!(task_state_prefix(&row), "");
+    }
+
+    #[test]
+    fn task_state_prefix_open_is_empty() {
+        let row = make_row("t", "open", None);
+        assert_eq!(task_state_prefix(&row), "");
+    }
+
+    #[test]
+    fn task_state_prefix_done() {
+        let row = make_row("t", "done", None);
+        assert_eq!(task_state_prefix(&row), state_emoji("done"));
+    }
+
+    #[test]
+    fn task_state_prefix_paused() {
+        let row = make_row("t", "paused", None);
+        assert_eq!(task_state_prefix(&row), state_emoji("paused"));
+    }
+
+    #[test]
+    fn task_state_prefix_blocked_active() {
+        let mut row = make_row("t", "active", None);
+        row.blocked_by = vec!["other".into()];
+        assert_eq!(task_state_prefix(&row), state_emoji("blocked"));
+    }
+
+    #[test]
+    fn task_state_prefix_blocked_done() {
+        let mut row = make_row("t", "done", None);
+        row.blocked_by = vec!["other".into()];
+        assert_eq!(
+            task_state_prefix(&row),
+            format!("{}{}", state_emoji("blocked"), state_emoji("done"))
+        );
+    }
+
     // ── FileStatusDecorator ──
 
     #[test]
-    fn file_status_decorator_adds_session_after_name() {
+    fn file_status_decorator_active_task_no_task_icon() {
         let mut statuses = HashMap::new();
         statuses.insert("ws/1".into(), "active".into());
         let decorator = FileStatusDecorator { statuses };
 
         let row = make_row("task", "active", Some("ws/1"));
         let dec = decorator.decorate(&row);
-        assert!(!dec.after_name.is_empty());
-        let text: String = dec.after_name.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains('\u{1f916}'));
-        assert!(text.contains('\u{26a1}'));
+        let (icon, _) = dec.icon_override.unwrap();
+        assert!(icon.contains('\u{1f916}'));
+        assert!(icon.contains('\u{26a1}'));
+        // Active task: no task state emoji before 🤖
+        assert!(icon.starts_with('\u{1f916}'));
     }
 
     #[test]
-    fn file_status_decorator_preserves_done_task_icon() {
+    fn file_status_decorator_done_task_shows_done_and_session() {
         let mut statuses = HashMap::new();
         statuses.insert("ws/1".into(), "active".into());
         let decorator = FileStatusDecorator { statuses };
 
         let row = make_row("task", "done", Some("ws/1"));
         let dec = decorator.decorate(&row);
-        // Decorator only adds after_name — icon_for_task() still renders ✅
-        assert!(!dec.after_name.is_empty());
-        let icon = icon_for_task(&row);
+        let (icon, _) = dec.icon_override.unwrap();
+        // ✅🤖⚡
         assert!(icon.contains(state_emoji("done")));
+        assert!(icon.contains('\u{1f916}'));
+        assert!(icon.starts_with(state_emoji("done")));
     }
 
     #[test]
-    fn file_status_decorator_preserves_paused_task_icon() {
+    fn file_status_decorator_paused_task_shows_paused_and_session() {
         let mut statuses = HashMap::new();
         statuses.insert("ws/1".into(), "idle".into());
         let decorator = FileStatusDecorator { statuses };
 
         let row = make_row("task", "paused", Some("ws/1"));
         let dec = decorator.decorate(&row);
-        assert!(!dec.after_name.is_empty());
-        let icon = icon_for_task(&row);
+        let (icon, _) = dec.icon_override.unwrap();
+        // 🧊🤖💤
         assert!(icon.contains(state_emoji("paused")));
+        assert!(icon.contains('\u{1f916}'));
+        assert!(icon.starts_with(state_emoji("paused")));
     }
 
     #[test]
@@ -1952,6 +2026,7 @@ mod tests {
         };
         let row = make_row("task", "open", None);
         let dec = decorator.decorate(&row);
+        assert!(dec.icon_override.is_none());
         assert!(dec.after_name.is_empty());
     }
 
@@ -1967,7 +2042,7 @@ mod tests {
         assert_eq!(decorator.statuses.get("ws/1").unwrap(), "active\n");
 
         let dec = decorator.decorate(&rows[0]);
-        assert!(!dec.after_name.is_empty());
+        assert!(dec.icon_override.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1976,6 +2051,7 @@ mod tests {
     fn default_decorator_returns_default() {
         let row = make_row("t", "open", None);
         let dec = DefaultDecorator.decorate(&row);
+        assert!(dec.icon_override.is_none());
         assert!(dec.after_name.is_empty());
     }
 
