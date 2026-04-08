@@ -1,0 +1,81 @@
+use crate::step::{Step, StepPhase};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::Frame;
+
+pub fn render_dashboard(
+    frame: &mut Frame,
+    area: Rect,
+    steps: &[Step],
+    sessions: &[String],
+    selected_session: &Option<String>,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(5),
+        ])
+        .split(area);
+
+    let header = Paragraph::new("kbtz-council")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(header, chunks[0]);
+
+    let step_items: Vec<ListItem> = steps
+        .iter()
+        .map(|step| {
+            let phase = match &step.phase {
+                StepPhase::Dispatched => ("DISPATCHED", Color::Yellow),
+                StepPhase::Running => ("RUNNING", Color::Blue),
+                StepPhase::Completed => ("COMPLETED", Color::Green),
+                StepPhase::Reviewing => ("REVIEWING", Color::Magenta),
+                StepPhase::Reviewed => ("REVIEWED", Color::Cyan),
+                StepPhase::Merged => ("MERGED", Color::DarkGray),
+                StepPhase::Rework => ("REWORK", Color::Red),
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{} ", step.id),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("[{}] ", phase.0),
+                    Style::default().fg(phase.1),
+                ),
+                Span::raw(&step.dispatch.prompt),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let step_list =
+        List::new(step_items).block(Block::default().title(" Steps ").borders(Borders::ALL));
+    frame.render_widget(step_list, chunks[1]);
+
+    let session_items: Vec<ListItem> = sessions
+        .iter()
+        .map(|s| {
+            let style = if Some(s) == selected_session.as_ref() {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Span::styled(s.clone(), style))
+        })
+        .collect();
+
+    let session_list = List::new(session_items)
+        .block(Block::default().title(" Sessions ").borders(Borders::ALL));
+    frame.render_widget(session_list, chunks[2]);
+}

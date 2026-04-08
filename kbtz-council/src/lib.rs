@@ -6,3 +6,4 @@ pub mod prompt;
 pub mod session;
 pub mod step;
 pub mod stream;
+pub mod tui;
