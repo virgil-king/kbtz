@@ -35,10 +35,23 @@ fn parse_tool_use_event() {
 
 #[test]
 fn parse_result_event() {
-    let line = r#"{"type":"result","result":"Done with the task","cost_usd":0.05,"duration_ms":12000}"#;
+    let line = r#"{"type":"result","result":"Done with the task","session_id":"abc-123","cost_usd":0.05,"duration_ms":12000}"#;
     let event = parse_stream_line(line).unwrap();
     match event {
-        StreamEvent::Result { result } => assert_eq!(result, "Done with the task"),
+        StreamEvent::Result { result, session_id } => {
+            assert_eq!(result, "Done with the task");
+            assert_eq!(session_id.as_deref(), Some("abc-123"));
+        }
+        other => panic!("expected Result, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_result_event_without_session_id() {
+    let line = r#"{"type":"result","result":"Done","cost_usd":0.01}"#;
+    let event = parse_stream_line(line).unwrap();
+    match event {
+        StreamEvent::Result { session_id, .. } => assert!(session_id.is_none()),
         other => panic!("expected Result, got {:?}", other),
     }
 }

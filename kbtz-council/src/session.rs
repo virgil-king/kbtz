@@ -1,12 +1,19 @@
 use crate::stream::{parse_stream_line, StreamEvent};
+use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use uuid::Uuid;
 
-#[derive(Debug, Clone)]
-pub struct SessionId(pub String);
+/// Orchestrator-internal session key (e.g. "step-001-impl", "leader-leader").
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionKey(pub String);
+
+/// Agent backend session UUID, used for resumption (--session-id / --resume).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionId(pub Uuid);
 
 #[derive(Debug)]
 pub enum SessionMessage {
@@ -24,7 +31,8 @@ pub enum SessionRole {
 
 /// A running headless Claude Code session.
 pub struct HeadlessSession {
-    pub id: SessionId,
+    pub key: SessionKey,
+    pub agent_session_id: AgentSessionId,
     pub step_id: String,
     pub role: SessionRole,
     child: Child,
@@ -32,15 +40,17 @@ pub struct HeadlessSession {
 }
 
 impl HeadlessSession {
-    /// Spawn a new `claude -p` session.
+    /// Spawn a `claude -p` session. If `agent_session_id` is provided, resumes that
+    /// session with `--resume`. Otherwise generates a new UUID and passes
+    /// `--session-id`.
     pub fn spawn(
         step_id: &str,
         role: SessionRole,
         prompt: &str,
         working_dir: &Path,
-        claude_session_id: Option<&str>,
+        agent_session_id: Option<AgentSessionId>,
     ) -> io::Result<Self> {
-        let id = SessionId(format!(
+        let key = SessionKey(format!(
             "{}-{}",
             step_id,
             match &role {
@@ -49,6 +59,11 @@ impl HeadlessSession {
                 SessionRole::LeaderDecision => "leader".to_string(),
             }
         ));
+
+        let (agent_session_id, resume) = match agent_session_id {
+            Some(id) => (id, true),
+            None => (AgentSessionId(Uuid::new_v4()), false),
+        };
 
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
@@ -59,8 +74,10 @@ impl HeadlessSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        if let Some(sid) = claude_session_id {
-            cmd.arg("--resume").arg(sid);
+        if resume {
+            cmd.arg("--resume").arg(agent_session_id.0.to_string());
+        } else {
+            cmd.arg("--session-id").arg(agent_session_id.0.to_string());
         }
 
         let mut child = cmd.spawn()?;
@@ -88,7 +105,8 @@ impl HeadlessSession {
         });
 
         Ok(Self {
-            id,
+            key,
+            agent_session_id,
             step_id: step_id.to_string(),
             role,
             child,

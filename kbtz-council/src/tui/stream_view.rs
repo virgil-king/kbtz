@@ -34,7 +34,7 @@ pub fn render_stream_view(
                 format!("[result] {}", truncate(content, 100)),
                 Style::default().fg(Color::Green),
             ))],
-            StreamEvent::Result { result } => vec![Line::from(Span::styled(
+            StreamEvent::Result { result, .. } => vec![Line::from(Span::styled(
                 format!("[done] {}", truncate(result, 200)),
                 Style::default()
                     .fg(Color::Cyan)

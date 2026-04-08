@@ -3,7 +3,7 @@ use crate::lifecycle::{self, Action, SessionSnapshot, StepSnapshot, WorldSnapsho
 use crate::mcp::LeaderRequest;
 use crate::project::ProjectDir;
 use crate::prompt;
-use crate::session::{HeadlessSession, SessionMessage, SessionRole};
+use crate::session::{AgentSessionId, HeadlessSession, SessionMessage, SessionRole};
 use crate::step::{Dispatch, StepPhase};
 use crate::stream::StreamEvent;
 use crate::tui::AppState;
@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
+use uuid::Uuid;
 
 pub struct Orchestrator {
     pub project_dir: ProjectDir,
@@ -61,7 +62,7 @@ impl Orchestrator {
             .map(|s| SessionSnapshot {
                 step_id: s.step_id.clone(),
                 role: s.role.clone(),
-                exited: self.exited_session_ids.contains(&s.id.0),
+                exited: self.exited_session_ids.contains(&s.key.0),
             })
             .collect();
 
@@ -81,7 +82,7 @@ impl Orchestrator {
             while let Ok(msg) = session.rx.try_recv() {
                 match msg {
                     SessionMessage::Event(event) => {
-                        self.app.push_event(&session.id.0, event);
+                        self.app.push_event(&session.key.0, event);
                     }
                     SessionMessage::RawLine(_) => {}
                     SessionMessage::Exited { .. } => {}
@@ -90,7 +91,7 @@ impl Orchestrator {
 
             // Check if process exited
             if let Ok(Some(_code)) = session.try_wait() {
-                self.exited_session_ids.insert(session.id.0.clone());
+                self.exited_session_ids.insert(session.key.0.clone());
                 exited_indices.push(i);
             }
         }
@@ -100,11 +101,17 @@ impl Orchestrator {
             let session = &self.sessions[i];
             let step_id = session.step_id.clone();
             let role = session.role.clone();
+            // Persist agent session UUID for future --resume
+            let key_str = session.key.0.clone();
+            self.project_dir
+                .state_mut()
+                .session_ids
+                .insert(key_str.clone(), session.agent_session_id.0.to_string());
+            let _ = self.project_dir.persist();
 
             match role {
                 SessionRole::Implementation => {
-                    // Extract summary from events
-                    let summary = self.extract_summary(&session.id.0);
+                    let summary = self.extract_summary(&key_str);
 
                     // Fetch commits into leader's repos
                     let session_dir = self
@@ -128,7 +135,7 @@ impl Orchestrator {
                     let _ = self.project_dir.persist();
                 }
                 SessionRole::Stakeholder { ref name } => {
-                    let feedback = self.extract_summary(&session.id.0);
+                    let feedback = self.extract_summary(&session.key.0);
                     let expected = self.project_dir.state().project.stakeholders.len();
                     if let Some(step) = self
                         .project_dir
@@ -269,12 +276,14 @@ impl Orchestrator {
                         .join("sessions")
                         .join(format!("{}-impl", step_id));
                     if session_dir.exists() {
+                        let role = SessionRole::Implementation;
+                        let existing_id = self.lookup_agent_session_id(&step_id, &role);
                         let session = HeadlessSession::spawn(
                             &step_id,
-                            SessionRole::Implementation,
+                            role,
                             &feedback,
                             &session_dir,
-                            None, // TODO: resume with stored session ID
+                            existing_id,
                         )?;
                         self.sessions.push(session);
                     }
@@ -352,12 +361,14 @@ impl Orchestrator {
             .unwrap_or_default();
 
         let prompt_text = prompt::implementation_prompt(&step_prompt);
+        let role = SessionRole::Implementation;
+        let existing_id = self.lookup_agent_session_id(step_id, &role);
         let session = HeadlessSession::spawn(
             step_id,
-            SessionRole::Implementation,
+            role,
             &prompt_text,
             &session_dir,
-            None,
+            existing_id,
         )?;
 
         // Transition to running
@@ -399,14 +410,16 @@ impl Orchestrator {
                 &step.as_ref().and_then(|s| s.summary.as_deref()).unwrap_or("No summary"),
             );
 
+            let role = SessionRole::Stakeholder {
+                name: stakeholder.name.clone(),
+            };
+            let existing_id = self.lookup_agent_session_id(step_id, &role);
             let session = HeadlessSession::spawn(
                 step_id,
-                SessionRole::Stakeholder {
-                    name: stakeholder.name.clone(),
-                },
+                role,
                 &prompt_text,
                 &session_dir,
-                None,
+                existing_id,
             )?;
             self.sessions.push(session);
         }
@@ -444,12 +457,14 @@ impl Orchestrator {
         let prompt_text = prompt::leader_decision_prompt(&state, &step_feedback);
         let working_dir = self.project_dir.root().to_path_buf();
 
+        let role = SessionRole::LeaderDecision;
+        let existing_id = self.lookup_agent_session_id("leader", &role);
         let session = HeadlessSession::spawn(
             "leader",
-            SessionRole::LeaderDecision,
+            role,
             &prompt_text,
             &working_dir,
-            None, // TODO: resume with stored leader session ID
+            existing_id,
         )?;
 
         self.leader_busy = true;
@@ -466,7 +481,7 @@ impl Orchestrator {
         {
             // Look for Result event first
             for event in events.iter().rev() {
-                if let StreamEvent::Result { result } = event {
+                if let StreamEvent::Result { result, .. } = event {
                     return result.clone();
                 }
             }
@@ -478,6 +493,25 @@ impl Orchestrator {
             }
         }
         "No summary available".to_string()
+    }
+
+    /// Look up an existing agent session ID for resumption, given a session key.
+    fn lookup_agent_session_id(&self, step_id: &str, role: &SessionRole) -> Option<AgentSessionId> {
+        let key = format!(
+            "{}-{}",
+            step_id,
+            match role {
+                SessionRole::Implementation => "impl".to_string(),
+                SessionRole::Stakeholder { name } => name.clone(),
+                SessionRole::LeaderDecision => "leader".to_string(),
+            }
+        );
+        self.project_dir
+            .state()
+            .session_ids
+            .get(&key)
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .map(AgentSessionId)
     }
 
     fn fetch_step_commits(&self, step_id: &str, session_dir: &Path) {

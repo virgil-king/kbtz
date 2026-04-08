@@ -6,7 +6,7 @@ pub enum StreamEvent {
     Thinking(String),
     ToolUse { name: String, input: String },
     ToolResult { content: String },
-    Result { result: String },
+    Result { result: String, session_id: Option<String> },
     Other(String),
 }
 
@@ -47,7 +47,8 @@ pub fn parse_stream_line(line: &str) -> Result<StreamEvent, serde_json::Error> {
         }
         "result" => {
             let result = v["result"].as_str().unwrap_or("").to_string();
-            Ok(StreamEvent::Result { result })
+            let session_id = v["session_id"].as_str().map(|s| s.to_string());
+            Ok(StreamEvent::Result { result, session_id })
         }
         _ => Ok(StreamEvent::Other(line.to_string())),
     }

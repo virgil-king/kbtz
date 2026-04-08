@@ -1,5 +1,6 @@
 use crate::step::{Dispatch, Step, StepPhase};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,11 +23,14 @@ pub struct Project {
     pub goal_summary: String,
 }
 
+/// Maps SessionKey -> AgentSessionId UUID string for resumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub project: Project,
     pub steps: Vec<Step>,
     pub next_step_id: u32,
+    #[serde(default)]
+    pub session_ids: HashMap<String, String>,
 }
 
 pub struct ProjectDir {
@@ -45,6 +49,7 @@ impl ProjectDir {
             project: project.clone(),
             steps: vec![],
             next_step_id: 1,
+            session_ids: HashMap::new(),
         };
 
         let dir = Self {
