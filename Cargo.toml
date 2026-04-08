@@ -1,3 +1,3 @@
 [workspace]
-members = ["kbtz", "kbtz-workspace", "kbtz-tmux"]
+members = ["kbtz", "kbtz-workspace", "kbtz-tmux", "kbtz-orchestrator"]
 resolver = "2"
