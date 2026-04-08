@@ -1,4 +1,4 @@
-# kbtz-orchestrator Implementation Plan
+# kbtz-council Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -13,7 +13,7 @@
 ## File Structure
 
 ```
-kbtz-orchestrator/
+kbtz-council/
   Cargo.toml
   docs/
     design.md              # Existing design spec
@@ -52,11 +52,11 @@ kbtz-orchestrator/
 
 - [ ] **Step 0: Set up Cargo.toml dependencies**
 
-Replace `kbtz-orchestrator/Cargo.toml`:
+Replace `kbtz-council/Cargo.toml`:
 
 ```toml
 [package]
-name = "kbtz-orchestrator"
+name = "kbtz-council"
 version = "0.1.0"
 edition = "2021"
 
@@ -76,8 +76,8 @@ be added in later tasks as needed.
 Create `tests/project_test.rs`:
 
 ```rust
-use kbtz_orchestrator::project::{Project, Stakeholder, RepoConfig};
-use kbtz_orchestrator::step::{Step, StepPhase, Dispatch, Feedback, Decision};
+use kbtz_council::project::{Project, Stakeholder, RepoConfig};
+use kbtz_council::step::{Step, StepPhase, Dispatch, Feedback, Decision};
 
 #[test]
 fn project_state_round_trip() {
@@ -142,7 +142,7 @@ fn step_phases_serialize_as_lowercase() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: FAIL — modules don't exist yet.
 
 - [ ] **Step 3: Implement project types**
@@ -229,7 +229,7 @@ Replace `src/main.rs`:
 
 ```rust
 fn main() {
-    println!("kbtz-orchestrator");
+    println!("kbtz-council");
 }
 ```
 
@@ -242,13 +242,13 @@ pub mod step;
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: PASS — all 3 tests.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add kbtz-orchestrator/src/ kbtz-orchestrator/tests/ kbtz-orchestrator/Cargo.toml
+git add kbtz-council/src/ kbtz-council/tests/ kbtz-council/Cargo.toml
 git commit -m "feat(orchestrator): add project and step data types"
 ```
 
@@ -267,7 +267,7 @@ Add to `tests/project_test.rs`:
 ```rust
 use std::fs;
 use tempfile::TempDir;
-use kbtz_orchestrator::project::{Project, Stakeholder, RepoConfig, ProjectDir};
+use kbtz_council::project::{Project, Stakeholder, RepoConfig, ProjectDir};
 
 #[test]
 fn project_dir_init_creates_structure() {
@@ -330,7 +330,7 @@ fn state_tracks_steps() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: FAIL — `ProjectDir` doesn't exist.
 
 - [ ] **Step 3: Implement ProjectDir**
@@ -439,7 +439,7 @@ impl ProjectDir {
 
 - [ ] **Step 4: Add `use` for `Dispatch` in test file, run tests**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: PASS — all tests.
 
 - [ ] **Step 5: Commit**
@@ -464,7 +464,7 @@ Create `tests/git_test.rs`:
 ```rust
 use std::process::Command;
 use tempfile::TempDir;
-use kbtz_orchestrator::git;
+use kbtz_council::git;
 
 fn init_repo(dir: &std::path::Path) {
     Command::new("git").args(["init"]).current_dir(dir).output().unwrap();
@@ -543,7 +543,7 @@ fn setup_session_dir_creates_clones_for_specified_repos() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: FAIL — `git` module doesn't exist.
 
 - [ ] **Step 3: Implement git operations**
@@ -614,7 +614,7 @@ pub fn cleanup_session_dir(session_dir: &Path) -> io::Result<()> {
 
 - [ ] **Step 4: Add `pub mod git;` to lib.rs, run tests**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -639,7 +639,7 @@ Claude Code's `--output-format stream-json` emits newline-delimited JSON objects
 Create `tests/stream_test.rs`:
 
 ```rust
-use kbtz_orchestrator::stream::{StreamEvent, parse_stream_line};
+use kbtz_council::stream::{StreamEvent, parse_stream_line};
 
 #[test]
 fn parse_assistant_text_event() {
@@ -694,7 +694,7 @@ fn parse_unknown_type_returns_other() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement stream-json parser**
@@ -760,7 +760,7 @@ pub fn parse_stream_line(line: &str) -> Result<StreamEvent, serde_json::Error> {
 
 - [ ] **Step 4: Add `pub mod stream;` to lib.rs, run tests**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -889,7 +889,7 @@ impl HeadlessSession {
 
 - [ ] **Step 3: Verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles without errors.
 
 - [ ] **Step 4: Commit**
@@ -914,9 +914,9 @@ Pure state machine following the kbtz-tmux pattern: a `tick` function takes a wo
 Create `tests/lifecycle_test.rs`:
 
 ```rust
-use kbtz_orchestrator::lifecycle::{WorldSnapshot, StepSnapshot, SessionSnapshot, Action, tick};
-use kbtz_orchestrator::step::StepPhase;
-use kbtz_orchestrator::session::SessionRole;
+use kbtz_council::lifecycle::{WorldSnapshot, StepSnapshot, SessionSnapshot, Action, tick};
+use kbtz_council::step::StepPhase;
+use kbtz_council::session::SessionRole;
 
 fn empty_world() -> WorldSnapshot {
     WorldSnapshot { steps: vec![], sessions: vec![], leader_busy: false }
@@ -1035,7 +1035,7 @@ fn reviewed_step_waits_when_leader_busy() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement lifecycle state machine**
@@ -1159,7 +1159,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
 
 - [ ] **Step 4: Add `pub mod lifecycle;` to lib.rs, add `Clone` derive to `SessionRole` if missing, run tests**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo test -p kbtz-council`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1349,7 +1349,7 @@ pub fn run_mcp_server(tx: mpsc::Sender<LeaderRequest>, rx_response: mpsc::Receiv
                     result: serde_json::json!({
                         "protocolVersion": "2024-11-05",
                         "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "kbtz-orchestrator", "version": "0.1.0" }
+                        "serverInfo": { "name": "kbtz-council", "version": "0.1.0" }
                     }),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&response).unwrap())?;
@@ -1416,7 +1416,7 @@ pub fn run_mcp_server(tx: mpsc::Sender<LeaderRequest>, rx_response: mpsc::Receiv
 
 - [ ] **Step 2: Add `pub mod mcp;` to lib.rs, verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 3: Commit**
@@ -1559,7 +1559,7 @@ blocking concerns. Be specific — reference file paths and line numbers."#,
 
 - [ ] **Step 2: Add `pub mod prompt;` to lib.rs, verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 3: Commit**
@@ -1654,7 +1654,7 @@ pub fn render_dashboard(frame: &mut Frame, area: Rect, steps: &[Step], sessions:
         .split(area);
 
     // Header
-    let header = Paragraph::new("kbtz-orchestrator")
+    let header = Paragraph::new("kbtz-council")
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
@@ -1762,7 +1762,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 - [ ] **Step 4: Add `pub mod tui;` to lib.rs, update Cargo.toml with dependencies**
 
-Add to `kbtz-orchestrator/Cargo.toml`:
+Add to `kbtz-council/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -1778,7 +1778,7 @@ tempfile = "3"
 
 - [ ] **Step 5: Verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 6: Commit**
@@ -1802,7 +1802,7 @@ the leader.
 
 - [ ] **Step 1: Add kbtz-workspace dependency**
 
-Add to `kbtz-orchestrator/Cargo.toml`:
+Add to `kbtz-council/Cargo.toml`:
 
 ```toml
 portable-pty = "0.9"
@@ -1923,7 +1923,7 @@ Add `pub mod leader;` to `src/tui/mod.rs`.
 
 - [ ] **Step 4: Verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 5: Commit**
@@ -1958,13 +1958,13 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kbtz_orchestrator::project::ProjectDir;
-use kbtz_orchestrator::tui::{AppState, View};
-use kbtz_orchestrator::tui::dashboard::render_dashboard;
-use kbtz_orchestrator::tui::stream_view::render_stream_view;
+use kbtz_council::project::ProjectDir;
+use kbtz_council::tui::{AppState, View};
+use kbtz_council::tui::dashboard::render_dashboard;
+use kbtz_council::tui::stream_view::render_stream_view;
 
 #[derive(Parser)]
-#[command(name = "kbtz-orchestrator")]
+#[command(name = "kbtz-council")]
 #[command(about = "Leader-driven AI agent orchestrator")]
 struct Cli {
     /// Path to the project directory. Created if it doesn't exist.
@@ -2076,7 +2076,7 @@ fn run_loop(
 
 - [ ] **Step 2: Verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 3: Commit**
@@ -2141,11 +2141,11 @@ Send response back through MCP response channel.
 
 ```bash
 cd /home/virgil/kbtz/worktrees/orchestrator-design
-cargo build -p kbtz-orchestrator
+cargo build -p kbtz-council
 # Create a test project directory
 mkdir -p /tmp/test-project
 # Run the orchestrator
-./target/debug/kbtz-orchestrator --project /tmp/test-project
+./target/debug/kbtz-council --project /tmp/test-project
 ```
 
 Verify: TUI renders, 'q' quits cleanly, 'l' would open leader view.
@@ -2216,14 +2216,14 @@ if cli.mcp_mode {
     let (tx, rx) = std::sync::mpsc::channel();
     let (resp_tx, resp_rx) = std::sync::mpsc::channel();
     // Run MCP server on stdio
-    kbtz_orchestrator::mcp::run_mcp_server(tx, resp_rx)?;
+    kbtz_council::mcp::run_mcp_server(tx, resp_rx)?;
     return Ok(());
 }
 ```
 
 - [ ] **Step 3: Verify compilation**
 
-Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-orchestrator`
+Run: `cd /home/virgil/kbtz/worktrees/orchestrator-design && cargo check -p kbtz-council`
 Expected: compiles.
 
 - [ ] **Step 4: Commit**
