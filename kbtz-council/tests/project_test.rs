@@ -1,5 +1,6 @@
-use kbtz_council::project::{Project, RepoConfig, Stakeholder};
-use kbtz_council::step::{Step, StepPhase, Dispatch};
+use kbtz_council::project::{Project, ProjectDir, RepoConfig, Stakeholder};
+use kbtz_council::step::{Dispatch, Step, StepPhase};
+use tempfile::TempDir;
 
 #[test]
 fn project_state_round_trip() {
@@ -59,4 +60,61 @@ fn step_phases_serialize_as_lowercase() {
         let parsed: StepPhase = serde_json::from_str(&json).unwrap();
         assert_eq!(phase, parsed);
     }
+}
+
+#[test]
+fn project_dir_init_creates_structure() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into() }],
+        stakeholders: vec![
+            Stakeholder { name: "security".into(), persona: "Check auth".into() },
+        ],
+        goal_summary: "Test project".into(),
+    };
+
+    let dir = ProjectDir::init(tmp.path(), &project).unwrap();
+
+    assert!(dir.root().join("state.json").exists());
+    assert!(dir.root().join("repos").is_dir());
+    assert!(dir.root().join("steps").is_dir());
+    assert!(dir.root().join("sessions").is_dir());
+    assert!(dir.root().join("claude-sessions").is_dir());
+}
+
+#[test]
+fn project_dir_load_reads_state() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into() }],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let _dir = ProjectDir::init(tmp.path(), &project).unwrap();
+    let loaded = ProjectDir::load(tmp.path()).unwrap();
+    assert_eq!(loaded.state().project.goal_summary, "Test");
+}
+
+#[test]
+fn state_tracks_steps() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+    let step_id = dir.add_step(Dispatch {
+        prompt: "Do the thing".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+
+    assert_eq!(step_id, "step-001");
+    assert_eq!(dir.state().steps.len(), 1);
+
+    let loaded = ProjectDir::load(tmp.path()).unwrap();
+    assert_eq!(loaded.state().steps.len(), 1);
 }
