@@ -1,6 +1,7 @@
 pub mod git;
 pub mod lifecycle;
 pub mod mcp;
+pub mod orchestrator;
 pub mod project;
 pub mod prompt;
 pub mod session;
