@@ -889,6 +889,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbtz-council"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm 0.28.1",
+ "portable-pty",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vt100",
+]
+
+[[package]]
 name = "kbtz-tmux"
 version = "0.1.0"
 dependencies = [

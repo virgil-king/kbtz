@@ -8,6 +8,7 @@ use crate::step::{Dispatch, StepPhase};
 use crate::stream::StreamEvent;
 use crate::tui::AppState;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc;
@@ -17,6 +18,8 @@ pub struct Orchestrator {
     pub sessions: Vec<HeadlessSession>,
     pub app: AppState,
     pub leader_busy: bool,
+    /// Session IDs that have been detected as exited by poll_sessions.
+    exited_session_ids: HashSet<String>,
     mcp_rx: mpsc::Receiver<LeaderRequest>,
     mcp_resp_tx: mpsc::Sender<Value>,
 }
@@ -32,6 +35,7 @@ impl Orchestrator {
             sessions: vec![],
             app: AppState::new(),
             leader_busy: false,
+            exited_session_ids: HashSet::new(),
             mcp_rx,
             mcp_resp_tx,
         }
@@ -57,7 +61,7 @@ impl Orchestrator {
             .map(|s| SessionSnapshot {
                 step_id: s.step_id.clone(),
                 role: s.role.clone(),
-                exited: s.rx.try_recv().is_err(), // rough check
+                exited: self.exited_session_ids.contains(&s.id.0),
             })
             .collect();
 
@@ -86,6 +90,7 @@ impl Orchestrator {
 
             // Check if process exited
             if let Ok(Some(_code)) = session.try_wait() {
+                self.exited_session_ids.insert(session.id.0.clone());
                 exited_indices.push(i);
             }
         }
@@ -476,11 +481,18 @@ impl Orchestrator {
     }
 
     fn fetch_step_commits(&self, step_id: &str, session_dir: &Path) {
-        for repo in &self.project_dir.state().project.repos {
+        let repos = &self.project_dir.state().project.repos;
+        let multi_repo = repos.len() > 1;
+        for repo in repos {
             let clone_path = session_dir.join(&repo.name);
             let target_path = self.project_dir.root().join("repos").join(&repo.name);
             if clone_path.exists() && target_path.exists() {
-                let _ = git::fetch_branch(&target_path, &clone_path, step_id);
+                let branch_name = if multi_repo {
+                    format!("{}/{}", step_id, repo.name)
+                } else {
+                    step_id.to_string()
+                };
+                let _ = git::fetch_branch(&target_path, &clone_path, &branch_name);
             }
         }
     }
