@@ -121,7 +121,7 @@ impl Orchestrator {
                         .join(format!("{}-impl", step_id));
                     self.fetch_step_commits(&step_id, &session_dir);
 
-                    // Update step
+                    // Store summary; phase transition handled by lifecycle tick
                     if let Some(step) = self
                         .project_dir
                         .state_mut()
@@ -130,13 +130,12 @@ impl Orchestrator {
                         .find(|s| s.id == step_id)
                     {
                         step.summary = Some(summary);
-                        step.phase = StepPhase::Completed;
                     }
                     let _ = self.project_dir.persist();
                 }
                 SessionRole::Stakeholder { ref name } => {
+                    // Store feedback; phase transition handled by lifecycle tick
                     let feedback = self.extract_summary(&session.key.0);
-                    let expected = self.project_dir.state().project.stakeholders.len();
                     if let Some(step) = self
                         .project_dir
                         .state_mut()
@@ -148,10 +147,6 @@ impl Orchestrator {
                             stakeholder: name.clone(),
                             content: feedback,
                         });
-
-                        if step.feedback.len() >= expected {
-                            step.phase = StepPhase::Reviewed;
-                        }
                     }
                     let _ = self.project_dir.persist();
                 }
@@ -454,7 +449,10 @@ impl Orchestrator {
             })
             .collect();
 
-        let prompt_text = prompt::leader_decision_prompt(&state, &step_feedback);
+        let project_md_path = self.project_dir.root().join("project.md");
+        let project_md = std::fs::read_to_string(&project_md_path).ok();
+        let prompt_text =
+            prompt::leader_decision_prompt(&state, &step_feedback, project_md.as_deref());
         let working_dir = self.project_dir.root().to_path_buf();
 
         let role = SessionRole::LeaderDecision;

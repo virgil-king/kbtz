@@ -42,12 +42,30 @@ fn main() -> io::Result<()> {
     let (mcp_resp_tx, mcp_resp_rx) = mpsc::channel();
 
     if cli.mcp_mode {
-        // In MCP mode, run the stdio server directly.
-        // The orchestrator main loop handles requests on the other end of the channels.
-        // For now, this is a standalone MCP server — full wiring requires
-        // the orchestrator to run in a separate thread.
-        mcp::run_mcp_server(mcp_tx, mcp_resp_rx)?;
-        return Ok(());
+        // MCP mode: run the stdio server in a background thread while the
+        // orchestrator processes requests in the main thread (no TUI).
+        let project_dir = if cli.project.join("state.json").exists() {
+            ProjectDir::load(&cli.project)?
+        } else {
+            let project = Project {
+                repos: vec![],
+                stakeholders: vec![],
+                goal_summary: String::new(),
+            };
+            ProjectDir::init(&cli.project, &project)?
+        };
+
+        std::thread::spawn(move || {
+            let _ = mcp::run_mcp_server(mcp_tx, mcp_resp_rx);
+        });
+
+        let mut orch = Orchestrator::new(project_dir, mcp_rx, mcp_resp_tx);
+        loop {
+            orch.poll_sessions();
+            orch.handle_mcp_requests()?;
+            orch.process_tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     // Init or load project

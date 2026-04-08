@@ -235,3 +235,27 @@ fn multiple_reviewed_steps_batched_into_one_leader_invocation() {
         _ => unreachable!(),
     }
 }
+
+#[test]
+fn rework_step_with_exited_session_transitions_to_completed() {
+    let world = WorldSnapshot {
+        steps: vec![StepSnapshot {
+            id: "step-001".into(),
+            phase: StepPhase::Rework,
+            repos: vec![],
+        }],
+        sessions: vec![SessionSnapshot {
+            step_id: "step-001".into(),
+            role: SessionRole::Implementation,
+            exited: true,
+        }],
+        leader_busy: false,
+    };
+
+    let actions = tick(&world);
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::TransitionStep { step_id, to }
+            if step_id == "step-001" && *to == StepPhase::Completed
+    )));
+}

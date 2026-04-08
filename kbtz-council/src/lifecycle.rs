@@ -46,7 +46,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                     });
                 }
             }
-            StepPhase::Running => {
+            StepPhase::Running | StepPhase::Rework => {
                 let impl_exited = world.sessions.iter().any(|s| {
                     s.step_id == step.id
                         && matches!(s.role, SessionRole::Implementation)
@@ -87,7 +87,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                     });
                 }
             }
-            StepPhase::Reviewed | StepPhase::Merged | StepPhase::Rework => {}
+            StepPhase::Reviewed | StepPhase::Merged => {}
         }
     }
 

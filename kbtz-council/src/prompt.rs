@@ -31,11 +31,19 @@ repos under repos/. Resolve any conflicts."#
 }
 
 /// Build the headless leader prompt with full state snapshot and feedback.
+/// `project_md` is the contents of project.md if it exists.
 pub fn leader_decision_prompt(
     state: &OrchestratorState,
     step_feedback: &[(String, Vec<(String, String)>)],
+    project_md: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
+
+    if let Some(md) = project_md {
+        prompt.push_str("# Project Definition\n\n");
+        prompt.push_str(md);
+        prompt.push_str("\n\n---\n\n");
+    }
 
     prompt.push_str("# Current Project State\n\n");
     prompt.push_str(&format!("**Goal:** {}\n\n", state.project.goal_summary));
