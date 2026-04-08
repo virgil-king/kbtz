@@ -11,7 +11,7 @@ use ratatui::{
 };
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kbtz_council::mcp;
@@ -28,45 +28,10 @@ struct Cli {
     /// Path to the project directory. Created if it doesn't exist.
     #[arg(short, long)]
     project: PathBuf,
-
-    /// Run as MCP stdio server (used by Claude Code, not for direct invocation)
-    #[arg(long)]
-    mcp_mode: bool,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-
-    // Set up MCP channels
-    let (mcp_tx, mcp_rx) = mpsc::channel();
-    let (mcp_resp_tx, mcp_resp_rx) = mpsc::channel();
-
-    if cli.mcp_mode {
-        // MCP mode: run the stdio server in a background thread while the
-        // orchestrator processes requests in the main thread (no TUI).
-        let project_dir = if cli.project.join("state.json").exists() {
-            ProjectDir::load(&cli.project)?
-        } else {
-            let project = Project {
-                repos: vec![],
-                stakeholders: vec![],
-                goal_summary: String::new(),
-            };
-            ProjectDir::init(&cli.project, &project)?
-        };
-
-        std::thread::spawn(move || {
-            let _ = mcp::run_mcp_server(mcp_tx, mcp_resp_rx);
-        });
-
-        let mut orch = Orchestrator::new(project_dir, mcp_rx, mcp_resp_tx);
-        loop {
-            orch.poll_sessions();
-            orch.handle_mcp_requests()?;
-            orch.process_tick()?;
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
 
     // Init or load project
     let project_dir = if cli.project.join("state.json").exists() {
@@ -80,13 +45,18 @@ fn main() -> io::Result<()> {
         ProjectDir::init(&cli.project, &project)?
     };
 
-    // Start MCP server in background thread for leader tool calls
-    let mcp_tx_clone = mcp_tx.clone();
-    std::thread::spawn(move || {
-        let _ = mcp::run_mcp_server(mcp_tx_clone, mcp_resp_rx);
-    });
+    let project_dir = Arc::new(Mutex::new(project_dir));
 
-    let mut orchestrator = Orchestrator::new(project_dir, mcp_rx, mcp_resp_tx);
+    // Start embedded MCP HTTP server
+    let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
+    let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
+    eprintln!(
+        "MCP server listening on http://127.0.0.1:{} (config: {})",
+        mcp_port,
+        mcp_config_path.display()
+    );
+
+    let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir));
 
     // Init terminal
     enable_raw_mode()?;
@@ -95,7 +65,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut orchestrator);
+    let result = run_loop(&mut terminal, &mut orchestrator, &project_dir);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -107,15 +77,13 @@ fn main() -> io::Result<()> {
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     orch: &mut Orchestrator,
+    project_dir: &Arc<Mutex<ProjectDir>>,
 ) -> io::Result<()> {
     loop {
         // Poll sessions for events and exits
         orch.poll_sessions();
 
-        // Handle any MCP requests from the leader
-        orch.handle_mcp_requests()?;
-
-        // Run lifecycle state machine
+        // Run lifecycle state machine (picks up new steps from MCP tool calls)
         orch.process_tick()?;
 
         // Render TUI
@@ -129,7 +97,10 @@ fn run_loop(
                         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                         .split(area);
 
-                    let steps = &orch.project_dir.state().steps;
+                    let dir = project_dir.lock().unwrap();
+                    let steps = dir.state().steps.clone();
+                    drop(dir);
+
                     let sessions: Vec<String> = orch
                         .app
                         .session_events
@@ -140,7 +111,7 @@ fn run_loop(
                     render_dashboard(
                         frame,
                         chunks[0],
-                        steps,
+                        &steps,
                         &sessions,
                         &orch.app.selected_session,
                     );
