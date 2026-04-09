@@ -62,11 +62,12 @@ pub fn render_stream_view(
     let total_lines = lines.len() as u16;
     let visible_height = area.height.saturating_sub(2); // minus border
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = scroll_offset.min(max_scroll);
+    // scroll_offset 0 = pinned to bottom, higher = scrolled up from bottom
+    let scroll_from_top = max_scroll.saturating_sub(scroll_offset);
 
     let status = if is_running { " ⏳ " } else { "" };
-    let scroll_info = if scroll > 0 {
-        format!(" [{}/{}] ", total_lines.saturating_sub(scroll), total_lines)
+    let scroll_info = if scroll_offset > 0 {
+        format!(" [+{}] ", scroll_offset)
     } else {
         String::new()
     };
@@ -75,7 +76,7 @@ pub fn render_stream_view(
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(title).borders(Borders::ALL))
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((scroll_from_top, 0));
     frame.render_widget(paragraph, area);
 }
 
