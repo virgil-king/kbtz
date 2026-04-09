@@ -18,7 +18,7 @@ use kbtz_council::mcp;
 use kbtz_council::orchestrator::Orchestrator;
 use kbtz_council::project::{Project, ProjectDir};
 use kbtz_council::session::SessionKey;
-use kbtz_council::tui::dashboard::render_dashboard;
+use kbtz_council::tui::dashboard::{render_dashboard, SessionInfo, SessionStatus};
 use kbtz_council::tui::input::TextInput;
 use kbtz_council::tui::stream_view::render_stream_view;
 use kbtz_council::tui::InputMode;
@@ -97,13 +97,13 @@ fn run_loop(
             let steps = dir.state().steps.clone();
             drop(dir);
 
-            let session_keys = collect_session_keys(orch);
+            let session_infos = collect_session_infos(orch);
 
             render_dashboard(
                 frame,
                 h_chunks[0],
                 &steps,
-                &session_keys,
+                &session_infos,
                 &orch.app.selected_session,
             );
 
@@ -135,7 +135,10 @@ fn run_loop(
                             orch.app.input_mode = InputMode::Editing;
                         }
                         KeyCode::Tab => {
-                            let keys = collect_session_keys(orch);
+                            let keys: Vec<String> = collect_session_infos(orch)
+                            .iter()
+                            .map(|i| i.name.clone())
+                            .collect();
                             if !keys.is_empty() {
                                 let idx = orch
                                     .app
@@ -182,12 +185,34 @@ fn run_loop(
     }
 }
 
-fn collect_session_keys(orch: &Orchestrator) -> Vec<String> {
-    let mut keys: Vec<String> = orch.sessions.keys().map(|k| k.to_string()).collect();
-    if !keys.contains(&"leader".to_string()) {
-        keys.insert(0, "leader".to_string());
+fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
+    let mut infos: Vec<SessionInfo> = orch
+        .sessions
+        .values()
+        .map(|ms| SessionInfo {
+            name: ms.key.to_string(),
+            status: if ms.is_running() {
+                SessionStatus::Running
+            } else if !ms.queue.is_empty() {
+                SessionStatus::Queued
+            } else {
+                SessionStatus::Idle
+            },
+            queue_depth: ms.queue.len(),
+        })
+        .collect();
+    // Always show leader
+    if !infos.iter().any(|i| i.name == "leader") {
+        infos.insert(
+            0,
+            SessionInfo {
+                name: "leader".to_string(),
+                status: SessionStatus::Idle,
+                queue_depth: 0,
+            },
+        );
     }
-    keys
+    infos
 }
 
 fn parse_session_key(s: &str) -> SessionKey {

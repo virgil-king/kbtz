@@ -5,11 +5,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
+/// Session info for dashboard display.
+pub struct SessionInfo {
+    pub name: String,
+    pub status: SessionStatus,
+    pub queue_depth: usize,
+}
+
+pub enum SessionStatus {
+    Idle,
+    Running,
+    Queued,
+}
+
 pub fn render_dashboard(
     frame: &mut Frame,
     area: Rect,
     steps: &[Step],
-    sessions: &[String],
+    sessions: &[SessionInfo],
     selected_session: &Option<String>,
 ) {
     let chunks = Layout::default()
@@ -17,7 +30,7 @@ pub fn render_dashboard(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(5),
+            Constraint::Length(8),
         ])
         .split(area);
 
@@ -64,14 +77,30 @@ pub fn render_dashboard(
     let session_items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
-            let style = if Some(s) == selected_session.as_ref() {
+            let selected = Some(&s.name) == selected_session.as_ref();
+            let (indicator, indicator_color) = match s.status {
+                SessionStatus::Running => (">>", Color::Green),
+                SessionStatus::Queued => ("..", Color::Yellow),
+                SessionStatus::Idle => ("  ", Color::DarkGray),
+            };
+            let queue_info = if s.queue_depth > 0 {
+                format!(" [+{}]", s.queue_depth)
+            } else {
+                String::new()
+            };
+            let name_style = if selected {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            ListItem::new(Span::styled(s.clone(), style))
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", indicator), Style::default().fg(indicator_color)),
+                Span::styled(s.name.clone(), name_style),
+                Span::styled(queue_info, Style::default().fg(Color::DarkGray)),
+            ]);
+            ListItem::new(line)
         })
         .collect();
 
