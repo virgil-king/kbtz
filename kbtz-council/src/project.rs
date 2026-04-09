@@ -1,3 +1,4 @@
+use crate::session::{AgentSessionId, SessionKey};
 use crate::step::{Dispatch, Step, StepPhase};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,14 +24,13 @@ pub struct Project {
     pub goal_summary: String,
 }
 
-/// Maps SessionKey -> AgentSessionId UUID string for resumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub project: Project,
     pub steps: Vec<Step>,
     pub next_step_id: u32,
     #[serde(default)]
-    pub session_ids: HashMap<String, String>,
+    pub session_ids: HashMap<SessionKey, AgentSessionId>,
 }
 
 pub struct ProjectDir {

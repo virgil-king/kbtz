@@ -2,7 +2,7 @@ use crate::git;
 use crate::lifecycle::{self, Action, SessionSnapshot, StepSnapshot, WorldSnapshot};
 use crate::project::ProjectDir;
 use crate::prompt;
-use crate::session::{AgentSessionId, HeadlessSession, SessionMessage, SessionRole};
+use crate::session::{AgentSessionId, HeadlessSession, SessionKey, SessionMessage, SessionRole};
 use crate::step::StepPhase;
 use crate::stream::StreamEvent;
 use crate::tui::AppState;
@@ -11,14 +11,13 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 pub struct Orchestrator {
     pub project_dir: Arc<Mutex<ProjectDir>>,
     pub sessions: Vec<HeadlessSession>,
     pub app: AppState,
     pub leader_busy: bool,
-    exited_session_ids: HashSet<String>,
+    exited_session_ids: HashSet<SessionKey>,
     trace_dir: PathBuf,
     trace_files: HashMap<String, std::fs::File>,
 }
@@ -72,7 +71,7 @@ impl Orchestrator {
             .map(|s| SessionSnapshot {
                 step_id: s.step_id.clone(),
                 role: s.role.clone(),
-                exited: self.exited_session_ids.contains(&s.key.0),
+                exited: self.exited_session_ids.contains(&s.key),
             })
             .collect();
 
@@ -91,17 +90,17 @@ impl Orchestrator {
             while let Ok(msg) = session.rx.try_recv() {
                 match msg {
                     SessionMessage::Event(event) => {
-                        self.app.push_event(&session.key.0, event);
+                        self.app.push_event(&session.key.to_string(), event);
                     }
                     SessionMessage::RawLine(line) => {
-                        trace_lines.push((session.key.0.clone(), line));
+                        trace_lines.push((session.key.to_string(), line));
                     }
                     SessionMessage::Exited { .. } => {}
                 }
             }
 
             if let Ok(Some(_code)) = session.try_wait() {
-                self.exited_session_ids.insert(session.key.0.clone());
+                self.exited_session_ids.insert(session.key.clone());
                 exited_indices.push(i);
             }
         }
@@ -114,14 +113,14 @@ impl Orchestrator {
             let session = &self.sessions[i];
             let step_id = session.step_id.clone();
             let role = session.role.clone();
-            let key_str = session.key.0.clone();
+            let key_str = session.key.to_string();
 
             // Persist agent session UUID for future --resume
             {
                 let mut dir = self.project_dir.lock().unwrap();
                 dir.state_mut()
                     .session_ids
-                    .insert(key_str.clone(), session.agent_session_id.0.to_string());
+                    .insert(session.key.clone(), session.agent_session_id.clone());
                 let _ = dir.persist();
             }
 
@@ -145,7 +144,7 @@ impl Orchestrator {
                     let _ = dir.persist();
                 }
                 SessionRole::Stakeholder { ref name } => {
-                    let feedback = self.extract_summary(&session.key.0);
+                    let feedback = self.extract_summary(&session.key.to_string());
                     let mut dir = self.project_dir.lock().unwrap();
                     if let Some(step) =
                         dir.state_mut().steps.iter_mut().find(|s| s.id == step_id)
@@ -377,20 +376,12 @@ impl Orchestrator {
         step_id: &str,
         role: &SessionRole,
     ) -> Option<AgentSessionId> {
-        let key = format!(
-            "{}-{}",
-            step_id,
-            match role {
-                SessionRole::Implementation => "impl".to_string(),
-                SessionRole::Stakeholder { name } => name.clone(),
-                SessionRole::LeaderDecision => "leader".to_string(),
-            }
-        );
-        dir.state()
-            .session_ids
-            .get(&key)
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .map(AgentSessionId)
+        let key = match role {
+            SessionRole::Implementation => SessionKey::Implementation { step_id: step_id.to_string() },
+            SessionRole::Stakeholder { name } => SessionKey::Stakeholder { name: name.clone() },
+            SessionRole::LeaderDecision => SessionKey::Leader,
+        };
+        dir.state().session_ids.get(&key).cloned()
     }
 
     fn fetch_step_commits(&self, step_id: &str, session_dir: &Path) {

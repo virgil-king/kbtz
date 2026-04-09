@@ -7,9 +7,23 @@ use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
 
-/// Orchestrator-internal session key (e.g. "step-001-impl", "leader-leader").
+/// Orchestrator-internal session identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionKey(pub String);
+pub enum SessionKey {
+    Implementation { step_id: String },
+    Stakeholder { name: String },
+    Leader,
+}
+
+impl std::fmt::Display for SessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Implementation { step_id } => write!(f, "{}-impl", step_id),
+            Self::Stakeholder { name } => write!(f, "stakeholder-{}", name),
+            Self::Leader => write!(f, "leader"),
+        }
+    }
+}
 
 /// Agent backend session UUID, used for resumption (--session-id / --resume).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,15 +64,11 @@ impl HeadlessSession {
         working_dir: &Path,
         agent_session_id: Option<AgentSessionId>,
     ) -> io::Result<Self> {
-        let key = SessionKey(format!(
-            "{}-{}",
-            step_id,
-            match &role {
-                SessionRole::Implementation => "impl".to_string(),
-                SessionRole::Stakeholder { name } => name.clone(),
-                SessionRole::LeaderDecision => "leader".to_string(),
-            }
-        ));
+        let key = match &role {
+            SessionRole::Implementation => SessionKey::Implementation { step_id: step_id.to_string() },
+            SessionRole::Stakeholder { name } => SessionKey::Stakeholder { name: name.clone() },
+            SessionRole::LeaderDecision => SessionKey::Leader,
+        };
 
         let (agent_session_id, resume) = match agent_session_id {
             Some(id) => (id, true),
