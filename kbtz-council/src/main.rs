@@ -73,7 +73,7 @@ fn main() -> io::Result<()> {
             .collect()
     };
 
-    let mut orchestrator = Orchestrator::new(cli.max_sessions);
+    let mut orchestrator = Orchestrator::new(cli.max_sessions, global.pool_dir());
 
     // Load each project: open its dir, start its MCP server, register it
     for name in &project_names {

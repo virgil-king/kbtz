@@ -99,11 +99,10 @@ impl ProjectState {
         let _ = writeln!(file, "{}", line);
     }
 
-    fn fetch_job_commits(&self, job_id: &str, session_dir: &Path) {
+    fn fetch_job_commits(&self, job_id: &str, session_dir: &Path, pool_dir: &Path) {
         let dir = self.project_dir.lock().unwrap();
         let repos = &dir.state().project.repos;
         let multi_repo = repos.len() > 1;
-        let pool_dir = dir.root().join("pool");
         for repo in repos {
             let clone_path = session_dir.join(&repo.name);
             if !clone_path.exists() {
@@ -132,14 +131,16 @@ pub struct Orchestrator {
     pub projects: HashMap<String, ProjectState>,
     pub app: AppState,
     pub max_running_sessions: usize,
+    pub pool_dir: PathBuf,
 }
 
 impl Orchestrator {
-    pub fn new(max_running_sessions: usize) -> Self {
+    pub fn new(max_running_sessions: usize, pool_dir: PathBuf) -> Self {
         Self {
             projects: HashMap::new(),
             app: AppState::new(),
             max_running_sessions,
+            pool_dir,
         }
     }
 
@@ -237,6 +238,7 @@ impl Orchestrator {
     }
 
     fn poll_project_sessions(&mut self, project_name: &str) {
+        let pool_dir = self.pool_dir.clone();
         let ps = match self.projects.get_mut(project_name) {
             Some(ps) => ps,
             None => return,
@@ -297,7 +299,7 @@ impl Orchestrator {
                                 .join("sessions")
                                 .join(format!("{}-impl", job_id))
                         };
-                        ps.fetch_job_commits(job_id, &session_dir);
+                        ps.fetch_job_commits(job_id, &session_dir, &pool_dir);
 
                         let mut dir = ps.project_dir.lock().unwrap();
                         dir.create_artifact(job_id, summary);
@@ -436,10 +438,7 @@ impl Orchestrator {
             (session_dir, prompt_text, repo_refs)
         };
 
-        let pool_dir = {
-            let dir = ps.project_dir.lock().unwrap();
-            dir.root().join("pool")
-        };
+        let pool_dir = self.pool_dir.clone();
         std::fs::create_dir_all(&pool_dir)?;
 
         let project_repos = {
