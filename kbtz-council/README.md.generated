@@ -1,0 +1,177 @@
+# kbtz-council
+
+A leader-driven AI agent orchestrator with structured feedback loops. Runs a persistent TUI that coordinates a leader agent, parallel implementation agents, and stakeholder reviewers through a state-machine lifecycle.
+
+## Overview
+
+kbtz-council implements a 4-actor model for orchestrating multi-agent software engineering work:
+
+- **Orchestrator** — A persistent Rust binary with a TUI dashboard (ratatui + crossterm). Runs the lifecycle loop, manages sessions, and renders real-time agent output.
+- **Leader** — A headless Claude session that defines the project, plans work, dispatches jobs, and makes merge/rework decisions. Communicates with the orchestrator via MCP tools.
+- **Implementation agents** — Claude sessions that execute dispatched jobs in isolated git clones. Each job gets its own working directory with fresh repo clones.
+- **Stakeholders** — Parallel reviewer sessions that evaluate completed work against configurable personas. Their feedback is collected and presented to the leader for decision-making.
+
+The leader drives the workflow: it defines repos and stakeholders, dispatches implementation jobs, and after stakeholder review, decides whether to merge, rework, or abandon each job.
+
+## Architecture
+
+### Lifecycle state machine
+
+Jobs progress through phases managed by a pure tick-based state machine (`lifecycle.rs`):
+
+```
+Dispatched → Running → Completed → Reviewing → Reviewed → Merged
+                                                    ↓
+                                                 Rework → Running → ...
+```
+
+Each tick inspects the world state (jobs + sessions) and emits actions:
+
+| Phase | Trigger | Action |
+|-------|---------|--------|
+| Dispatched | No implementation session exists | Spawn implementation agent |
+| Running | Implementation agent exits | Transition to Completed |
+| Rework | No implementation session exists | Spawn implementation agent (with feedback) |
+| Rework | Implementation agent exits | Transition to Completed |
+| Completed | No stakeholder sessions exist | Spawn stakeholder sessions |
+| Reviewing | All stakeholder sessions exit | Transition to Reviewed |
+| Reviewed | Leader is not busy | Invoke leader with collected feedback |
+
+The leader then calls `close_job` (merge) or `rework_job` (send back with feedback).
+
+### MCP communication
+
+The orchestrator starts an HTTP MCP server on a random localhost port. It writes an `.mcp.json` config file into the project directory, which is passed to the leader session via `--mcp-config`. The leader calls tools through standard JSON-RPC over HTTP.
+
+### Session management
+
+Sessions are spawned as `claude -p` processes with `--output-format stream-json`. Each session type gets a stable UUID (`AgentSessionId`) for resumption across invocations via `--session-id` / `--resume`. Session output is parsed in real-time and displayed in the TUI stream viewer.
+
+### Git clone pool
+
+A pool directory caches shallow clones of registered repos. Per-job session directories are cloned locally from the pool (fast, no network). After implementation completes, the orchestrator fetches job branches into the leader's repo copies for review.
+
+## Usage
+
+```bash
+kbtz-council --project path/to/project
+```
+
+Creates the project directory if it doesn't exist. Loads existing state from `state.json` if present.
+
+| Flag | Description |
+|------|-------------|
+| `-p, --project <path>` | Path to the project directory (required) |
+
+On startup the orchestrator:
+
+1. Loads or initializes the project directory
+2. Starts the MCP server and writes `.mcp.json`
+3. Enters the TUI event loop
+
+### TUI keybindings
+
+**Normal mode:**
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `Enter` | Switch to editing mode |
+| `Up` / `Down` | Select previous / next session |
+| `Tab` | Select next session (wraps) |
+| `PageUp` / `PageDown` | Scroll stream view |
+| `Home` / `End` | Scroll to top / bottom |
+
+**Editing mode:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message to selected session |
+| `Ctrl+J` | Insert newline |
+| `Esc` | Cancel and return to normal mode |
+| `Backspace` | Delete character |
+
+## MCP Tools
+
+These tools are exposed to the leader session:
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `define_project` | `repos`, `stakeholders`, `goal_summary` | Register repos, stakeholders, and project goal |
+| `dispatch_job` | `prompt`, `repos`, `files` (optional) | Dispatch an implementation job; returns assigned job ID |
+| `rework_job` | `job_id`, `feedback` | Send a job back to the implementation agent with feedback |
+| `close_job` | `job_id` | Close a job (merged or abandoned); cleans up session directory |
+
+### Parameter details
+
+**`define_project`:**
+- `repos` — Array of `{name, url}` objects
+- `stakeholders` — Array of `{name, persona}` objects
+- `goal_summary` — String describing the project goal
+
+**`dispatch_job`:**
+- `prompt` — The implementation task description
+- `repos` — Array of `{name, branch?}` objects specifying which repos (and optionally which branches) the job needs
+- `files` — Optional array of file paths to include as context
+
+## Project structure
+
+```
+kbtz-council/
+├── Cargo.toml
+├── prompts/
+│   ├── leader-system.md      # Leader system prompt
+│   ├── implementation.md     # Implementation agent prompt template
+│   └── stakeholder.md        # Stakeholder review prompt template
+├── docs/
+│   ├── design.md
+│   ├── plan.md
+│   └── test-plan.md
+├── src/
+│   ├── main.rs               # CLI entry point, TUI event loop
+│   ├── lib.rs                 # Module declarations
+│   ├── orchestrator.rs        # Session coordination, tick processing
+│   ├── lifecycle.rs           # Pure state machine (tick → actions)
+│   ├── session.rs             # Session spawning, queue, process management
+│   ├── mcp.rs                 # MCP HTTP server, tool handlers
+│   ├── project.rs             # Project state persistence (state.json)
+│   ├── job.rs                 # Job, Dispatch, Feedback, Decision types
+│   ├── stream.rs              # stream-json event parser
+│   ├── prompt.rs              # Prompt loading and assembly
+│   ├── git.rs                 # Clone pool, session dir setup, branch fetching
+│   └── tui/
+│       ├── mod.rs             # AppState, InputMode
+│       ├── dashboard.rs       # Left panel: session list with status
+│       ├── stream_view.rs     # Right panel: agent output stream
+│       └── input.rs           # Multi-line text input widget
+└── tests/
+    ├── lifecycle_test.rs
+    ├── project_test.rs
+    ├── git_test.rs
+    └── stream_test.rs
+```
+
+## Configuration
+
+### Project directory layout
+
+When a project is initialized, the orchestrator creates:
+
+```
+<project>/
+├── state.json          # Persisted orchestrator state (jobs, phases, session IDs)
+├── .mcp.json           # MCP server config (auto-generated on startup)
+├── pool/               # Shallow git clone cache
+├── repos/              # Leader's repo copies (for branch review)
+├── sessions/           # Per-job working directories
+├── steps/              # Per-job dispatch metadata
+└── traces/             # Raw stream-json output logs per session
+```
+
+### Prompts
+
+Default prompts are compiled into the binary from `prompts/`. To override them for a project, place files with the same names in a `prompts/` directory inside the project directory:
+
+- `leader-system.md` — System prompt for the leader session
+- `implementation.md` — Template for implementation agents (uses `{prompt}` placeholder)
+- `stakeholder.md` — Template for stakeholder reviewers (uses `{persona}`, `{job_prompt}`, `{summary}` placeholders)

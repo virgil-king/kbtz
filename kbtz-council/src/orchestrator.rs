@@ -305,11 +305,14 @@ impl Orchestrator {
             }
         }
 
-        let ref_tuples: Vec<(&str, &Path, Option<&str>)> = session_repos
-            .iter()
-            .map(|(n, p, b)| (n.as_str(), p.as_path(), b.as_deref()))
-            .collect();
-        git::setup_session_dir(&session_dir, &ref_tuples)?;
+        // Skip clone setup if session dir already exists (rework case)
+        if !session_dir.exists() {
+            let ref_tuples: Vec<(&str, &Path, Option<&str>)> = session_repos
+                .iter()
+                .map(|(n, p, b)| (n.as_str(), p.as_path(), b.as_deref()))
+                .collect();
+            git::setup_session_dir(&session_dir, &ref_tuples)?;
+        }
 
         let key = SessionKey::Implementation {
             job_id: job_id.to_string(),
