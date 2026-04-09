@@ -156,6 +156,8 @@ impl ActiveSession {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
+            .arg("--permission-mode")
+            .arg("auto")
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
