@@ -50,13 +50,9 @@ fn main() -> io::Result<()> {
     // Start embedded MCP HTTP server
     let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
     let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
-    eprintln!(
-        "MCP server listening on http://127.0.0.1:{} (config: {})",
-        mcp_port,
-        mcp_config_path.display()
-    );
+    std::fs::write(cli.project.join("mcp-port"), mcp_port.to_string())?;
 
-    let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir));
+    let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
 
     // Init terminal
     enable_raw_mode()?;

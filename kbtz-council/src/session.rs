@@ -63,6 +63,7 @@ impl HeadlessSession {
         prompt: &str,
         working_dir: &Path,
         agent_session_id: Option<AgentSessionId>,
+        mcp_config: Option<&Path>,
     ) -> io::Result<Self> {
         let key = match &role {
             SessionRole::Implementation => SessionKey::Implementation { step_id: step_id.to_string() },
@@ -88,6 +89,10 @@ impl HeadlessSession {
             cmd.arg("--resume").arg(agent_session_id.0.to_string());
         } else {
             cmd.arg("--session-id").arg(agent_session_id.0.to_string());
+        }
+
+        if let Some(config) = mcp_config {
+            cmd.arg("--mcp-config").arg(config);
         }
 
         let mut child = cmd.spawn()?;

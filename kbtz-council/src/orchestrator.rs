@@ -20,10 +20,11 @@ pub struct Orchestrator {
     exited_session_ids: HashSet<SessionKey>,
     trace_dir: PathBuf,
     trace_files: HashMap<String, std::fs::File>,
+    mcp_config_path: PathBuf,
 }
 
 impl Orchestrator {
-    pub fn new(project_dir: Arc<Mutex<ProjectDir>>) -> Self {
+    pub fn new(project_dir: Arc<Mutex<ProjectDir>>, mcp_config_path: PathBuf) -> Self {
         let trace_dir = {
             let dir = project_dir.lock().unwrap();
             let td = dir.root().join("traces");
@@ -38,6 +39,7 @@ impl Orchestrator {
             exited_session_ids: HashSet::new(),
             trace_dir,
             trace_files: HashMap::new(),
+            mcp_config_path,
         }
     }
 
@@ -237,6 +239,7 @@ impl Orchestrator {
             &prompt_text,
             &session_dir,
             existing_id,
+            None,
         )?;
 
         {
@@ -291,6 +294,7 @@ impl Orchestrator {
                 &prompt_text,
                 &session_dir,
                 existing_id,
+                None,
             )?;
             self.sessions.push(session);
         }
@@ -342,6 +346,7 @@ impl Orchestrator {
             &prompt_text,
             &working_dir,
             existing_id,
+            Some(&self.mcp_config_path),
         )?;
 
         self.leader_busy = true;
