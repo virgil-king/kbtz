@@ -73,13 +73,11 @@ fn main() -> io::Result<()> {
             .collect()
     };
 
-    let global = Arc::new(Mutex::new(global));
-    let mut orchestrator = Orchestrator::new(Arc::clone(&global), cli.max_sessions);
+    let mut orchestrator = Orchestrator::new(cli.max_sessions);
 
     // Load each project: open its dir, start its MCP server, register it
     for name in &project_names {
-        let g = global.lock().unwrap();
-        let project_dir = g.load_project(name)?;
+        let project_dir = global.load_project(name)?;
         let project_path = project_dir.root().to_path_buf();
         let project_dir = Arc::new(Mutex::new(project_dir));
 
@@ -121,7 +119,7 @@ fn run_loop(
     loop {
         orch.poll_sessions();
         orch.process_tick()?;
-        orch.reap_and_dispatch();
+        orch.reap_and_dispatch()?;
 
         let editing = orch.app.input_mode == InputMode::Editing;
 
@@ -325,15 +323,16 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
 }
 
 /// Parse a qualified session name "project/session_key" into (project_name, SessionKey).
+///
+/// Panics if the name does not contain a "/" separator — all session names
+/// must be qualified with their project.
 fn parse_qualified_session(s: &str) -> (&str, SessionKey) {
-    if let Some(pos) = s.find('/') {
-        let project = &s[..pos];
-        let session = &s[pos + 1..];
-        (project, parse_session_key(session))
-    } else {
-        // Fallback: treat as session key with empty project
-        ("", parse_session_key(s))
-    }
+    let pos = s.find('/').unwrap_or_else(|| {
+        panic!("session name must be qualified as 'project/key', got '{}'", s)
+    });
+    let project = &s[..pos];
+    let session = &s[pos + 1..];
+    (project, parse_session_key(session))
 }
 
 fn parse_session_key(s: &str) -> SessionKey {

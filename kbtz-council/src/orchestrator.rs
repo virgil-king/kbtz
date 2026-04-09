@@ -1,13 +1,10 @@
 use crate::git;
-use crate::global::GlobalState;
 use crate::lifecycle::{self, Action, SessionSnapshot, JobSnapshot, WorldSnapshot};
 use crate::project::ProjectDir;
 use crate::prompt;
 use crate::session::{ManagedSession, QueueItem, SessionKey, SessionMessage};
 use crate::job::JobPhase;
 use crate::stream::StreamEvent;
-#[allow(unused_imports)]
-use crate::session::AgentSessionId;
 use crate::tui::AppState;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -134,16 +131,14 @@ impl ProjectState {
 pub struct Orchestrator {
     pub projects: HashMap<String, ProjectState>,
     pub app: AppState,
-    pub global: Arc<Mutex<GlobalState>>,
     pub max_running_sessions: usize,
 }
 
 impl Orchestrator {
-    pub fn new(global: Arc<Mutex<GlobalState>>, max_running_sessions: usize) -> Self {
+    pub fn new(max_running_sessions: usize) -> Self {
         Self {
             projects: HashMap::new(),
             app: AppState::new(),
-            global,
             max_running_sessions,
         }
     }
@@ -160,11 +155,11 @@ impl Orchestrator {
     }
 
     /// Enqueue a user message for a session in the given project.
+    ///
+    /// Panics if `project_name` does not match a registered project.
     pub fn send_message(&mut self, project_name: &str, key: &SessionKey, message: String) {
-        let ps = match self.projects.get_mut(project_name) {
-            Some(ps) => ps,
-            None => return,
-        };
+        let ps = self.projects.get_mut(project_name)
+            .unwrap_or_else(|| panic!("send_message: unknown project '{}'", project_name));
 
         // Show user message in the stream view
         let event_key = format!("{}/{}", project_name, key);
@@ -331,7 +326,7 @@ impl Orchestrator {
 
     /// Reap exited sessions and dispatch queued items across all projects,
     /// respecting the global concurrency limit.
-    pub fn reap_and_dispatch(&mut self) {
+    pub fn reap_and_dispatch(&mut self) -> io::Result<()> {
         for ps in self.projects.values_mut() {
             for ms in ps.sessions.values_mut() {
                 if ms.has_exited() {
@@ -342,18 +337,27 @@ impl Orchestrator {
 
         let budget = self.max_running_sessions.saturating_sub(self.total_running());
         let mut dispatched = 0usize;
-        for ps in self.projects.values_mut() {
+
+        // Sort project names for deterministic, fair dispatch order
+        let mut names: Vec<&String> = self.projects.keys().collect();
+        names.sort();
+        let names: Vec<String> = names.into_iter().cloned().collect();
+
+        for name in &names {
+            let ps = self.projects.get_mut(name).unwrap();
             for ms in ps.sessions.values_mut() {
                 if dispatched >= budget {
-                    return;
+                    return Ok(());
                 }
                 if ms.active.is_none() && !ms.queue.is_empty() {
-                    if ms.try_dispatch().unwrap_or(false) {
+                    if ms.try_dispatch()? {
                         dispatched += 1;
                     }
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Process lifecycle tick for all projects.
