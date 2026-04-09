@@ -126,9 +126,9 @@ fn run_loop(
             render_stream_view(frame, v_chunks[0], events, session_id, is_running);
 
             let title = if editing {
-                " Ctrl+S send | Esc cancel "
+                " Enter send | Ctrl+J newline | Esc cancel "
             } else {
-                " Enter to type | Tab switch | q quit "
+                " Enter to type | Up/Down switch | q quit "
             };
             input.render(frame, v_chunks[1], editing, title);
         })?;
@@ -176,9 +176,8 @@ fn run_loop(
                         _ => {}
                     },
                     InputMode::Editing => {
-                        if key.code == KeyCode::Char('s')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
+                        if key.code == KeyCode::Enter {
+                            // Enter sends the message
                             let text = input.text().trim().to_string();
                             if !text.is_empty() {
                                 let session_name = orch
@@ -194,7 +193,10 @@ fn run_loop(
                         } else if key.code == KeyCode::Esc {
                             input.clear();
                             orch.app.input_mode = InputMode::Normal;
-                        } else if key.code == KeyCode::Enter {
+                        } else if key.code == KeyCode::Char('j')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            // Ctrl+J inserts newline
                             input.insert_newline();
                         } else if key.code == KeyCode::Backspace {
                             input.backspace();
