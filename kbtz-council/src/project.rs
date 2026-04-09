@@ -1,5 +1,5 @@
 use crate::session::{AgentSessionId, SessionKey};
-use crate::job::{Dispatch, Job, JobPhase};
+use crate::job::{Artifact, Dispatch, Job, JobPhase};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,11 @@ pub struct Project {
 pub struct OrchestratorState {
     pub project: Project,
     pub jobs: Vec<Job>,
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
     pub next_job_id: u32,
+    #[serde(default)]
+    pub next_artifact_id: u32,
     #[serde(default)]
     pub session_ids: Vec<(SessionKey, AgentSessionId)>,
 }
@@ -49,7 +53,9 @@ impl ProjectDir {
         let state = OrchestratorState {
             project: project.clone(),
             jobs: vec![],
+            artifacts: vec![],
             next_job_id: 1,
+            next_artifact_id: 1,
             session_ids: Vec::new(),
         };
 
@@ -99,17 +105,10 @@ impl ProjectDir {
             id: id.clone(),
             phase: JobPhase::Dispatched,
             dispatch,
-            summary: None,
-            feedback: vec![],
-            decision: None,
+            implementor: Some("agent".to_string()),
+            agent_id: None,
+            artifacts: vec![],
         };
-
-        let step_dir = self.root.join("steps").join(&id);
-        fs::create_dir_all(step_dir.join("feedback"))?;
-
-        let dispatch_json = serde_json::to_string_pretty(&job.dispatch)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        fs::write(step_dir.join("dispatch.json"), dispatch_json)?;
 
         self.state.jobs.push(job);
         self.save()?;
@@ -126,4 +125,59 @@ impl ProjectDir {
     pub fn persist(&self) -> std::io::Result<()> {
         self.save()
     }
+
+    /// Create an artifact for a job and link it.
+    pub fn create_artifact(&mut self, job_id: &str, summary: String) -> String {
+        let id = format!("art-{:03}", self.state.next_artifact_id);
+        self.state.next_artifact_id += 1;
+
+        let artifact = Artifact {
+            id: id.clone(),
+            job_id: job_id.to_string(),
+            ts: chrono_now(),
+            summary,
+            commits: vec![],
+            feedback: vec![],
+            decision: None,
+        };
+
+        self.state.artifacts.push(artifact);
+
+        if let Some(job) = self.state.jobs.iter_mut().find(|j| j.id == job_id) {
+            job.artifacts.push(id.clone());
+        }
+
+        id
+    }
+
+    /// Get the latest artifact for a job.
+    pub fn latest_artifact(&self, job_id: &str) -> Option<&Artifact> {
+        self.state.jobs.iter()
+            .find(|j| j.id == job_id)
+            .and_then(|j| j.artifacts.last())
+            .and_then(|art_id| self.state.artifacts.iter().find(|a| a.id == *art_id))
+    }
+
+    /// Get a mutable reference to the latest artifact for a job.
+    pub fn latest_artifact_mut(&mut self, job_id: &str) -> Option<&mut Artifact> {
+        let art_id = self.state.jobs.iter()
+            .find(|j| j.id == job_id)
+            .and_then(|j| j.artifacts.last())
+            .cloned();
+        if let Some(art_id) = art_id {
+            self.state.artifacts.iter_mut().find(|a| a.id == art_id)
+        } else {
+            None
+        }
+    }
 }
+
+fn chrono_now() -> String {
+    // Simple ISO timestamp without chrono dependency
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}s", d.as_secs())
+}
+

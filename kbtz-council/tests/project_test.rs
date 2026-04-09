@@ -33,9 +33,9 @@ fn job_state_round_trip() {
             repos: vec![RepoRef { name: "backend".into(), branch: None }],
             files: vec![],
         },
-        summary: None,
-        feedback: vec![],
-        decision: None,
+        implementor: Some("agent".into()),
+        agent_id: None,
+        artifacts: vec![],
     };
 
     let json = serde_json::to_string_pretty(&job).unwrap();

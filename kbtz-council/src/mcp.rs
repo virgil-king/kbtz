@@ -194,11 +194,14 @@ fn handle_tool_call(
             let job_id = arguments["job_id"].as_str().unwrap_or("").to_string();
             let feedback = arguments["feedback"].as_str().unwrap_or("").to_string();
 
-            if let Some(job) = dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id) {
-                job.phase = crate::job::JobPhase::Rework;
-                job.decision = Some(crate::job::Decision::Rework {
+            // Record decision on the latest artifact
+            if let Some(artifact) = dir.latest_artifact_mut(&job_id) {
+                artifact.decision = Some(crate::job::Decision::Rework {
                     feedback: feedback.clone(),
                 });
+            }
+            if let Some(job) = dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id) {
+                job.phase = crate::job::JobPhase::Rework;
             }
             dir.persist()?;
 
@@ -210,6 +213,10 @@ fn handle_tool_call(
         "close_job" => {
             let job_id = arguments["job_id"].as_str().unwrap_or("").to_string();
 
+            // Record merge decision on the latest artifact
+            if let Some(artifact) = dir.latest_artifact_mut(&job_id) {
+                artifact.decision = Some(crate::job::Decision::Merge);
+            }
             if let Some(job) = dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id) {
                 job.phase = crate::job::JobPhase::Merged;
             }

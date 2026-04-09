@@ -212,23 +212,23 @@ impl Orchestrator {
                         };
                         self.fetch_job_commits(job_id, &session_dir);
 
+                        // Create an artifact for this implementation run
                         let mut dir = self.project_dir.lock().unwrap();
-                        if let Some(job) =
-                            dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
-                        {
-                            job.summary = Some(summary);
-                        }
+                        dir.create_artifact(job_id, summary);
                         let _ = dir.persist();
                     }
                     SessionKey::Stakeholder { name, .. } => {
-                        let feedback = self.extract_summary(&key_str);
+                        let feedback_content = self.extract_summary(&key_str);
+                        let agent_uuid = self.sessions.get(key)
+                            .map(|ms| ms.agent_session_id.0.to_string());
+
+                        // Add feedback to the job's latest artifact
                         let mut dir = self.project_dir.lock().unwrap();
-                        if let Some(job) =
-                            dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
-                        {
-                            job.feedback.push(crate::job::Feedback {
+                        if let Some(artifact) = dir.latest_artifact_mut(job_id) {
+                            artifact.feedback.push(crate::job::Feedback {
                                 stakeholder: name.clone(),
-                                content: feedback,
+                                content: feedback_content,
+                                agent_id: agent_uuid,
                             });
                         }
                         let _ = dir.persist();
@@ -292,8 +292,13 @@ impl Orchestrator {
                 .join(format!("{}-impl", job_id));
             let job = dir.state().jobs.iter().find(|j| j.id == job_id);
 
-            // Use rework feedback as prompt if available, otherwise original dispatch
-            let prompt_text = match job.and_then(|j| j.decision.as_ref()) {
+            // Use rework feedback from latest artifact if available
+            let latest_decision = job
+                .and_then(|j| j.artifacts.last())
+                .and_then(|art_id| dir.state().artifacts.iter().find(|a| a.id == *art_id))
+                .and_then(|a| a.decision.clone());
+
+            let prompt_text = match latest_decision {
                 Some(crate::job::Decision::Rework { feedback }) => {
                     format!(
                         "Your previous implementation needs changes. Here is the feedback:\n\n{}\n\nThe original task was:\n\n{}",
@@ -373,29 +378,27 @@ impl Orchestrator {
     }
 
     fn enqueue_stakeholders(&mut self, job_id: &str) -> io::Result<()> {
-        let (current_job, stakeholders, session_dir) = {
+        let (dispatch_prompt, artifact_summary, stakeholders, session_dir) = {
             let dir = self.project_dir.lock().unwrap();
-            let current_job = dir.state().jobs.iter().find(|s| s.id == job_id).cloned();
+            let job = dir.state().jobs.iter().find(|s| s.id == job_id);
+            let dispatch_prompt = job.map(|j| j.dispatch.prompt.clone()).unwrap_or_default();
+            let artifact_summary = dir.latest_artifact(job_id)
+                .map(|a| a.summary.clone())
+                .unwrap_or_else(|| "No summary".to_string());
             let stakeholders = dir.state().project.stakeholders.clone();
             let session_dir = dir
                 .root()
                 .join("sessions")
                 .join(format!("{}-impl", job_id));
-            (current_job, stakeholders, session_dir)
+            (dispatch_prompt, artifact_summary, stakeholders, session_dir)
         };
 
         for stakeholder in &stakeholders {
             let prompt_text = prompt::stakeholder_prompt(
                 Some(&session_dir),
                 &stakeholder.persona,
-                &current_job
-                    .as_ref()
-                    .map(|s| s.dispatch.prompt.as_str())
-                    .unwrap_or(""),
-                &current_job
-                    .as_ref()
-                    .and_then(|s| s.summary.as_deref())
-                    .unwrap_or("No summary"),
+                &dispatch_prompt,
+                &artifact_summary,
             );
 
             let key = SessionKey::Stakeholder {
@@ -439,12 +442,15 @@ impl Orchestrator {
         let job_feedback: Vec<(String, Vec<(String, String)>)> = job_ids
             .iter()
             .filter_map(|id| {
-                let found_job = state.jobs.iter().find(|s| &s.id == id)?;
-                let feedbacks: Vec<(String, String)> = found_job
-                    .feedback
-                    .iter()
-                    .map(|f| (f.stakeholder.clone(), f.content.clone()))
-                    .collect();
+                let job = state.jobs.iter().find(|s| &s.id == id)?;
+                // Get feedback from the latest artifact
+                let artifact = job.artifacts.last()
+                    .and_then(|art_id| state.artifacts.iter().find(|a| a.id == *art_id));
+                let feedbacks: Vec<(String, String)> = artifact
+                    .map(|a| a.feedback.iter()
+                        .map(|f| (f.stakeholder.clone(), f.content.clone()))
+                        .collect())
+                    .unwrap_or_default();
                 Some((id.clone(), feedbacks))
             })
             .collect();
