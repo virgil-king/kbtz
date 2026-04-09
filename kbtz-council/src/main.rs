@@ -93,16 +93,11 @@ fn run_loop(
                 .split(area);
 
             // Dashboard (left)
-            let dir = project_dir.lock().unwrap();
-            let steps = dir.state().jobs.clone();
-            drop(dir);
-
-            let session_infos = collect_session_infos(orch);
+            let session_infos = collect_session_infos(orch, project_dir);
 
             render_dashboard(
                 frame,
                 h_chunks[0],
-                &steps,
                 &session_infos,
                 &orch.app.selected_session,
             );
@@ -142,7 +137,7 @@ fn run_loop(
                             orch.app.input_mode = InputMode::Editing;
                         }
                         KeyCode::Tab | KeyCode::Down => {
-                            let keys: Vec<String> = collect_session_infos(orch)
+                            let keys: Vec<String> = collect_session_infos(orch, project_dir)
                                 .iter()
                                 .map(|i| i.name.clone())
                                 .collect();
@@ -158,7 +153,7 @@ fn run_loop(
                             }
                         }
                         KeyCode::Up => {
-                            let keys: Vec<String> = collect_session_infos(orch)
+                            let keys: Vec<String> = collect_session_infos(orch, project_dir)
                                 .iter()
                                 .map(|i| i.name.clone())
                                 .collect();
@@ -210,22 +205,47 @@ fn run_loop(
     }
 }
 
-fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
+fn collect_session_infos(
+    orch: &Orchestrator,
+    project_dir: &Arc<Mutex<ProjectDir>>,
+) -> Vec<SessionInfo> {
+    let dir = project_dir.lock().unwrap();
+    let jobs = &dir.state().jobs;
+
     let mut infos: Vec<SessionInfo> = orch
         .sessions
         .values()
-        .map(|ms| SessionInfo {
-            name: ms.key.to_string(),
-            status: if ms.is_running() {
-                SessionStatus::Running
-            } else if !ms.queue.is_empty() {
-                SessionStatus::Queued
-            } else {
-                SessionStatus::Idle
-            },
-            queue_depth: ms.queue.len(),
+        .map(|ms| {
+            // Find job phase for implementation sessions
+            let (job_phase, job_summary) = match &ms.key {
+                SessionKey::Implementation { job_id } => {
+                    let job = jobs.iter().find(|j| &j.id == job_id);
+                    (
+                        job.map(|j| j.phase.clone()),
+                        job.map(|j| j.dispatch.prompt.clone()),
+                    )
+                }
+                _ => (None, None),
+            };
+
+            SessionInfo {
+                name: ms.key.to_string(),
+                status: if ms.is_running() {
+                    SessionStatus::Running
+                } else if !ms.queue.is_empty() {
+                    SessionStatus::Queued
+                } else {
+                    SessionStatus::Idle
+                },
+                queue_depth: ms.queue.len(),
+                job_phase,
+                job_summary,
+            }
         })
         .collect();
+
+    drop(dir);
+
     // Always show leader
     if !infos.iter().any(|i| i.name == "leader") {
         infos.insert(
@@ -234,6 +254,8 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
                 name: "leader".to_string(),
                 status: SessionStatus::Idle,
                 queue_depth: 0,
+                job_phase: None,
+                job_summary: None,
             },
         );
     }
