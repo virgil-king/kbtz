@@ -183,6 +183,10 @@ impl Orchestrator {
                     }
                     SessionKey::Stakeholder { name } => {
                         let feedback = self.extract_summary(&key_str);
+                        let expected = {
+                            let dir = self.project_dir.lock().unwrap();
+                            dir.state().project.stakeholders.len()
+                        };
                         let mut dir = self.project_dir.lock().unwrap();
                         if let Some(job) =
                             dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
@@ -191,6 +195,9 @@ impl Orchestrator {
                                 stakeholder: name.clone(),
                                 content: feedback,
                             });
+                            if job.feedback.len() >= expected {
+                                job.phase = crate::job::JobPhase::Reviewed;
+                            }
                         }
                         let _ = dir.persist();
                     }
