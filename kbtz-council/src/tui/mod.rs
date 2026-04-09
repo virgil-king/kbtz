@@ -1,11 +1,19 @@
 pub mod dashboard;
+pub mod input;
 pub mod stream_view;
 
 use crate::stream::StreamEvent;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Editing,
+}
+
 pub struct AppState {
     pub selected_session: Option<String>,
     pub session_events: Vec<(String, Vec<StreamEvent>)>,
+    pub input_mode: InputMode,
 }
 
 impl AppState {
@@ -13,6 +21,7 @@ impl AppState {
         Self {
             selected_session: None,
             session_events: vec![],
+            input_mode: InputMode::Normal,
         }
     }
 

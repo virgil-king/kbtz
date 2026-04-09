@@ -1,6 +1,6 @@
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,8 +17,11 @@ use std::time::Duration;
 use kbtz_council::mcp;
 use kbtz_council::orchestrator::Orchestrator;
 use kbtz_council::project::{Project, ProjectDir};
+use kbtz_council::session::SessionKey;
 use kbtz_council::tui::dashboard::render_dashboard;
+use kbtz_council::tui::input::TextInput;
 use kbtz_council::tui::stream_view::render_stream_view;
+use kbtz_council::tui::InputMode;
 
 #[derive(Parser)]
 #[command(name = "kbtz-council")]
@@ -32,7 +35,6 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    // Init or load project
     let project_dir = if cli.project.join("state.json").exists() {
         ProjectDir::load(&cli.project)?
     } else {
@@ -46,21 +48,22 @@ fn main() -> io::Result<()> {
 
     let project_dir = Arc::new(Mutex::new(project_dir));
 
-    // Start embedded MCP HTTP server
     let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
     let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
     std::fs::write(cli.project.join("mcp-port"), mcp_port.to_string())?;
 
     let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
+    orchestrator.app.selected_session = Some("leader".to_string());
 
-    // Init terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut orchestrator, &project_dir);
+    let mut input = TextInput::new();
+
+    let result = run_loop(&mut terminal, &mut orchestrator, &project_dir, &mut input);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -73,67 +76,132 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     orch: &mut Orchestrator,
     project_dir: &Arc<Mutex<ProjectDir>>,
+    input: &mut TextInput,
 ) -> io::Result<()> {
     loop {
         orch.poll_sessions();
         orch.process_tick()?;
 
+        let editing = orch.app.input_mode == InputMode::Editing;
+
         terminal.draw(|frame| {
             let area = frame.area();
-            let chunks = Layout::default()
+
+            let h_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                 .split(area);
 
+            // Dashboard (left)
             let dir = project_dir.lock().unwrap();
             let steps = dir.state().steps.clone();
             drop(dir);
 
-            let sessions: Vec<String> = orch
-                .app
-                .session_events
-                .iter()
-                .map(|(id, _)| id.clone())
-                .collect();
+            let session_keys = collect_session_keys(orch);
 
             render_dashboard(
                 frame,
-                chunks[0],
+                h_chunks[0],
                 &steps,
-                &sessions,
+                &session_keys,
                 &orch.app.selected_session,
             );
 
+            // Right panel: stream view + input
+            let input_height = input.height();
+            let v_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(input_height)])
+                .split(h_chunks[1]);
+
             let events = orch.app.selected_events();
-            let session_id = orch.app.selected_session.as_deref().unwrap_or("(none)");
-            render_stream_view(frame, chunks[1], events, session_id);
+            let session_id = orch.app.selected_session.as_deref().unwrap_or("leader");
+            render_stream_view(frame, v_chunks[0], events, session_id);
+
+            let title = if editing {
+                " Ctrl+S send | Esc cancel "
+            } else {
+                " Enter to type | Tab switch | q quit "
+            };
+            input.render(frame, v_chunks[1], editing, title);
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Tab => {
-                        let sessions: Vec<String> = orch
-                            .app
-                            .session_events
-                            .iter()
-                            .map(|(id, _)| id.clone())
-                            .collect();
-                        if !sessions.is_empty() {
-                            let current_idx = orch
-                                .app
-                                .selected_session
-                                .as_ref()
-                                .and_then(|s| sessions.iter().position(|id| id == s))
-                                .map(|i| (i + 1) % sessions.len())
-                                .unwrap_or(0);
-                            orch.app.selected_session = Some(sessions[current_idx].clone());
+                match orch.app.input_mode {
+                    InputMode::Normal => match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Enter => {
+                            orch.app.input_mode = InputMode::Editing;
+                        }
+                        KeyCode::Tab => {
+                            let keys = collect_session_keys(orch);
+                            if !keys.is_empty() {
+                                let idx = orch
+                                    .app
+                                    .selected_session
+                                    .as_ref()
+                                    .and_then(|s| keys.iter().position(|k| k == s))
+                                    .map(|i| (i + 1) % keys.len())
+                                    .unwrap_or(0);
+                                orch.app.selected_session = Some(keys[idx].clone());
+                            }
+                        }
+                        _ => {}
+                    },
+                    InputMode::Editing => {
+                        if key.code == KeyCode::Char('s')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            let text = input.text().trim().to_string();
+                            if !text.is_empty() {
+                                let session_name = orch
+                                    .app
+                                    .selected_session
+                                    .clone()
+                                    .unwrap_or_else(|| "leader".to_string());
+                                let session_key = parse_session_key(&session_name);
+                                orch.send_message(&session_key, text);
+                            }
+                            input.clear();
+                            orch.app.input_mode = InputMode::Normal;
+                        } else if key.code == KeyCode::Esc {
+                            input.clear();
+                            orch.app.input_mode = InputMode::Normal;
+                        } else if key.code == KeyCode::Enter {
+                            input.insert_newline();
+                        } else if key.code == KeyCode::Backspace {
+                            input.backspace();
+                        } else if let KeyCode::Char(c) = key.code {
+                            input.insert_char(c);
                         }
                     }
-                    _ => {}
                 }
             }
         }
+    }
+}
+
+fn collect_session_keys(orch: &Orchestrator) -> Vec<String> {
+    let mut keys: Vec<String> = orch.sessions.keys().map(|k| k.to_string()).collect();
+    if !keys.contains(&"leader".to_string()) {
+        keys.insert(0, "leader".to_string());
+    }
+    keys
+}
+
+fn parse_session_key(s: &str) -> SessionKey {
+    if s == "leader" {
+        SessionKey::Leader
+    } else if let Some(name) = s.strip_prefix("stakeholder-") {
+        SessionKey::Stakeholder {
+            name: name.to_string(),
+        }
+    } else if let Some(step_id) = s.strip_suffix("-impl") {
+        SessionKey::Implementation {
+            step_id: step_id.to_string(),
+        }
+    } else {
+        SessionKey::Leader
     }
 }
