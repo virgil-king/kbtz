@@ -185,6 +185,9 @@ impl ActiveSession {
 
         if let Some(config) = mcp_config {
             cmd.arg("--mcp-config").arg(config);
+        } else {
+            // Prevent auto-discovery of .mcp.json in parent directories
+            cmd.arg("--strict-mcp-config");
         }
 
         let mut child = cmd.spawn()?;
