@@ -152,6 +152,7 @@ impl ActiveSession {
             .arg(prompt)
             .arg("--output-format")
             .arg("stream-json")
+            .arg("--verbose")
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -171,9 +172,14 @@ impl ActiveSession {
             .stdout
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no stdout"))?;
+        let stderr = child
+            .stderr
+            .take();
 
         let (tx, rx) = mpsc::channel();
 
+        // Read stdout (stream-json)
+        let tx_stdout = tx.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -182,13 +188,33 @@ impl ActiveSession {
                     Ok(line) => {
                         let event = parse_stream_line(&line)
                             .unwrap_or(StreamEvent::Other(line.clone()));
-                        let _ = tx.send(SessionMessage::Event(event));
-                        let _ = tx.send(SessionMessage::RawLine(line));
+                        let _ = tx_stdout.send(SessionMessage::Event(event));
+                        let _ = tx_stdout.send(SessionMessage::RawLine(line));
                     }
                     Err(_) => break,
                 }
             }
         });
+
+        // Read stderr (errors, debug output)
+        if let Some(stderr) = stderr {
+            let tx_stderr = tx.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        if !line.is_empty() {
+                            let _ = tx_stderr.send(SessionMessage::Event(
+                                StreamEvent::Other(format!("[stderr] {}", line)),
+                            ));
+                            let _ = tx_stderr.send(SessionMessage::RawLine(
+                                format!("{{\"type\":\"stderr\",\"message\":{}}}", serde_json::json!(line)),
+                            ));
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(Self {
             step_id: None,
