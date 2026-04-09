@@ -30,7 +30,7 @@ fn default_global_dir() -> PathBuf {
         .join(".kbtz-council")
 }
 
-const DEFAULT_MAX_SESSIONS: usize = 8;
+const DEFAULT_MAX_SESSIONS: usize = 16;
 
 #[derive(Parser)]
 #[command(name = "kbtz-council")]
