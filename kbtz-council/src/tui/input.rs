@@ -64,8 +64,21 @@ impl TextInput {
         self.lines.len() == 1 && self.lines[0].is_empty()
     }
 
-    pub fn height(&self) -> u16 {
-        (self.lines.len() as u16).max(1) + 2 // +2 for border
+    /// Calculate height needed given an available width (including borders).
+    pub fn height(&self, available_width: u16) -> u16 {
+        let inner_width = (available_width.saturating_sub(2)) as usize; // subtract borders
+        if inner_width == 0 {
+            return 3;
+        }
+        let wrapped_rows: usize = self
+            .lines
+            .iter()
+            .map(|line| {
+                let chars = line.chars().count();
+                if chars == 0 { 1 } else { (chars + inner_width - 1) / inner_width }
+            })
+            .sum();
+        (wrapped_rows as u16).max(1) + 2 // +2 for border
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, active: bool, title: &str) {

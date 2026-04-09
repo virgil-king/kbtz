@@ -108,7 +108,7 @@ fn run_loop(
             );
 
             // Right panel: stream view + input
-            let input_height = input.height();
+            let input_height = input.height(h_chunks[1].width);
             let v_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(input_height)])
