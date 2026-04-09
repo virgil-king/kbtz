@@ -2,11 +2,11 @@ use crate::git;
 use crate::lifecycle::{self, Action, SessionSnapshot, StepSnapshot, WorldSnapshot};
 use crate::project::ProjectDir;
 use crate::prompt;
-use crate::session::{AgentSessionId, HeadlessSession, SessionKey, SessionMessage, SessionRole};
+use crate::session::{ManagedSession, QueueItem, SessionKey, SessionMessage};
 use crate::step::StepPhase;
 use crate::stream::StreamEvent;
 use crate::tui::AppState;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -14,10 +14,8 @@ use std::sync::{Arc, Mutex};
 
 pub struct Orchestrator {
     pub project_dir: Arc<Mutex<ProjectDir>>,
-    pub sessions: Vec<HeadlessSession>,
+    pub sessions: HashMap<SessionKey, ManagedSession>,
     pub app: AppState,
-    pub leader_busy: bool,
-    exited_session_ids: HashSet<SessionKey>,
     trace_dir: PathBuf,
     trace_files: HashMap<String, std::fs::File>,
     mcp_config_path: PathBuf,
@@ -33,25 +31,39 @@ impl Orchestrator {
         };
         Self {
             project_dir,
-            sessions: vec![],
+            sessions: HashMap::new(),
             app: AppState::new(),
-            leader_busy: false,
-            exited_session_ids: HashSet::new(),
             trace_dir,
             trace_files: HashMap::new(),
             mcp_config_path,
         }
     }
 
-    fn write_trace(&mut self, session_key: &str, line: &str) {
-        let file = self.trace_files.entry(session_key.to_string()).or_insert_with(|| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.trace_dir.join(format!("{}.jsonl", session_key)))
-                .expect("failed to open trace file")
+    /// Get or create a managed session for the given key.
+    fn ensure_session(&mut self, key: SessionKey) -> &mut ManagedSession {
+        self.sessions
+            .entry(key.clone())
+            .or_insert_with(|| ManagedSession::new(key))
+    }
+
+    /// Enqueue a user message for any session.
+    pub fn send_message(&mut self, key: &SessionKey, message: String) {
+        let working_dir = {
+            let dir = self.project_dir.lock().unwrap();
+            dir.root().to_path_buf()
+        };
+        let mcp_config = if matches!(key, SessionKey::Leader) {
+            Some(self.mcp_config_path.clone())
+        } else {
+            None
+        };
+        let session = self.ensure_session(key.clone());
+        session.enqueue(QueueItem {
+            prompt: message,
+            step_id: None,
+            working_dir,
+            mcp_config,
         });
-        let _ = writeln!(file, "{}", line);
     }
 
     fn build_world(&self) -> WorldSnapshot {
@@ -69,104 +81,122 @@ impl Orchestrator {
 
         let sessions = self
             .sessions
-            .iter()
-            .map(|s| SessionSnapshot {
-                step_id: s.step_id.clone(),
-                role: s.role.clone(),
-                exited: self.exited_session_ids.contains(&s.key),
+            .values()
+            .filter_map(|ms| {
+                let active = ms.active.as_ref()?;
+                Some(SessionSnapshot {
+                    step_id: active.step_id.clone().unwrap_or_default(),
+                    key: ms.key.clone(),
+                    exited: false, // if it's in active, it's running
+                })
             })
             .collect();
+
+        let leader_busy = self
+            .sessions
+            .get(&SessionKey::Leader)
+            .map(|ms| ms.is_running())
+            .unwrap_or(false);
 
         WorldSnapshot {
             steps,
             sessions,
-            leader_busy: self.leader_busy,
+            leader_busy,
         }
     }
 
+    /// Poll all sessions: drain events, detect exits, dispatch queued items.
     pub fn poll_sessions(&mut self) {
-        let mut exited_indices = vec![];
-        let mut trace_lines: Vec<(String, String)> = vec![];
+        let mut trace_lines: Vec<(String, String)> = Vec::new();
+        let mut exited_keys: Vec<(SessionKey, Option<String>)> = Vec::new();
 
-        for (i, session) in self.sessions.iter_mut().enumerate() {
-            while let Ok(msg) = session.rx.try_recv() {
-                match msg {
-                    SessionMessage::Event(event) => {
-                        self.app.push_event(&session.key.to_string(), event);
+        for (key, ms) in &mut self.sessions {
+            if let Some(ref mut active) = ms.active {
+                // Drain events
+                while let Ok(msg) = active.rx.try_recv() {
+                    match msg {
+                        SessionMessage::Event(event) => {
+                            self.app.push_event(&key.to_string(), event);
+                        }
+                        SessionMessage::RawLine(line) => {
+                            trace_lines.push((key.to_string(), line));
+                        }
                     }
-                    SessionMessage::RawLine(line) => {
-                        trace_lines.push((session.key.to_string(), line));
-                    }
-                    SessionMessage::Exited { .. } => {}
                 }
-            }
 
-            if let Ok(Some(_code)) = session.try_wait() {
-                self.exited_session_ids.insert(session.key.clone());
-                exited_indices.push(i);
+                // Check exit
+                if let Ok(Some(_)) = active.try_wait() {
+                    exited_keys.push((key.clone(), active.step_id.clone()));
+                }
             }
         }
 
+        // Write traces
         for (key, line) in trace_lines {
             self.write_trace(&key, &line);
         }
 
-        for &i in exited_indices.iter().rev() {
-            let session = &self.sessions[i];
-            let step_id = session.step_id.clone();
-            let role = session.role.clone();
-            let key_str = session.key.to_string();
-
-            // Persist agent session UUID for future --resume
+        // Process exits
+        for (key, step_id) in &exited_keys {
+            // Persist agent session ID
             {
+                let ms = self.sessions.get(key).unwrap();
                 let mut dir = self.project_dir.lock().unwrap();
                 dir.state_mut()
                     .session_ids
-                    .insert(session.key.clone(), session.agent_session_id.clone());
+                    .insert(key.clone(), ms.agent_session_id.clone());
                 let _ = dir.persist();
             }
 
-            match role {
-                SessionRole::Implementation => {
-                    let summary = self.extract_summary(&key_str);
-                    let session_dir = {
-                        let dir = self.project_dir.lock().unwrap();
-                        dir.root()
-                            .join("sessions")
-                            .join(format!("{}-impl", step_id))
-                    };
-                    self.fetch_step_commits(&step_id, &session_dir);
+            if let Some(step_id) = step_id {
+                let key_str = key.to_string();
+                match key {
+                    SessionKey::Implementation { .. } => {
+                        let summary = self.extract_summary(&key_str);
+                        let session_dir = {
+                            let dir = self.project_dir.lock().unwrap();
+                            dir.root()
+                                .join("sessions")
+                                .join(format!("{}-impl", step_id))
+                        };
+                        self.fetch_step_commits(step_id, &session_dir);
 
-                    let mut dir = self.project_dir.lock().unwrap();
-                    if let Some(step) =
-                        dir.state_mut().steps.iter_mut().find(|s| s.id == step_id)
-                    {
-                        step.summary = Some(summary);
+                        let mut dir = self.project_dir.lock().unwrap();
+                        if let Some(step) =
+                            dir.state_mut().steps.iter_mut().find(|s| s.id == *step_id)
+                        {
+                            step.summary = Some(summary);
+                        }
+                        let _ = dir.persist();
                     }
-                    let _ = dir.persist();
-                }
-                SessionRole::Stakeholder { ref name } => {
-                    let feedback = self.extract_summary(&session.key.to_string());
-                    let mut dir = self.project_dir.lock().unwrap();
-                    if let Some(step) =
-                        dir.state_mut().steps.iter_mut().find(|s| s.id == step_id)
-                    {
-                        step.feedback.push(crate::step::Feedback {
-                            stakeholder: name.clone(),
-                            content: feedback,
-                        });
+                    SessionKey::Stakeholder { name } => {
+                        let feedback = self.extract_summary(&key_str);
+                        let mut dir = self.project_dir.lock().unwrap();
+                        if let Some(step) =
+                            dir.state_mut().steps.iter_mut().find(|s| s.id == *step_id)
+                        {
+                            step.feedback.push(crate::step::Feedback {
+                                stakeholder: name.clone(),
+                                content: feedback,
+                            });
+                        }
+                        let _ = dir.persist();
                     }
-                    let _ = dir.persist();
-                }
-                SessionRole::LeaderDecision => {
-                    self.leader_busy = false;
+                    SessionKey::Leader => {}
                 }
             }
 
-            self.sessions.remove(i);
+            // Reap the active session
+            self.sessions.get_mut(key).unwrap().reap();
+        }
+
+        // Try to dispatch queued items for all sessions
+        for ms in self.sessions.values_mut() {
+            let _ = ms.try_dispatch();
         }
     }
 
+    /// Process lifecycle tick — translate actions into session queue items.
     pub fn process_tick(&mut self) -> io::Result<()> {
         let world = self.build_world();
         let actions = lifecycle::tick(&world);
@@ -174,13 +204,13 @@ impl Orchestrator {
         for action in actions {
             match action {
                 Action::SpawnImplementation { step_id, repos } => {
-                    self.spawn_implementation(&step_id, &repos)?;
+                    self.enqueue_implementation(&step_id, &repos)?;
                 }
                 Action::SpawnStakeholders { step_id } => {
-                    self.spawn_stakeholders(&step_id)?;
+                    self.enqueue_stakeholders(&step_id)?;
                 }
                 Action::InvokeLeader { step_ids } => {
-                    self.invoke_leader(&step_ids)?;
+                    self.enqueue_leader_decision(&step_ids)?;
                 }
                 Action::TransitionStep { step_id, to } => {
                     let mut dir = self.project_dir.lock().unwrap();
@@ -197,14 +227,27 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn spawn_implementation(&mut self, step_id: &str, repos: &[String]) -> io::Result<()> {
-        let (session_dir, owned_pairs, step_prompt, existing_id) = {
+    fn enqueue_implementation(&mut self, step_id: &str, repos: &[String]) -> io::Result<()> {
+        let (session_dir, step_prompt) = {
             let dir = self.project_dir.lock().unwrap();
             let session_dir = dir
                 .root()
                 .join("sessions")
                 .join(format!("{}-impl", step_id));
-            let owned_pairs: Vec<(String, std::path::PathBuf)> = repos
+            let step_prompt = dir
+                .state()
+                .steps
+                .iter()
+                .find(|s| s.id == step_id)
+                .map(|s| s.dispatch.prompt.clone())
+                .unwrap_or_default();
+            (session_dir, step_prompt)
+        };
+
+        // Set up clones
+        let owned_pairs: Vec<(String, PathBuf)> = {
+            let dir = self.project_dir.lock().unwrap();
+            repos
                 .iter()
                 .filter_map(|name| {
                     let source = dir.root().join("repos").join(name);
@@ -214,16 +257,7 @@ impl Orchestrator {
                         None
                     }
                 })
-                .collect();
-            let step_prompt = dir
-                .state()
-                .steps
-                .iter()
-                .find(|s| s.id == step_id)
-                .map(|s| s.dispatch.prompt.clone())
-                .unwrap_or_default();
-            let existing_id = self.lookup_agent_session_id_locked(&dir, step_id, &SessionRole::Implementation);
-            (session_dir, owned_pairs, step_prompt, existing_id)
+                .collect()
         };
 
         let ref_pairs: Vec<(&str, &Path)> = owned_pairs
@@ -232,16 +266,18 @@ impl Orchestrator {
             .collect();
         git::setup_session_dir(&session_dir, &ref_pairs)?;
 
-        let prompt_text = prompt::implementation_prompt(&step_prompt);
-        let session = HeadlessSession::spawn(
-            step_id,
-            SessionRole::Implementation,
-            &prompt_text,
-            &session_dir,
-            existing_id,
-            None,
-        )?;
+        let key = SessionKey::Implementation {
+            step_id: step_id.to_string(),
+        };
+        let session = self.ensure_session(key);
+        session.enqueue(QueueItem {
+            prompt: prompt::implementation_prompt(&step_prompt),
+            step_id: Some(step_id.to_string()),
+            working_dir: session_dir,
+            mcp_config: None,
+        });
 
+        // Transition to running
         {
             let mut dir = self.project_dir.lock().unwrap();
             if let Some(step) =
@@ -252,11 +288,10 @@ impl Orchestrator {
             dir.persist()?;
         }
 
-        self.sessions.push(session);
         Ok(())
     }
 
-    fn spawn_stakeholders(&mut self, step_id: &str) -> io::Result<()> {
+    fn enqueue_stakeholders(&mut self, step_id: &str) -> io::Result<()> {
         let (step, stakeholders, session_dir) = {
             let dir = self.project_dir.lock().unwrap();
             let step = dir.state().steps.iter().find(|s| s.id == step_id).cloned();
@@ -281,24 +316,19 @@ impl Orchestrator {
                     .unwrap_or("No summary"),
             );
 
-            let role = SessionRole::Stakeholder {
+            let key = SessionKey::Stakeholder {
                 name: stakeholder.name.clone(),
             };
-            let existing_id = {
-                let dir = self.project_dir.lock().unwrap();
-                self.lookup_agent_session_id_locked(&dir, step_id, &role)
-            };
-            let session = HeadlessSession::spawn(
-                step_id,
-                role,
-                &prompt_text,
-                &session_dir,
-                existing_id,
-                None,
-            )?;
-            self.sessions.push(session);
+            let session = self.ensure_session(key);
+            session.enqueue(QueueItem {
+                prompt: prompt_text,
+                step_id: Some(step_id.to_string()),
+                working_dir: session_dir.clone(),
+                mcp_config: None,
+            });
         }
 
+        // Transition to reviewing
         {
             let mut dir = self.project_dir.lock().unwrap();
             if let Some(step) =
@@ -312,16 +342,14 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn invoke_leader(&mut self, step_ids: &[String]) -> io::Result<()> {
-        let (state, project_md, working_dir, existing_id) = {
+    fn enqueue_leader_decision(&mut self, step_ids: &[String]) -> io::Result<()> {
+        let (state, project_md, working_dir) = {
             let dir = self.project_dir.lock().unwrap();
             let state = dir.state().clone();
             let project_md_path = dir.root().join("project.md");
             let project_md = std::fs::read_to_string(&project_md_path).ok();
             let working_dir = dir.root().to_path_buf();
-            let existing_id =
-                self.lookup_agent_session_id_locked(&dir, "leader", &SessionRole::LeaderDecision);
-            (state, project_md, working_dir, existing_id)
+            (state, project_md, working_dir)
         };
 
         let step_feedback: Vec<(String, Vec<(String, String)>)> = step_ids
@@ -340,17 +368,15 @@ impl Orchestrator {
         let prompt_text =
             prompt::leader_decision_prompt(&state, &step_feedback, project_md.as_deref());
 
-        let session = HeadlessSession::spawn(
-            "leader",
-            SessionRole::LeaderDecision,
-            &prompt_text,
-            &working_dir,
-            existing_id,
-            Some(&self.mcp_config_path),
-        )?;
+        let mcp_config = self.mcp_config_path.clone();
+        let session = self.ensure_session(SessionKey::Leader);
+        session.enqueue(QueueItem {
+            prompt: prompt_text,
+            step_id: None,
+            working_dir,
+            mcp_config: Some(mcp_config),
+        });
 
-        self.leader_busy = true;
-        self.sessions.push(session);
         Ok(())
     }
 
@@ -375,18 +401,18 @@ impl Orchestrator {
         "No summary available".to_string()
     }
 
-    fn lookup_agent_session_id_locked(
-        &self,
-        dir: &ProjectDir,
-        step_id: &str,
-        role: &SessionRole,
-    ) -> Option<AgentSessionId> {
-        let key = match role {
-            SessionRole::Implementation => SessionKey::Implementation { step_id: step_id.to_string() },
-            SessionRole::Stakeholder { name } => SessionKey::Stakeholder { name: name.clone() },
-            SessionRole::LeaderDecision => SessionKey::Leader,
-        };
-        dir.state().session_ids.get(&key).cloned()
+    fn write_trace(&mut self, session_key: &str, line: &str) {
+        let file = self
+            .trace_files
+            .entry(session_key.to_string())
+            .or_insert_with(|| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.trace_dir.join(format!("{}.jsonl", session_key)))
+                    .expect("failed to open trace file")
+            });
+        let _ = writeln!(file, "{}", line);
     }
 
     fn fetch_step_commits(&self, step_id: &str, session_dir: &Path) {

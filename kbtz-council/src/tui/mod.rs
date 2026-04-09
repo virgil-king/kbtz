@@ -1,29 +1,18 @@
 pub mod dashboard;
-pub mod leader;
 pub mod stream_view;
 
 use crate::stream::StreamEvent;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum View {
-    Dashboard,
-    Leader,
-}
-
 pub struct AppState {
-    pub view: View,
     pub selected_session: Option<String>,
     pub session_events: Vec<(String, Vec<StreamEvent>)>,
-    pub leader_idle: bool,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            view: View::Dashboard,
             selected_session: None,
             session_events: vec![],
-            leader_idle: true,
         }
     }
 

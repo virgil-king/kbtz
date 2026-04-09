@@ -15,16 +15,15 @@ lifecycle operations: clone management, session spawning/reaping, commit
 extraction, cleanup, state management. Exposes an MCP server for the leader.
 Provides a TUI dashboard for observability and interactive leader access.
 
-**Leader** -- a Claude Code session with two modes:
-- Interactive TUI: user chats with the leader to define the project, provide
-  guidance, or review state. Embedded in the orchestrator's TUI via PTY
-  forwarding (reusing kbtz-workspace library code).
-- Headless decision mode: orchestrator invokes with `claude -p --resume`
-  when feedback is ready. Leader reviews state and feedback, produces
-  decisions (dispatch/merge/rework), exits. Guaranteed to terminate.
-
-Both modes share conversation history via `--resume`. The leader uses MCP
-tools provided by the orchestrator.
+**Leader** -- always a headless Claude Code session (`claude -p --resume`).
+Every invocation is `claude -p --resume <uuid>`, guaranteed to terminate.
+The orchestrator maintains a FIFO queue of events for the leader: user
+messages (typed in the TUI), feedback-ready notifications, and other
+orchestrator events. When the leader finishes one invocation, the
+orchestrator pops the next item and invokes again. The TUI displays the
+leader's formatted stream-json output and provides a text input field for
+user messages, creating a chat-like experience without PTY embedding.
+The leader uses MCP tools provided by the orchestrator's HTTP server.
 
 **Stakeholders** -- headless Claude Code sessions (`claude -p`). Each has a
 persona (security reviewer, API design reviewer, etc.) defined during project
@@ -260,45 +259,40 @@ panel and a session panel.
 - Project state: goal, repos, stakeholder personas.
 - Step list with current phase (dispatched/running/completed/reviewing/
   reviewed/merged/rework).
-- Active session list with status.
-- Controls: select session to watch, kill + re-prompt a session, attach to
-  leader interactively.
+- Active session list with status (running/queued/idle).
+- Controls: select session to watch, kill + re-prompt a session, send
+  message to leader.
 
 ### Session Panel
 
-The session panel shows one of three things depending on state:
+The session panel shows the formatted stream-json output of the selected
+session: thinking, tool calls, and results. The user can switch between
+sessions to observe different agents.
 
-**Stream-json view (default):** Read-only rendering of the selected
-session's stream-json output -- thinking, tool calls, and results. This
-applies to any headless session: implementation agents, stakeholders, or
-the leader when running in headless decision mode. The user can switch
-between active sessions to observe different agents.
+For the leader, the session panel also includes a text input field at the
+bottom. User messages are added to the leader's event queue.
 
-**Interactive leader view:** When the user attaches to the leader, the
-session panel becomes an interactive PTY session embedded via
-kbtz-workspace's raw byte forwarding library. The user chats with the
-leader directly.
+### Session Queues
 
-**Idle:** When no session is selected or running.
+Every session has a FIFO queue of invocations. When a session finishes
+one invocation, the orchestrator pops the next item and invokes
+`claude -p --resume` again. A session is either running (processing an
+item) or idle (queue empty).
 
-### Leader Panel States
+Leader queue items: user messages, feedback-ready notifications, any
+orchestrator event requiring a decision.
 
-The leader is special -- its session panel cycles through states:
+Stakeholder queue items: step reviews. When multiple steps complete
+simultaneously, each review is queued and processed in order.
 
-1. **Idle** -- leader is not running. User can launch it interactively.
-2. **Headless** -- orchestrator invoked the leader for a decision. Panel
-   shows stream-json output (read-only). User cannot attach interactively
-   until this completes (or is killed).
-3. **Interactive** -- user attached to the leader. Panel shows the PTY.
-   User can only launch interactive mode when the leader is idle (not
-   currently in a headless invocation).
+Implementation queue items: initial dispatch prompt, rework feedback.
 
 ## Session Execution
 
-All sessions except the interactive leader use `claude -p`:
+All sessions use `claude -p`:
 - Guaranteed to produce output and terminate.
 - `--output-format stream-json` for real-time observability.
-- `--resume <session-id>` for rework iterations and leader continuity.
+- `--resume <session-id>` for conversation continuity.
 
 The orchestrator:
 - Spawns sessions as child processes.
@@ -321,18 +315,6 @@ The orchestrator abstracts over agent backends. Claude Code is the default
 Agent SDK or other backends can implement this interface. Per-session backend
 override is possible (e.g., use a different model for stakeholder reviews).
 
-## kbtz-workspace Library Reuse
-
-The orchestrator reuses kbtz-workspace code for one purpose: embedding the
-interactive leader session in the orchestrator's TUI. Specifically:
-
-- PTY spawning and management.
-- Raw byte forwarding between the PTY and the terminal.
-- VTE state tracking for view switching (dashboard <-> leader).
-
-Everything else (dashboard rendering, stream-json parsing, clone management,
-MCP server, state machine) is new code in the orchestrator.
-
 ## Open Questions
 
 - Exact Claude Code CLI flags for per-session read/write sandboxing (needed
@@ -345,5 +327,3 @@ MCP server, state machine) is new code in the orchestrator.
 - Project persistence across orchestrator restarts: the project directory on
   disk plus Claude Code session IDs should be sufficient, but needs
   verification.
-- MCP server lifecycle: does it run as a subprocess or embedded in the
-  orchestrator process? Embedded is simpler.

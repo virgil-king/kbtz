@@ -1,5 +1,5 @@
 use kbtz_council::lifecycle::{tick, Action, SessionSnapshot, StepSnapshot, WorldSnapshot};
-use kbtz_council::session::SessionRole;
+use kbtz_council::session::SessionKey;
 use kbtz_council::step::StepPhase;
 
 fn empty_world() -> WorldSnapshot {
@@ -49,7 +49,7 @@ fn running_step_with_exited_session_transitions_to_completed() {
         }],
         sessions: vec![SessionSnapshot {
             step_id: "step-001".into(),
-            role: SessionRole::Implementation,
+            key: SessionKey::Implementation { step_id: "step-001".into() },
             exited: true,
         }],
         leader_busy: false,
@@ -73,7 +73,7 @@ fn running_step_with_active_session_does_nothing() {
         }],
         sessions: vec![SessionSnapshot {
             step_id: "step-001".into(),
-            role: SessionRole::Implementation,
+            key: SessionKey::Implementation { step_id: "step-001".into() },
             exited: false,
         }],
         leader_busy: false,
@@ -112,16 +112,12 @@ fn reviewing_step_all_stakeholders_exited_transitions_to_reviewed() {
         sessions: vec![
             SessionSnapshot {
                 step_id: "step-001".into(),
-                role: SessionRole::Stakeholder {
-                    name: "security".into(),
-                },
+                key: SessionKey::Stakeholder { name: "security".into() },
                 exited: true,
             },
             SessionSnapshot {
                 step_id: "step-001".into(),
-                role: SessionRole::Stakeholder {
-                    name: "api".into(),
-                },
+                key: SessionKey::Stakeholder { name: "api".into() },
                 exited: true,
             },
         ],
@@ -147,16 +143,12 @@ fn reviewing_step_with_active_stakeholder_does_nothing() {
         sessions: vec![
             SessionSnapshot {
                 step_id: "step-001".into(),
-                role: SessionRole::Stakeholder {
-                    name: "security".into(),
-                },
+                key: SessionKey::Stakeholder { name: "security".into() },
                 exited: true,
             },
             SessionSnapshot {
                 step_id: "step-001".into(),
-                role: SessionRole::Stakeholder {
-                    name: "api".into(),
-                },
+                key: SessionKey::Stakeholder { name: "api".into() },
                 exited: false,
             },
         ],
@@ -264,7 +256,7 @@ fn rework_step_with_exited_session_transitions_to_completed() {
         }],
         sessions: vec![SessionSnapshot {
             step_id: "step-001".into(),
-            role: SessionRole::Implementation,
+            key: SessionKey::Implementation { step_id: "step-001".into() },
             exited: true,
         }],
         leader_busy: false,

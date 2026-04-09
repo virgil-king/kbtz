@@ -1,4 +1,4 @@
-use crate::session::SessionRole;
+use crate::session::SessionKey;
 use crate::step::StepPhase;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,7 @@ pub struct StepSnapshot {
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub step_id: String,
-    pub role: SessionRole,
+    pub key: SessionKey,
     pub exited: bool,
 }
 
@@ -37,7 +37,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
         match &step.phase {
             StepPhase::Dispatched => {
                 let has_impl = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.role, SessionRole::Implementation)
+                    s.step_id == step.id && matches!(s.key, SessionKey::Implementation { .. })
                 });
                 if !has_impl {
                     actions.push(Action::SpawnImplementation {
@@ -49,7 +49,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
             StepPhase::Running => {
                 let impl_exited = world.sessions.iter().any(|s| {
                     s.step_id == step.id
-                        && matches!(s.role, SessionRole::Implementation)
+                        && matches!(s.key, SessionKey::Implementation { .. })
                         && s.exited
                 });
                 if impl_exited {
@@ -61,7 +61,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
             }
             StepPhase::Rework => {
                 let has_impl = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.role, SessionRole::Implementation)
+                    s.step_id == step.id && matches!(s.key, SessionKey::Implementation { .. })
                 });
                 if !has_impl {
                     // No session yet — spawn one to resume rework
@@ -73,7 +73,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                     // Session exists — check if it exited
                     let impl_exited = world.sessions.iter().any(|s| {
                         s.step_id == step.id
-                            && matches!(s.role, SessionRole::Implementation)
+                            && matches!(s.key, SessionKey::Implementation { .. })
                             && s.exited
                     });
                     if impl_exited {
@@ -86,7 +86,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
             }
             StepPhase::Completed => {
                 let has_stakeholders = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.role, SessionRole::Stakeholder { .. })
+                    s.step_id == step.id && matches!(s.key, SessionKey::Stakeholder { .. })
                 });
                 if !has_stakeholders {
                     actions.push(Action::SpawnStakeholders {
@@ -100,7 +100,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                     .iter()
                     .filter(|s| {
                         s.step_id == step.id
-                            && matches!(s.role, SessionRole::Stakeholder { .. })
+                            && matches!(s.key, SessionKey::Stakeholder { .. })
                     })
                     .collect();
                 if !stakeholder_sessions.is_empty()

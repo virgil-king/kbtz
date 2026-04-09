@@ -19,7 +19,6 @@ use kbtz_council::orchestrator::Orchestrator;
 use kbtz_council::project::{Project, ProjectDir};
 use kbtz_council::tui::dashboard::render_dashboard;
 use kbtz_council::tui::stream_view::render_stream_view;
-use kbtz_council::tui::View;
 
 #[derive(Parser)]
 #[command(name = "kbtz-council")]
@@ -76,53 +75,40 @@ fn run_loop(
     project_dir: &Arc<Mutex<ProjectDir>>,
 ) -> io::Result<()> {
     loop {
-        // Poll sessions for events and exits
         orch.poll_sessions();
-
-        // Run lifecycle state machine (picks up new steps from MCP tool calls)
         orch.process_tick()?;
 
-        // Render TUI
         terminal.draw(|frame| {
             let area = frame.area();
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(area);
 
-            match orch.app.view {
-                View::Dashboard => {
-                    let chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-                        .split(area);
+            let dir = project_dir.lock().unwrap();
+            let steps = dir.state().steps.clone();
+            drop(dir);
 
-                    let dir = project_dir.lock().unwrap();
-                    let steps = dir.state().steps.clone();
-                    drop(dir);
+            let sessions: Vec<String> = orch
+                .app
+                .session_events
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect();
 
-                    let sessions: Vec<String> = orch
-                        .app
-                        .session_events
-                        .iter()
-                        .map(|(id, _)| id.clone())
-                        .collect();
+            render_dashboard(
+                frame,
+                chunks[0],
+                &steps,
+                &sessions,
+                &orch.app.selected_session,
+            );
 
-                    render_dashboard(
-                        frame,
-                        chunks[0],
-                        &steps,
-                        &sessions,
-                        &orch.app.selected_session,
-                    );
-
-                    let events = orch.app.selected_events();
-                    let session_id = orch.app.selected_session.as_deref().unwrap_or("(none)");
-                    render_stream_view(frame, chunks[1], events, session_id);
-                }
-                View::Leader => {
-                    // Leader PTY rendering handled via raw byte forwarding
-                }
-            }
+            let events = orch.app.selected_events();
+            let session_id = orch.app.selected_session.as_deref().unwrap_or("(none)");
+            render_stream_view(frame, chunks[1], events, session_id);
         })?;
 
-        // Handle keyboard input
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
@@ -144,12 +130,6 @@ fn run_loop(
                                 .unwrap_or(0);
                             orch.app.selected_session = Some(sessions[current_idx].clone());
                         }
-                    }
-                    KeyCode::Char('l') if orch.app.leader_idle => {
-                        orch.app.view = View::Leader;
-                    }
-                    KeyCode::Esc => {
-                        orch.app.view = View::Dashboard;
                     }
                     _ => {}
                 }

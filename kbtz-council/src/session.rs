@@ -1,7 +1,8 @@
 use crate::stream::{parse_stream_line, StreamEvent};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -33,49 +34,119 @@ pub struct AgentSessionId(pub Uuid);
 pub enum SessionMessage {
     Event(StreamEvent),
     RawLine(String),
-    Exited { code: Option<i32> },
 }
 
+/// An item waiting in a session's queue.
 #[derive(Debug, Clone)]
-pub enum SessionRole {
-    Implementation,
-    Stakeholder { name: String },
-    LeaderDecision,
+pub struct QueueItem {
+    pub prompt: String,
+    pub step_id: Option<String>,
+    pub working_dir: PathBuf,
+    pub mcp_config: Option<PathBuf>,
 }
 
-/// A running headless Claude Code session.
-pub struct HeadlessSession {
+/// A managed session: queue of pending invocations + optional running process.
+pub struct ManagedSession {
     pub key: SessionKey,
     pub agent_session_id: AgentSessionId,
-    pub step_id: String,
-    pub role: SessionRole,
+    pub queue: VecDeque<QueueItem>,
+    pub active: Option<ActiveSession>,
+    invocation_count: u64,
+}
+
+/// A currently running `claude -p` process.
+pub struct ActiveSession {
+    pub step_id: Option<String>,
     child: Child,
     pub rx: mpsc::Receiver<SessionMessage>,
 }
 
-impl HeadlessSession {
-    /// Spawn a `claude -p` session. If `agent_session_id` is provided, resumes that
-    /// session with `--resume`. Otherwise generates a new UUID and passes
-    /// `--session-id`.
-    pub fn spawn(
-        step_id: &str,
-        role: SessionRole,
+impl ManagedSession {
+    pub fn new(key: SessionKey) -> Self {
+        Self {
+            key,
+            agent_session_id: AgentSessionId(Uuid::new_v4()),
+            queue: VecDeque::new(),
+            active: None,
+            invocation_count: 0,
+        }
+    }
+
+    pub fn with_agent_session_id(key: SessionKey, id: AgentSessionId, invocation_count: u64) -> Self {
+        Self {
+            key,
+            agent_session_id: id,
+            queue: VecDeque::new(),
+            active: None,
+            invocation_count,
+        }
+    }
+
+    /// Push an item onto the queue.
+    pub fn enqueue(&mut self, item: QueueItem) {
+        self.queue.push_back(item);
+    }
+
+    /// If idle and queue is non-empty, pop and spawn.
+    pub fn try_dispatch(&mut self) -> io::Result<bool> {
+        if self.active.is_some() || self.queue.is_empty() {
+            return Ok(false);
+        }
+        let item = self.queue.pop_front().unwrap();
+        let resume = self.invocation_count > 0;
+        let mut active = ActiveSession::spawn(
+            &self.agent_session_id,
+            resume,
+            &item.prompt,
+            &item.working_dir,
+            item.mcp_config.as_deref(),
+        )?;
+        active.step_id = item.step_id;
+        self.invocation_count += 1;
+        self.active = Some(active);
+        Ok(true)
+    }
+
+    /// Check if the active process has exited. Returns true if it exited.
+    pub fn poll_exit(&mut self) -> io::Result<bool> {
+        if let Some(ref mut active) = self.active {
+            if let Some(_code) = active.try_wait()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Remove the active process after it exits.
+    pub fn reap(&mut self) -> Option<ActiveSession> {
+        self.active.take()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.active.is_none() && self.queue.is_empty()
+    }
+
+    /// Kill the active process.
+    pub fn kill(&mut self) -> io::Result<()> {
+        if let Some(ref mut active) = self.active {
+            active.kill()?;
+        }
+        Ok(())
+    }
+}
+
+impl ActiveSession {
+    fn spawn(
+        agent_session_id: &AgentSessionId,
+        resume: bool,
         prompt: &str,
         working_dir: &Path,
-        agent_session_id: Option<AgentSessionId>,
         mcp_config: Option<&Path>,
     ) -> io::Result<Self> {
-        let key = match &role {
-            SessionRole::Implementation => SessionKey::Implementation { step_id: step_id.to_string() },
-            SessionRole::Stakeholder { name } => SessionKey::Stakeholder { name: name.clone() },
-            SessionRole::LeaderDecision => SessionKey::Leader,
-        };
-
-        let (agent_session_id, resume) = match agent_session_id {
-            Some(id) => (id, true),
-            None => (AgentSessionId(Uuid::new_v4()), false),
-        };
-
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
             .arg(prompt)
@@ -120,16 +191,12 @@ impl HeadlessSession {
         });
 
         Ok(Self {
-            key,
-            agent_session_id,
-            step_id: step_id.to_string(),
-            role,
+            step_id: None,
             child,
             rx,
         })
     }
 
-    /// Check if the process has exited. Returns exit code if done.
     pub fn try_wait(&mut self) -> io::Result<Option<i32>> {
         match self.child.try_wait()? {
             Some(status) => Ok(Some(status.code().unwrap_or(-1))),
@@ -137,8 +204,7 @@ impl HeadlessSession {
         }
     }
 
-    /// Kill the process.
-    pub fn kill(&mut self) -> io::Result<()> {
+    fn kill(&mut self) -> io::Result<()> {
         self.child.kill()
     }
 }
