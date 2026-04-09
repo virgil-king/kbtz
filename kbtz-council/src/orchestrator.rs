@@ -177,6 +177,7 @@ impl Orchestrator {
                             dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
                         {
                             job.summary = Some(summary);
+                            job.phase = crate::job::JobPhase::Completed;
                         }
                         let _ = dir.persist();
                     }
