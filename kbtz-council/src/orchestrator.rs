@@ -5,6 +5,8 @@ use crate::prompt;
 use crate::session::{ManagedSession, QueueItem, SessionKey, SessionMessage};
 use crate::step::StepPhase;
 use crate::stream::StreamEvent;
+#[allow(unused_imports)]
+use crate::session::AgentSessionId;
 use crate::tui::AppState;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -48,6 +50,10 @@ impl Orchestrator {
 
     /// Enqueue a user message for any session.
     pub fn send_message(&mut self, key: &SessionKey, message: String) {
+        // Show user message in the stream view
+        self.app
+            .push_event(&key.to_string(), StreamEvent::UserMessage(message.clone()));
+
         let working_dir = {
             let dir = self.project_dir.lock().unwrap();
             dir.root().to_path_buf()

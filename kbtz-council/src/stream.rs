@@ -2,6 +2,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    UserMessage(String),
     AssistantText(String),
     Thinking(String),
     ToolUse { name: String, input: String },

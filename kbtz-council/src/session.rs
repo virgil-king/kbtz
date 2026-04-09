@@ -157,7 +157,7 @@ impl ActiveSession {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--permission-mode")
-            .arg("auto")
+            .arg("bypassPermissions")
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

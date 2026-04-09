@@ -15,6 +15,14 @@ pub fn render_stream_view(
     let mut lines: Vec<Line> = events
         .iter()
         .flat_map(|event| match event {
+            StreamEvent::UserMessage(text) => vec![
+                Line::from(Span::styled(
+                    format!("▶ {}", text),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            ],
             StreamEvent::Thinking(text) => vec![Line::from(Span::styled(
                 format!("[thinking] {}", truncate(text, 200)),
                 Style::default()
