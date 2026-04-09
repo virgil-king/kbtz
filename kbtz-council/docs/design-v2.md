@@ -36,16 +36,16 @@ per (job, stakeholder name). Run in parallel.
 ~/.kbtz-council/
   config.toml                  # Global config
   index.json                   # Project registry
+  pool/                        # Global shallow clone pool (shared across projects)
+    <repo-name>/
   concierge/                   # Concierge session state
     session_id.json
   projects/
     <project-name>/            # Active project
       project.md               # Leader-authored project definition
-      state.json               # Current state (jobs, phases, session IDs)
+      state.json               # Current state (jobs, artifacts, session IDs)
       notes.md                 # User notes (append-only, editable)
       .mcp.json                # MCP config for this project's leader
-      pool/                    # Shallow clone pool (one per repo, branches fetched on demand)
-        <repo-name>/
       repos/                   # Leader's repo copies (cloned from pool on first merge)
         <repo-name>/
       sessions/                # Implementation session working directories
@@ -53,7 +53,7 @@ per (job, stakeholder name). Run in parallel.
       traces/                  # Stream-json logs per session
         leader.jsonl
         <job-id>-impl.jsonl
-        <job-id>-<stakeholder>.jsonl
+        <art-id>-<stakeholder>.jsonl
       hooks/
         start.sh               # Runs on project create/resume
         stop.sh                # Runs on project archive/pause
@@ -83,74 +83,126 @@ Scripts in `hooks/` run at lifecycle boundaries:
 
 The orchestrator runs these deterministically, not agents.
 
-## Job Model
+## Project Status
 
-A job is a unit of reviewed work. Every change goes through stakeholder
-review, whether made by a leader or an implementation agent.
+Three states: **active**, **paused**, **archived**.
 
-### Two creation paths
+- **active** — sessions run, lifecycle ticks, user can interact.
+- **paused** — no sessions run, state preserved. Resume runs start hooks.
+- **archived** — moved to `archive/`, read-only. Can be resumed (moves back
+  to `projects/`, runs start hooks).
+
+The concierge or the project leader can trigger transitions via MCP tools.
+The user can also pause/archive from the TUI.
+
+## Jobs and Artifacts
+
+A **job** is a durable container for a unit of work that goes through
+the review pipeline. Jobs persist across rework cycles. Each cycle
+produces an **artifact** — a snapshot of changes submitted for review.
+
+### Two ways to create jobs
 
 **`dispatch_job(prompt, repos)`** — leader delegates to an implementation
-agent. Job starts at `Dispatched`, agent runs, then stakeholders review.
+agent. Creates a job with `implementor: "agent"`. The agent runs, and
+on completion the orchestrator creates an artifact automatically.
 
-**`request_review(summary)`** — leader did the work directly. Job starts
-at `Completed` (skips implementation), goes straight to stakeholder review.
+**`create_artifact(description)`** — leader did the work directly.
+Creates a job with `implementor: "leader"` and an artifact immediately.
+Skips the implementation phase.
 
-Both create the same Job struct with the same cycle-based history.
-
-### Job Phases
+### Lifecycle
 
 ```
-dispatch_job:    Dispatched → Running → Completed → Reviewing → Reviewed → Merged
-request_review:  Completed → Reviewing → Reviewed → Merged
-                                                  ↘ Rework → Running → Completed → ...
+dispatch_job:     Job created → Dispatched → Running → Artifact → Reviewing → Reviewed
+create_artifact:  Job created → Artifact → Reviewing → Reviewed
+                                                                ↘ Rework (new artifact) → ...
 ```
 
-### Cycle-Based History
+On rework, the job stays the same. A new artifact is created for the
+new attempt. The agent (or leader) is resumed with rework feedback.
 
-Each job records its full trajectory as a list of review cycles:
+### Data Model
+
+**Job** — durable identity across revisions. References its artifacts
+in order.
 
 ```json
 {
   "id": "job-001",
   "dispatch": { "prompt": "...", "repos": [...] },
   "implementor": "agent",
-  "impl_agent_id": "uuid-1",
+  "agent_id": "uuid-1",
   "phase": "merged",
-  "cycles": [
-    {
-      "ts": "2026-04-09T01:30:00Z",
-      "summary": "Created README with architecture section...",
-      "feedback": [
-        {
-          "stakeholder": "security",
-          "agent_id": "uuid-2",
-          "content": "No credentials found. Two accuracy issues..."
-        }
-      ],
-      "decision": { "rework": { "feedback": "Fix the lifecycle table..." } }
-    },
-    {
-      "ts": "2026-04-09T01:45:00Z",
-      "summary": "Fixed lifecycle table, added rework row...",
-      "feedback": [
-        {
-          "stakeholder": "security",
-          "agent_id": "uuid-3",
-          "content": "Looks clean, no issues."
-        }
-      ],
-      "decision": "merge"
-    }
-  ]
+  "artifacts": ["art-001", "art-002"]
 }
 ```
 
-For `request_review` jobs, `implementor` is `"leader"` and
-`impl_agent_id` is the leader's UUID. The cycles work identically.
+**Artifact** — immutable snapshot of one revision. Has the implementation
+summary, commits, stakeholder feedback, and the leader's decision. One
+artifact per review round. Rework creates a new artifact on the same job.
+
+```json
+{
+  "id": "art-001",
+  "job_id": "job-001",
+  "ts": "2026-04-09T01:30:00Z",
+  "summary": "Created README with architecture section...",
+  "commits": ["81b28b2", "ca06ce2"],
+  "feedback": [
+    {
+      "stakeholder": "security",
+      "agent_id": "uuid-2",
+      "content": "No credentials found. Two accuracy issues..."
+    }
+  ],
+  "decision": { "rework": { "feedback": "Fix the lifecycle table..." } }
+}
+
+{
+  "id": "art-002",
+  "job_id": "job-001",
+  "ts": "2026-04-09T01:45:00Z",
+  "summary": "Fixed lifecycle table, added rework row...",
+  "commits": ["ca06ce2"],
+  "feedback": [
+    {
+      "stakeholder": "security",
+      "agent_id": "uuid-3",
+      "content": "Looks clean, no issues."
+    }
+  ],
+  "decision": "merge"
+}
+```
+
+For leader-created jobs, `implementor` is `"leader"` and `agent_id` is
+the leader's session UUID.
 
 Every agent involved has its UUID, so its full trace can be found in
-`traces/`. The connections between sessions are captured structurally.
+`traces/`. The revision history is the ordered artifact list on the job.
+Each artifact has feedback entries with stakeholder agent UUIDs linking
+to trace files.
+
+### Future: feedback discussion
+
+Currently one-shot: stakeholders produce feedback, leader decides. A
+future enhancement could allow the leader to reply to stakeholder
+feedback for clarification before deciding, turning feedback into a
+thread. Not in v2 scope.
+
+### Leader MCP Tools (updated)
+
+- `define_project(repos, stakeholders, goal_summary)` — register repos
+  and stakeholder personas.
+- `dispatch_job(prompt, repos)` — delegate work to an implementation
+  agent. Creates a job and starts the implementation phase.
+- `create_artifact(description, job_id?)` — leader did the work, submit
+  for review. If `job_id` is provided, this is a revision of that job.
+  If null, a new job is created implicitly.
+- `rework_job(job_id, feedback)` — send the latest artifact back for
+  changes. A new artifact will be created on the next completion.
+- `close_job(job_id)` — mark job as merged, clean up.
 
 ## Concierge MCP Tools
 
@@ -167,19 +219,6 @@ The concierge decides project scope based on the user's request. Simple
 requests get quick projects (leader works directly). Complex requests get
 full projects (leader delegates).
 
-## Leader MCP Tools (per project)
-
-Each project has its own MCP server on a separate port:
-
-- `define_project(repos, stakeholders, goal_summary)` — register repos
-  and stakeholder personas.
-- `dispatch_job(prompt, repos)` — delegate work to an implementation agent.
-  repos is `[{name, branch}]`.
-- `request_review(summary)` — leader did the work, trigger stakeholder
-  review. Creates a job at `Completed` phase.
-- `rework_job(job_id, feedback)` — send a reviewed job back for changes.
-- `close_job(job_id)` — mark job as merged, clean up session directory.
-
 ## Session Queues
 
 Every session (concierge, leaders, implementation agents, stakeholders)
@@ -188,11 +227,12 @@ with `claude -p --resume`. User messages from the TUI go into the queue.
 
 ## Clone Pool
 
-Per-project pool in `pool/<repo>/`. Shallow clones with branches fetched
-on demand. Session directories clone from the pool (local, fast).
+Global pool at `~/.kbtz-council/pool/<repo>/`. Shallow clones with
+branches fetched on demand. Shared across all projects — no duplication.
+Session directories clone from the pool (local, fast).
 
-Multiple jobs can use the same repo concurrently — each gets its own
-session dir clone from the shared pool.
+Multiple jobs across multiple projects can use the same repo concurrently
+— each gets its own session dir clone from the shared pool.
 
 ## Multi-Project Orchestration
 
