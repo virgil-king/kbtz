@@ -140,11 +140,11 @@ fn run_loop(
                         KeyCode::Enter => {
                             orch.app.input_mode = InputMode::Editing;
                         }
-                        KeyCode::Tab => {
+                        KeyCode::Tab | KeyCode::Down => {
                             let keys: Vec<String> = collect_session_infos(orch)
-                            .iter()
-                            .map(|i| i.name.clone())
-                            .collect();
+                                .iter()
+                                .map(|i| i.name.clone())
+                                .collect();
                             if !keys.is_empty() {
                                 let idx = orch
                                     .app
@@ -153,6 +153,22 @@ fn run_loop(
                                     .and_then(|s| keys.iter().position(|k| k == s))
                                     .map(|i| (i + 1) % keys.len())
                                     .unwrap_or(0);
+                                orch.app.selected_session = Some(keys[idx].clone());
+                            }
+                        }
+                        KeyCode::Up => {
+                            let keys: Vec<String> = collect_session_infos(orch)
+                                .iter()
+                                .map(|i| i.name.clone())
+                                .collect();
+                            if !keys.is_empty() {
+                                let idx = orch
+                                    .app
+                                    .selected_session
+                                    .as_ref()
+                                    .and_then(|s| keys.iter().position(|k| k == s))
+                                    .map(|i| if i == 0 { keys.len() - 1 } else { i - 1 })
+                                    .unwrap_or(keys.len() - 1);
                                 orch.app.selected_session = Some(keys[idx].clone());
                             }
                         }
