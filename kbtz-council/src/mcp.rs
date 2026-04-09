@@ -234,25 +234,56 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     thread::spawn(move || {
+        let json_header: tiny_http::Header = "Content-Type: application/json"
+            .parse()
+            .unwrap();
+
         for mut request in server.incoming_requests() {
-            // Only accept POST
-            if request.method() != &tiny_http::Method::Post {
-                let resp = tiny_http::Response::from_string("Method not allowed")
+            // Handle GET (health check / SSE endpoint discovery)
+            if request.method() == &tiny_http::Method::Get {
+                let resp = tiny_http::Response::from_string("")
                     .with_status_code(405);
                 let _ = request.respond(resp);
                 continue;
             }
 
-            // Read body
-            let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                let resp =
-                    tiny_http::Response::from_string("Bad request").with_status_code(400);
+            // Handle DELETE (session termination)
+            if request.method() == &tiny_http::Method::Delete {
+                let resp = tiny_http::Response::from_string("")
+                    .with_status_code(202);
                 let _ = request.respond(resp);
                 continue;
             }
 
-            let rpc: JsonRpcRequest = match serde_json::from_str(&body) {
+            // POST: read JSON-RPC body
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                let resp = tiny_http::Response::from_string("Bad request")
+                    .with_status_code(400);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            // Parse as JSON — check if it's a notification (no "id" field)
+            let parsed: Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp = tiny_http::Response::from_string("Invalid JSON")
+                        .with_status_code(400);
+                    let _ = request.respond(resp);
+                    continue;
+                }
+            };
+
+            // Notifications have no "id" — respond with 202
+            if parsed.get("id").is_none() || parsed["id"].is_null() {
+                let resp = tiny_http::Response::from_string("")
+                    .with_status_code(202);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            let rpc: JsonRpcRequest = match serde_json::from_value(parsed) {
                 Ok(r) => r,
                 Err(_) => {
                     let resp = tiny_http::Response::from_string("Invalid JSON-RPC")
@@ -292,11 +323,7 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
             };
 
             let resp = tiny_http::Response::from_string(&response_body)
-                .with_header(
-                    "Content-Type: application/json"
-                        .parse::<tiny_http::Header>()
-                        .unwrap(),
-                );
+                .with_header(json_header.clone());
             let _ = request.respond(resp);
         }
     });
@@ -304,17 +331,13 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
     Ok(port)
 }
 
-/// Write an .mcp.json config file using stdio transport.
-/// The orchestrator binary is invoked as an MCP server subprocess.
-pub fn write_mcp_config(
-    project_dir: &Path,
-    orchestrator_binary: &str,
-) -> io::Result<std::path::PathBuf> {
+/// Write an .mcp.json config file pointing at the running HTTP MCP server.
+pub fn write_mcp_config(project_dir: &Path, port: u16) -> io::Result<std::path::PathBuf> {
     let config = serde_json::json!({
         "mcpServers": {
             "council": {
-                "command": orchestrator_binary,
-                "args": ["--mcp-stdio", "--project", project_dir.to_str().unwrap()]
+                "type": "http",
+                "url": format!("http://127.0.0.1:{}/mcp", port)
             }
         }
     });

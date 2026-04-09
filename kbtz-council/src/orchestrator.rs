@@ -203,11 +203,6 @@ impl Orchestrator {
 
     /// Process lifecycle tick — translate actions into session queue items.
     pub fn process_tick(&mut self) -> io::Result<()> {
-        // Reload state from disk (MCP subprocess may have modified it)
-        {
-            let mut dir = self.project_dir.lock().unwrap();
-            let _ = dir.reload();
-        }
         let world = self.build_world();
         let actions = lifecycle::tick(&world);
 

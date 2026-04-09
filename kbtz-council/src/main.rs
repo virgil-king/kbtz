@@ -30,18 +30,10 @@ struct Cli {
     /// Path to the project directory. Created if it doesn't exist.
     #[arg(short, long)]
     project: PathBuf,
-
-    /// Run as MCP stdio server (spawned by claude as a subprocess).
-    #[arg(long)]
-    mcp_stdio: bool,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-
-    if cli.mcp_stdio {
-        return mcp::run_mcp_stdio(&cli.project);
-    }
 
     let project_dir = if cli.project.join("state.json").exists() {
         ProjectDir::load(&cli.project)?
@@ -56,12 +48,8 @@ fn main() -> io::Result<()> {
 
     let project_dir = Arc::new(Mutex::new(project_dir));
 
-    // Get our own binary path for the MCP config
-    let self_binary = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("kbtz-council"))
-        .to_string_lossy()
-        .to_string();
-    let mcp_config_path = mcp::write_mcp_config(&cli.project, &self_binary)?;
+    let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
+    let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
 
     let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
     orchestrator.app.selected_session = Some("leader".to_string());
