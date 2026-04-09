@@ -524,19 +524,22 @@ used by or connected to kbtz-council.
 ## PTY vs Headless (design decision)
 
 kbtz-workspace uses full PTY sessions with passthrough mode, VTE
-scrollback, and raw byte forwarding. kbtz-council intentionally drops
-this in favor of headless sessions with stream-json rendering.
+scrollback, and raw byte forwarding. kbtz-council uses headless sessions
+(`claude -p`) with stream-json rendering for all orchestrated sessions.
 
-Rationale:
-- PTY passthrough is complex (scroll mode, alt screen, VTE sync) and
-  was the main source of bugs in kbtz-workspace
-- Stream-json rendering provides sufficient visibility for monitoring
-- The chat-like input model (user types messages, agent responds) works
-  well with headless sessions
-- All session transcripts are preserved in trace files for full replay
+Rationale: interactive PTY sessions do not meet two core requirements:
 
-The tradeoff is that users cannot type directly into an agent's terminal.
-Instead, they send messages through the session queue. This is
-intentional — it prevents the "agent stopped and won't continue" problem
-that PTY sessions had, since every invocation is `claude -p` and
-guaranteed to terminate.
+1. **Mandatory invocation output.** Every session invocation must produce
+   output and terminate. Interactive sessions can stop and wait for user
+   input that never comes. `claude -p` guarantees termination.
+
+2. **Inter-session messaging.** The orchestrator needs to inject messages
+   into sessions (feedback, rework instructions, state snapshots). PTY
+   sessions have no structured input mechanism — only raw bytes. The
+   queue model (`claude -p --resume` with a prompt) provides reliable
+   structured message delivery.
+
+PTY passthrough is a solved problem (kbtz-workspace has it working) and
+may be used for the concierge session in a future enhancement where
+direct interactive control is valuable. But orchestrated sessions
+(leaders, implementation agents, stakeholders) must be headless.
