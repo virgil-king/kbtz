@@ -2,7 +2,7 @@
 
 A standalone tool for leader-driven AI agent orchestration with structured
 feedback loops. The orchestrator manages a project lifecycle where a leader
-agent autonomously decomposes a goal into implementation steps, dispatches
+agent autonomously decomposes a goal into implementation jobs, dispatches
 them to implementation agents, collects structured feedback from stakeholder
 agents, and merges results.
 
@@ -11,9 +11,10 @@ agents, and merges results.
 Four components:
 
 **Orchestrator** -- a persistent Rust binary. Owns all deterministic
-lifecycle operations: clone management, session spawning/reaping, commit
-extraction, cleanup, state management. Exposes an MCP server for the leader.
-Provides a TUI dashboard for observability and interactive leader access.
+lifecycle operations: clone pool management, session spawning/reaping,
+commit extraction, cleanup, state management. Exposes an MCP server
+(HTTP, in-process) for the leader. Provides a TUI dashboard for
+observability and a chat-like input for interacting with sessions.
 
 **Leader** -- always a headless Claude Code session (`claude -p --resume`).
 Every invocation is `claude -p --resume <uuid>`, guaranteed to terminate.
@@ -26,51 +27,65 @@ user messages, creating a chat-like experience without PTY embedding.
 The leader uses MCP tools provided by the orchestrator's HTTP server.
 
 **Stakeholders** -- headless Claude Code sessions (`claude -p`). Each has a
-persona (security reviewer, API design reviewer, etc.) defined during project
-setup. Invoked in parallel when a step completes. Receive read-only access to
-the implementation session directory (including clone commit history) and the
-leader's repos for broader codebase context. Produce structured feedback and
-exit.
+persona (security reviewer, docs reviewer, etc.) defined during project
+setup. Invoked in parallel when a job completes. Stakeholder sessions are
+scoped per job -- each (job, stakeholder) pair is an independent session.
+This allows parallel review of multiple jobs without serialization or
+wrong attribution. Produce structured feedback and exit.
 
 **Implementation agents** -- headless Claude Code sessions (`claude -p`).
-Each gets a private sandboxed directory containing shallow clones of relevant
-repos plus any leader-provided files. Do the work, commit, produce a summary,
-exit. Can be resumed with `claude -p --resume` for rework iterations.
+Each gets a session directory with clones from the pool. Do the work,
+commit, produce a summary, exit. Can be resumed with `claude -p --resume`
+for rework iterations.
 
 ## Principles
 
-- The orchestrator is the event loop. It decides when to start sessions, what
-  to pass them, and what to do with results. Agents are functions: prompt in,
-  commits + text out.
-- All sessions use `claude -p` (except interactive leader). This guarantees
-  sessions produce output and terminate. No agent can stop and wait for input
-  it won't receive.
-- The leader is fully autonomous. It decomposes goals, dispatches steps,
-  incorporates feedback, merges results, and dispatches follow-up steps
-  without waiting for human input. The user can drop into the interactive TUI
-  at any time to provide guidance, but the leader does not block on it.
+- The orchestrator is the event loop. It decides when to start sessions,
+  what to pass them, and what to do with results.
+- All sessions use `claude -p`, guaranteed to produce output and terminate.
+  No agent can stop and wait for input it won't receive.
+- The leader is fully autonomous. It decomposes goals, dispatches jobs,
+  incorporates feedback, merges results, and dispatches follow-up jobs
+  without waiting for human input. The user can send messages via the TUI
+  to provide guidance.
 - Important lifecycle events (clone setup, session spawning/reaping, commit
-  extraction, cleanup) are handled deterministically by the orchestrator, not
-  by agents.
+  extraction, cleanup) are handled deterministically by the orchestrator,
+  not by agents.
 - Full system state is provided to the leader at every invocation to prevent
-  context rot. The leader never has to guess or remember what's going on.
-- The user can kill and re-prompt any session via the TUI. The orchestrator
-  does not auto-intervene.
+  context rot.
+- The user can kill and re-prompt any session via the TUI.
 - Backend abstraction: default to Claude Code, don't preclude Agent SDK.
+
+## Lifecycle Architecture
+
+The orchestrator loop has three phases per tick:
+
+1. **poll_sessions** -- I/O only. Drains stream-json events from active
+   sessions. Detects process exits (marks sessions as exited but does NOT
+   reap them). Extracts results (summaries, feedback, commits) from newly
+   exited sessions. Does NOT transition job phases.
+
+2. **process_tick** -- Pure decisions. Builds a WorldSnapshot including
+   exited-but-not-reaped sessions. Calls `lifecycle::tick()` which returns
+   actions: SpawnImplementation, SpawnStakeholders, InvokeLeader,
+   TransitionJob. The orchestrator executes these actions.
+
+3. **reap_and_dispatch** -- Cleanup. Removes exited sessions from the map.
+   Dispatches queued items for idle sessions.
+
+This separation ensures the lifecycle state machine sees all session exits
+before they are cleaned up, preventing the bug where reaped sessions become
+invisible to the decision logic.
 
 ## Project Definition
 
 No upfront configuration file. The user starts the orchestrator, which
-launches an interactive leader session. The user chats with the leader to
-define:
-- Project goal
-- Repos involved (multiple repos supported)
-- Stakeholder personas and their concerns
+shows a TUI with the leader session selected. The user types a message
+describing the project. The leader calls `define_project` via MCP to
+register repos and stakeholders, then dispatches jobs.
 
 The leader persists the project definition to `project.md` in the project
-directory. This file is the durable source of truth -- it survives context
-compression and session restarts. The leader reads it at every invocation and
-updates it as the project evolves. The orchestrator never modifies this file.
+directory.
 
 ## Data Model
 
@@ -80,250 +95,136 @@ All state lives in a project directory:
 project/
   project.md              # Project definition (leader-authored)
   state.json              # Orchestrator state (orchestrator-owned)
-  repos/                  # Leader's copies of declared repos
-    repo-a/
-    repo-b/
-  steps/
-    step-001/
-      dispatch.json       # Step spec from leader
-      summary.md          # Implementation agent's completion summary
+  .mcp.json               # MCP config pointing at orchestrator HTTP server
+  mcp-port                # Port number for the MCP server
+  pool/                   # Clone pool (one shallow clone per repo)
+    kbtz/                 # Shallow clone, branches fetched on demand
+  repos/                  # Leader's copies (cloned from pool on first merge)
+    kbtz/
+  steps/                  # Per-job metadata
+    job-001/
+      dispatch.json
       feedback/
-        security.json     # One file per stakeholder persona
-        api-design.json
-      decision.json       # Leader's merge/rework/close decision
-    step-002/
-      ...
-  sessions/
-    step-001-impl/        # Implementation session private dir (sandbox)
-      repo-a/             # Shallow clone
-      repo-b/             # Shallow clone
-      files/              # Leader-provided files
-    step-001-security/    # Stakeholder working dir (if needed)
-    ...
-  claude-sessions/        # Claude Code session IDs for --resume
-    leader.json
-    step-001-impl.json
-    ...
+  sessions/               # Implementation session working directories
+    job-001-impl/
+      kbtz/               # Clone from pool for this job
+      files/
+  traces/                 # Stream-json logs per session
+    leader.jsonl
+    job-001-impl.jsonl
+    job-001-security.jsonl
 ```
 
-### Step States
+### Job Phases
 
-1. **dispatched** -- leader produced dispatch.json, orchestrator is setting
-   up clones and launching the implementation session.
+1. **dispatched** -- leader produced dispatch, orchestrator setting up.
 2. **running** -- implementation session active.
-3. **completed** -- implementation session exited. Commits and summary
-   extracted.
+3. **completed** -- implementation session exited. Summary extracted.
 4. **reviewing** -- stakeholder sessions running in parallel.
-5. **reviewed** -- all stakeholder feedback collected. Orchestrator has
-   fetched commits into leader's repos as a branch. Leader invoked.
-6. **merged** -- leader merged the branch and called `close_step`.
-   Orchestrator cleans up the session directory.
-7. **rework** -- leader called `rework_step`. Orchestrator resumes the
-   implementation session with feedback.
-
-Unacted-on steps (leader never closes or reworks) surface as "pending leader
-action" in future state snapshots.
+5. **reviewed** -- all stakeholder feedback collected. Leader invoked.
+6. **merged** -- leader merged and called close_job.
+7. **rework** -- leader called rework_job. New implementation session
+   spawns with rework feedback as the prompt.
 
 ## Communication Protocol
 
-### Leader -> Orchestrator (MCP tools)
+### Leader -> Orchestrator (MCP tools via HTTP)
 
-The orchestrator runs an MCP server that the leader's Claude Code session
-connects to. Four tools:
+The orchestrator runs an in-process HTTP MCP server (Streamable HTTP
+protocol via tiny_http). Four tools:
 
 **`define_project(repos, stakeholders, goal_summary)`**
-Registers repos and stakeholder personas. Orchestrator clones repos into
-`project/repos/`.
+Registers repos and stakeholder personas. Does not clone repos (cloning
+is deferred to job dispatch via the pool).
 
-**`dispatch_step(prompt, repos, files)`**
-Leader describes a step. Orchestrator assigns a step ID, writes
-`dispatch.json`, creates a session directory with shallow clones of the
-specified repos, copies provided files, and launches an implementation
-session.
+**`dispatch_job(prompt, repos, files)`**
+Leader describes a job. repos is an array of `{name, branch}` objects.
+Orchestrator assigns a job ID, ensures pool clones have the needed
+branches, creates session directory with clones from pool, launches
+implementation session.
 
-The dispatch is structured:
-- Step ID (assigned by orchestrator, used for tracking and resumption)
-- Session prompt (what the implementation agent should do)
-- Repos to clone (subset of project repos relevant to this step)
-- Files to provide (specs, context docs, design notes)
+**`rework_job(job_id, feedback)`**
+Leader rejects the implementation. Orchestrator spawns a new
+implementation session with the rework feedback as the prompt (combined
+with the original task description).
 
-**`rework_step(step_id, feedback)`**
-Leader rejects the implementation. Orchestrator resumes the implementation
-session with `claude -p --resume`, passing the feedback as the new prompt.
-
-**`close_step(step_id)`**
-Leader is done with this step (merged or abandoned). Orchestrator deletes the
-session directory and marks the step as finished.
+**`close_job(job_id)`**
+Leader is done with this job. Orchestrator cleans up session directory.
 
 ### Orchestrator -> Leader
 
-When all stakeholder feedback for a step is collected:
-
-1. Fetch commits from implementation clone(s) into the corresponding leader
-   repos as a branch (e.g., `step-001`).
-2. Assemble full state snapshot: `project.md` contents, all step statuses,
-   pending feedback, any stale/stuck sessions.
-3. Invoke leader with `claude -p --resume <leader-session-id>`, passing the
-   state snapshot + collected feedback as the prompt.
-4. Stream JSON output for observability.
-5. Parse the leader's MCP tool calls as decisions.
-
-The leader then:
-- Reviews feedback and forms its own judgment.
-- Merges the branch in its repos (git merge/cherry-pick, resolves conflicts).
-- Calls `close_step` for finished steps.
-- Calls `rework_step` for steps that need changes.
-- Calls `dispatch_step` for new follow-up steps.
+When all stakeholder feedback for a job is collected, the orchestrator
+enqueues a leader invocation with: full state snapshot (including
+project.md), all job statuses, and stakeholder feedback.
 
 ### Orchestrator -> Implementation Agents
 
-`claude -p` with:
-- Working directory set to the session directory.
-- Step prompt as the message.
-- `--output-format stream-json` for observability.
-
-The agent sees its session directory as its entire world. Clones are in the
-directory (or subdirectories for multi-repo steps). Leader-provided files are
-in `files/`. No paths communicated in the prompt -- the agent just explores
-its working directory.
+`claude -p` with implementation prompt, working directory set to the
+session directory containing repo clones.
 
 ### Orchestrator -> Stakeholders
 
-`claude -p` with:
-- Persona prompt (role, concerns, review criteria).
-- Read-only access to the implementation session directory (clone with commit
-  history) and the leader's repos (broader codebase context).
-- Step context (dispatch prompt, implementation summary).
-- `--output-format stream-json` for observability.
+`claude -p` per stakeholder, scoped per job. Each stakeholder session is
+independent -- parallel review of multiple jobs works correctly.
 
-All stakeholders for a step run in parallel. Each produces structured
-feedback and exits.
-
-## Review Flow
-
-When an implementation session completes:
-
-1. Orchestrator extracts commits and summary from the clone(s).
-2. Orchestrator fetches commits into the leader's repos as a named branch.
-3. Orchestrator launches all stakeholder sessions in parallel. Each gets
-   read-only access to the implementation session directory and the leader's
-   repos.
-4. Orchestrator waits for all stakeholders to exit and collects feedback.
-5. Orchestrator invokes the leader (headless) with: full state snapshot,
-   implementation summary, all stakeholder feedback, and the branch name(s)
-   to review.
-6. Leader reviews everything, merges/cherry-picks the branch, and calls
-   `close_step`, `rework_step`, or `dispatch_step` as appropriate.
-
-## Git Model
-
-### Leader's Repos
-
-The leader has full copies of all declared repos in `project/repos/`. These
-are the source of truth for the project. The leader merges implementation
-results into these repos directly. The leader can push to remotes when
-appropriate (e.g., at project milestones).
-
-### Implementation Clones
-
-Each implementation session gets fresh shallow clones in its private
-directory. Clones are created at dispatch time by cloning from the leader's
-repos (ensuring the implementation agent starts from the latest merged state).
-
-For multi-repo steps, the session directory contains one subdirectory per
-repo.
-
-After the implementation session exits, the orchestrator fetches commits from
-the clone(s) into the corresponding leader repos as named branches
-(e.g., `step-001` or `step-001/repo-a`). The leader merges these branches.
-
-After `close_step`, the orchestrator deletes the entire session directory.
-
-### Isolation
-
-Implementation sessions are fully sandboxed to their session directory. They
-cannot read or write outside it. This prevents implementation agents from
-modifying the leader's repos, other sessions' work, or project state.
-
-Stakeholder sessions have read-only access to the implementation session
-directory and the leader's repos. They produce feedback but don't modify
-anything.
-
-## TUI
-
-The orchestrator provides a terminal UI with two main areas: a dashboard
-panel and a session panel.
-
-### Dashboard Panel
-
-- Project state: goal, repos, stakeholder personas.
-- Step list with current phase (dispatched/running/completed/reviewing/
-  reviewed/merged/rework).
-- Active session list with status (running/queued/idle).
-- Controls: select session to watch, kill + re-prompt a session, send
-  message to leader.
-
-### Session Panel
-
-The session panel shows the formatted stream-json output of the selected
-session: thinking, tool calls, and results. The user can switch between
-sessions to observe different agents.
-
-For the leader, the session panel also includes a text input field at the
-bottom. User messages are added to the leader's event queue.
-
-### Session Queues
+## Session Queues
 
 Every session has a FIFO queue of invocations. When a session finishes
 one invocation, the orchestrator pops the next item and invokes
 `claude -p --resume` again. A session is either running (processing an
 item) or idle (queue empty).
 
-Leader queue items: user messages, feedback-ready notifications, any
-orchestrator event requiring a decision.
+Leader queue items: user messages, feedback-ready notifications.
+Stakeholder queue items: job reviews.
+Implementation queue items: initial dispatch, rework feedback.
 
-Stakeholder queue items: step reviews. When multiple steps complete
-simultaneously, each review is queued and processed in order.
+## Clone Pool
 
-Implementation queue items: initial dispatch prompt, rework feedback.
+One shallow clone per repo in `pool/<repo-name>/`. Branches are fetched
+on demand with `git fetch --depth 1 origin <branch>:<branch>`.
+
+Session directories clone from the pool (local, fast). Multiple jobs
+can use the same repo concurrently -- each gets its own session dir
+clone from the shared pool.
+
+Leader's repos in `repos/` are initialized from the pool on first merge.
+
+## Git Workflow
+
+When an implementation job completes, the orchestrator:
+1. Fetches commits from the session clone into the leader's repo as a
+   named branch (e.g. `job-001` or `job-001/repo-name` for multi-repo).
+2. The leader merges or cherry-picks when invoked with feedback.
+
+## TUI
+
+The orchestrator provides a monitoring TUI with:
+
+- **Dashboard panel** (left): job list with phases, session list with
+  status indicators (running/queued/idle).
+- **Session panel** (right): formatted stream-json output of the selected
+  session. Shows thinking, tool calls, text, and results.
+- **Input field** (bottom): multi-line text input for sending messages to
+  the selected session. Press Enter to type, Ctrl+S to send, Esc to cancel.
+- **Navigation**: Up/Down arrows or Tab to switch sessions.
+
+User messages appear in blue in the stream view. A running session shows
+a spinner emoji in the title.
 
 ## Session Execution
 
 All sessions use `claude -p`:
-- Guaranteed to produce output and terminate.
-- `--output-format stream-json` for real-time observability.
-- `--resume <session-id>` for conversation continuity.
+- `--output-format stream-json --verbose` for observability.
+- `--session-id <uuid>` on first invocation, `--resume <uuid>` thereafter.
+- `--permission-mode bypassPermissions` for headless tool access.
+- `--mcp-config <path>` for the leader (to access council tools).
+- `--append-system-prompt` for role-specific instructions.
 
-The orchestrator:
-- Spawns sessions as child processes.
-- Consumes the stream-json output for logging and TUI display.
-- Extracts structured results (summary text, tool calls) from the output.
-- Detects session exit and transitions step state.
-- Stores Claude Code session IDs for resumption.
+## Prompts
 
-## Backend Abstraction
+Prompts live in `prompts/*.md` files, compiled in via `include_str!`.
+Overridable by placing files in the project's `prompts/` directory.
 
-The orchestrator abstracts over agent backends. Claude Code is the default
-(cheapest via subscription). The interface is:
-
-- Start a headless session: command + args + prompt + working directory ->
-  stream-json output + exit code.
-- Resume a session: session ID + new prompt -> stream-json output + exit
-  code.
-- Start an interactive session: PTY-based, for the leader.
-
-Agent SDK or other backends can implement this interface. Per-session backend
-override is possible (e.g., use a different model for stakeholder reviews).
-
-## Open Questions
-
-- Exact Claude Code CLI flags for per-session read/write sandboxing (needed
-  for stakeholder read-only access). Investigate during implementation.
-- Clone cache strategy: creating shallow clones at dispatch time may be slow
-  for large repos. A warm cache of pre-cloned repos that get `git fetch` +
-  reset before assignment could help.
-- Concurrency limits: how many implementation sessions can run in parallel.
-  Configurable, default TBD.
-- Project persistence across orchestrator restarts: the project directory on
-  disk plus Claude Code session IDs should be sufficient, but needs
-  verification.
+- `leader-system.md` -- leader's system prompt (MCP tool docs, workflow)
+- `implementation.md` -- implementation agent template
+- `stakeholder.md` -- stakeholder review template

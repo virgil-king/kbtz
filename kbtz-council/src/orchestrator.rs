@@ -98,7 +98,7 @@ impl Orchestrator {
                 Some(SessionSnapshot {
                     job_id: active.job_id.clone().unwrap_or_default(),
                     key: ms.key.clone(),
-                    exited: false, // if it's in active, it's running
+                    exited: active.exited,
                 })
             })
             .collect();
@@ -116,10 +116,11 @@ impl Orchestrator {
         }
     }
 
-    /// Poll all sessions: drain events, detect exits, dispatch queued items.
+    /// Poll all sessions: drain events, detect exits. Does NOT reap or
+    /// transition phases — that's tick's job.
     pub fn poll_sessions(&mut self) {
         let mut trace_lines: Vec<(String, String)> = Vec::new();
-        let mut exited_keys: Vec<(SessionKey, Option<String>)> = Vec::new();
+        let mut newly_exited: Vec<(SessionKey, Option<String>)> = Vec::new();
 
         for (key, ms) in &mut self.sessions {
             if let Some(ref mut active) = ms.active {
@@ -135,9 +136,12 @@ impl Orchestrator {
                     }
                 }
 
-                // Check exit
-                if let Ok(Some(_)) = active.try_wait() {
-                    exited_keys.push((key.clone(), active.job_id.clone()));
+                // Detect exit (marks active.exited = true)
+                if !active.exited {
+                    if let Ok(Some(_)) = active.try_wait() {
+                        active.exited = true;
+                        newly_exited.push((key.clone(), active.job_id.clone()));
+                    }
                 }
             }
         }
@@ -147,9 +151,10 @@ impl Orchestrator {
             self.write_trace(&key, &line);
         }
 
-        // Process exits
-        for (key, job_id) in &exited_keys {
-            // Persist agent session ID
+        // Extract results from newly exited sessions (summaries, feedback, commits)
+        // but do NOT transition phases — tick handles that.
+        for (key, job_id) in &newly_exited {
+            // Persist agent session ID for future --resume
             {
                 let ms = self.sessions.get(key).unwrap();
                 let mut dir = self.project_dir.lock().unwrap();
@@ -170,23 +175,18 @@ impl Orchestrator {
                                 .join("sessions")
                                 .join(format!("{}-impl", job_id))
                         };
-                        self.fetch_step_commits(job_id, &session_dir);
+                        self.fetch_job_commits(job_id, &session_dir);
 
                         let mut dir = self.project_dir.lock().unwrap();
                         if let Some(job) =
                             dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
                         {
                             job.summary = Some(summary);
-                            job.phase = crate::job::JobPhase::Completed;
                         }
                         let _ = dir.persist();
                     }
-                    SessionKey::Stakeholder { name } => {
+                    SessionKey::Stakeholder { name, .. } => {
                         let feedback = self.extract_summary(&key_str);
-                        let expected = {
-                            let dir = self.project_dir.lock().unwrap();
-                            dir.state().project.stakeholders.len()
-                        };
                         let mut dir = self.project_dir.lock().unwrap();
                         if let Some(job) =
                             dir.state_mut().jobs.iter_mut().find(|s| s.id == *job_id)
@@ -195,21 +195,23 @@ impl Orchestrator {
                                 stakeholder: name.clone(),
                                 content: feedback,
                             });
-                            if job.feedback.len() >= expected {
-                                job.phase = crate::job::JobPhase::Reviewed;
-                            }
                         }
                         let _ = dir.persist();
                     }
                     SessionKey::Leader => {}
                 }
             }
-
-            // Reap the active session
-            self.sessions.get_mut(key).unwrap().reap();
         }
+    }
 
-        // Try to dispatch queued items for all sessions
+    /// Reap exited sessions after tick has processed them, then dispatch
+    /// queued items.
+    pub fn reap_and_dispatch(&mut self) {
+        for ms in self.sessions.values_mut() {
+            if ms.has_exited() {
+                ms.reap();
+            }
+        }
         for ms in self.sessions.values_mut() {
             let _ = ms.try_dispatch();
         }
@@ -247,18 +249,30 @@ impl Orchestrator {
     }
 
     fn enqueue_implementation(&mut self, job_id: &str) -> io::Result<()> {
-        let (session_dir, job_prompt, repo_refs) = {
+        let (session_dir, prompt_text, repo_refs) = {
             let dir = self.project_dir.lock().unwrap();
             let session_dir = dir
                 .root()
                 .join("sessions")
                 .join(format!("{}-impl", job_id));
             let job = dir.state().jobs.iter().find(|j| j.id == job_id);
-            let job_prompt = job.map(|j| j.dispatch.prompt.clone()).unwrap_or_default();
+
+            // Use rework feedback as prompt if available, otherwise original dispatch
+            let prompt_text = match job.and_then(|j| j.decision.as_ref()) {
+                Some(crate::job::Decision::Rework { feedback }) => {
+                    format!(
+                        "Your previous implementation needs changes. Here is the feedback:\n\n{}\n\nThe original task was:\n\n{}",
+                        feedback,
+                        job.map(|j| j.dispatch.prompt.as_str()).unwrap_or("")
+                    )
+                }
+                _ => job.map(|j| j.dispatch.prompt.clone()).unwrap_or_default(),
+            };
+
             let repo_refs = job
                 .map(|j| j.dispatch.repos.clone())
                 .unwrap_or_default();
-            (session_dir, job_prompt, repo_refs)
+            (session_dir, prompt_text, repo_refs)
         };
 
         // Ensure pool clones exist and have the needed branches, then set up session dir
@@ -299,7 +313,7 @@ impl Orchestrator {
         };
         let session = self.ensure_session(key);
         session.enqueue(QueueItem {
-            prompt: prompt::implementation_prompt(Some(&session_dir), &job_prompt),
+            prompt: prompt::implementation_prompt(Some(&session_dir), &prompt_text),
             system_prompt: None,
             job_id: Some(job_id.to_string()),
             working_dir: session_dir,
@@ -347,6 +361,7 @@ impl Orchestrator {
             );
 
             let key = SessionKey::Stakeholder {
+                job_id: job_id.to_string(),
                 name: stakeholder.name.clone(),
             };
             let session = self.ensure_session(key);
@@ -447,14 +462,25 @@ impl Orchestrator {
         let _ = writeln!(file, "{}", line);
     }
 
-    fn fetch_step_commits(&self, job_id: &str, session_dir: &Path) {
+    fn fetch_job_commits(&self, job_id: &str, session_dir: &Path) {
         let dir = self.project_dir.lock().unwrap();
         let repos = &dir.state().project.repos;
         let multi_repo = repos.len() > 1;
+        let pool_dir = dir.root().join("pool");
         for repo in repos {
             let clone_path = session_dir.join(&repo.name);
+            if !clone_path.exists() {
+                continue;
+            }
+            // Ensure leader's repo exists by cloning from pool
             let target_path = dir.root().join("repos").join(&repo.name);
-            if clone_path.exists() && target_path.exists() {
+            if !target_path.exists() {
+                let pool_repo = pool_dir.join(&repo.name);
+                if pool_repo.exists() {
+                    let _ = git::clone_from_pool(&pool_repo, &target_path, None);
+                }
+            }
+            if target_path.exists() {
                 let branch_name = if multi_repo {
                     format!("{}/{}", job_id, repo.name)
                 } else {

@@ -112,12 +112,12 @@ fn reviewing_step_all_stakeholders_exited_transitions_to_reviewed() {
         sessions: vec![
             SessionSnapshot {
                 job_id: "job-001".into(),
-                key: SessionKey::Stakeholder { name: "security".into() },
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "security".into() },
                 exited: true,
             },
             SessionSnapshot {
                 job_id: "job-001".into(),
-                key: SessionKey::Stakeholder { name: "api".into() },
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "api".into() },
                 exited: true,
             },
         ],
@@ -143,12 +143,12 @@ fn reviewing_step_with_active_stakeholder_does_nothing() {
         sessions: vec![
             SessionSnapshot {
                 job_id: "job-001".into(),
-                key: SessionKey::Stakeholder { name: "security".into() },
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "security".into() },
                 exited: true,
             },
             SessionSnapshot {
                 job_id: "job-001".into(),
-                key: SessionKey::Stakeholder { name: "api".into() },
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "api".into() },
                 exited: false,
             },
         ],
@@ -267,5 +267,72 @@ fn rework_job_with_exited_session_transitions_to_completed() {
         a,
         Action::TransitionJob { job_id, to }
             if job_id == "job-001" && *to == JobPhase::Completed
+    )));
+}
+
+#[test]
+fn reviewing_with_all_stakeholders_exited_transitions_even_with_mixed_jobs() {
+    let world = WorldSnapshot {
+        jobs: vec![
+            JobSnapshot { id: "job-001".into(), phase: JobPhase::Reviewing, repos: vec![] },
+            JobSnapshot { id: "job-002".into(), phase: JobPhase::Running, repos: vec![] },
+        ],
+        sessions: vec![
+            SessionSnapshot {
+                job_id: "job-001".into(),
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "security".into() },
+                exited: true,
+            },
+            SessionSnapshot {
+                job_id: "job-001".into(),
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "docs".into() },
+                exited: true,
+            },
+            SessionSnapshot {
+                job_id: "job-002".into(),
+                key: SessionKey::Implementation { job_id: "job-002".into() },
+                exited: false,
+            },
+        ],
+        leader_busy: false,
+    };
+
+    let actions = tick(&world);
+    assert!(actions.iter().any(|a| matches!(
+        a, Action::TransitionJob { job_id, to } if job_id == "job-001" && *to == JobPhase::Reviewed
+    )));
+    assert!(!actions.iter().any(|a| matches!(
+        a, Action::TransitionJob { job_id, .. } if job_id == "job-002"
+    )));
+}
+
+#[test]
+fn stakeholders_scoped_per_job_dont_interfere() {
+    let world = WorldSnapshot {
+        jobs: vec![
+            JobSnapshot { id: "job-001".into(), phase: JobPhase::Reviewing, repos: vec![] },
+            JobSnapshot { id: "job-002".into(), phase: JobPhase::Reviewing, repos: vec![] },
+        ],
+        sessions: vec![
+            SessionSnapshot {
+                job_id: "job-001".into(),
+                key: SessionKey::Stakeholder { job_id: "job-001".into(), name: "security".into() },
+                exited: true,
+            },
+            SessionSnapshot {
+                job_id: "job-002".into(),
+                key: SessionKey::Stakeholder { job_id: "job-002".into(), name: "security".into() },
+                exited: true,
+            },
+        ],
+        leader_busy: false,
+    };
+
+    let actions = tick(&world);
+    assert!(actions.iter().any(|a| matches!(
+        a, Action::TransitionJob { job_id, to } if job_id == "job-001" && *to == JobPhase::Reviewed
+    )));
+    assert!(actions.iter().any(|a| matches!(
+        a, Action::TransitionJob { job_id, to } if job_id == "job-002" && *to == JobPhase::Reviewed
     )));
 }

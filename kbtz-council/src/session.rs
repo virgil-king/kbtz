@@ -12,7 +12,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionKey {
     Implementation { job_id: String },
-    Stakeholder { name: String },
+    Stakeholder { job_id: String, name: String },
     Leader,
 }
 
@@ -20,7 +20,7 @@ impl std::fmt::Display for SessionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Implementation { job_id } => write!(f, "{}-impl", job_id),
-            Self::Stakeholder { name } => write!(f, "stakeholder-{}", name),
+            Self::Stakeholder { job_id, name } => write!(f, "{}-{}", job_id, name),
             Self::Leader => write!(f, "leader"),
         }
     }
@@ -55,9 +55,10 @@ pub struct ManagedSession {
     invocation_count: u64,
 }
 
-/// A currently running `claude -p` process.
+/// A currently running (or recently exited) `claude -p` process.
 pub struct ActiveSession {
     pub job_id: Option<String>,
+    pub exited: bool,
     child: Child,
     pub rx: mpsc::Receiver<SessionMessage>,
 }
@@ -109,17 +110,26 @@ impl ManagedSession {
         Ok(true)
     }
 
-    /// Check if the active process has exited. Returns true if it exited.
+    /// Check if the active process has exited. Marks it as exited but
+    /// does NOT remove it — the lifecycle tick needs to see it first.
     pub fn poll_exit(&mut self) -> io::Result<bool> {
         if let Some(ref mut active) = self.active {
-            if let Some(_code) = active.try_wait()? {
-                return Ok(true);
+            if !active.exited {
+                if let Some(_code) = active.try_wait()? {
+                    active.exited = true;
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
     }
 
-    /// Remove the active process after it exits.
+    /// Returns true if the active session has exited but not been reaped.
+    pub fn has_exited(&self) -> bool {
+        self.active.as_ref().map(|a| a.exited).unwrap_or(false)
+    }
+
+    /// Remove the active process after tick has processed the exit.
     pub fn reap(&mut self) -> Option<ActiveSession> {
         self.active.take()
     }
@@ -227,6 +237,7 @@ impl ActiveSession {
 
         Ok(Self {
             job_id: None,
+            exited: false,
             child,
             rx,
         })

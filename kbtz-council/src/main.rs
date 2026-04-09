@@ -80,6 +80,7 @@ fn run_loop(
     loop {
         orch.poll_sessions();
         orch.process_tick()?;
+        orch.reap_and_dispatch();
 
         let editing = orch.app.input_mode == InputMode::Editing;
 
@@ -240,15 +241,24 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
 fn parse_session_key(s: &str) -> SessionKey {
     if s == "leader" {
         SessionKey::Leader
-    } else if let Some(name) = s.strip_prefix("stakeholder-") {
-        SessionKey::Stakeholder {
-            name: name.to_string(),
-        }
-    } else if let Some(job_id) = s.strip_suffix("-impl") {
+    } else if let Some(rest) = s.strip_suffix("-impl") {
         SessionKey::Implementation {
-            job_id: job_id.to_string(),
+            job_id: rest.to_string(),
         }
     } else {
-        SessionKey::Leader
+        // Try to parse as job_id-stakeholder_name (e.g. "job-001-security")
+        // The job_id is "job-NNN", so split after the job prefix
+        if let Some(pos) = s.find('-').and_then(|first| {
+            // Find second dash (after "job-NNN")
+            s[first + 1..].find('-').map(|second| first + 1 + second)
+        }) {
+            let (job_part, name_part) = s.split_at(pos);
+            SessionKey::Stakeholder {
+                job_id: job_part.to_string(),
+                name: name_part[1..].to_string(), // skip the dash
+            }
+        } else {
+            SessionKey::Leader // fallback
+        }
     }
 }
