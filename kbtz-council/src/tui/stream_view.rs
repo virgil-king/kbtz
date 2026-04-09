@@ -11,18 +11,17 @@ pub fn render_stream_view(
     events: &[StreamEvent],
     session_id: &str,
     is_running: bool,
+    scroll_offset: u16,
 ) {
     let mut lines: Vec<Line> = events
         .iter()
         .flat_map(|event| match event {
-            StreamEvent::UserMessage(text) => vec![
-                Line::from(Span::styled(
-                    format!("▶ {}", text),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            ],
+            StreamEvent::UserMessage(text) => vec![Line::from(Span::styled(
+                format!("▶ {}", text),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ))],
             StreamEvent::Thinking(text) => vec![Line::from(Span::styled(
                 format!("[thinking] {}", truncate(text, 200)),
                 Style::default()
@@ -53,7 +52,6 @@ pub fn render_stream_view(
         })
         .collect();
 
-    // Show status when running and no output yet
     if is_running && lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "⏳ Session running...",
@@ -61,11 +59,23 @@ pub fn render_stream_view(
         )));
     }
 
+    let total_lines = lines.len() as u16;
+    let visible_height = area.height.saturating_sub(2); // minus border
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = scroll_offset.min(max_scroll);
+
     let status = if is_running { " ⏳ " } else { "" };
-    let title = format!(" {}{}", session_id, status);
+    let scroll_info = if scroll > 0 {
+        format!(" [{}/{}] ", total_lines.saturating_sub(scroll), total_lines)
+    } else {
+        String::new()
+    };
+    let title = format!(" {}{}{}", session_id, status, scroll_info);
+
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(title).borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
 }
 

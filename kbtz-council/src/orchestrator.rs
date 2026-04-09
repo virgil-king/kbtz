@@ -160,7 +160,10 @@ impl Orchestrator {
                 let mut dir = self.project_dir.lock().unwrap();
                 dir.state_mut()
                     .session_ids
-                    .insert(key.clone(), ms.agent_session_id.clone());
+                    .retain(|(k, _)| k != key);
+                dir.state_mut()
+                    .session_ids
+                    .push((key.clone(), ms.agent_session_id.clone()));
                 let _ = dir.persist();
             }
 

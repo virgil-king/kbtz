@@ -14,6 +14,8 @@ pub struct AppState {
     pub selected_session: Option<String>,
     pub session_events: Vec<(String, Vec<StreamEvent>)>,
     pub input_mode: InputMode,
+    /// Scroll offset from bottom (0 = pinned to bottom / auto-scroll)
+    pub scroll_offset: u16,
 }
 
 impl AppState {
@@ -22,6 +24,7 @@ impl AppState {
             selected_session: None,
             session_events: vec![],
             input_mode: InputMode::Normal,
+            scroll_offset: 0,
         }
     }
 

@@ -118,7 +118,7 @@ fn run_loop(
                 })
                 .map(|ms| ms.is_running())
                 .unwrap_or(false);
-            render_stream_view(frame, v_chunks[0], events, session_id, is_running);
+            render_stream_view(frame, v_chunks[0], events, session_id, is_running, orch.app.scroll_offset);
 
             let title = if editing {
                 " Enter send | Ctrl+J newline | Esc cancel "
@@ -136,6 +136,19 @@ fn run_loop(
                         KeyCode::Enter => {
                             orch.app.input_mode = InputMode::Editing;
                         }
+                        KeyCode::PageUp => {
+                            orch.app.scroll_offset = orch.app.scroll_offset.saturating_add(10);
+                        }
+                        KeyCode::PageDown => {
+                            orch.app.scroll_offset = orch.app.scroll_offset.saturating_sub(10);
+                        }
+                        KeyCode::Home => {
+                            // Scroll to top — set to a large number, render will clamp
+                            orch.app.scroll_offset = u16::MAX;
+                        }
+                        KeyCode::End => {
+                            orch.app.scroll_offset = 0; // pin to bottom
+                        }
                         KeyCode::Tab | KeyCode::Down => {
                             let keys: Vec<String> = collect_session_infos(orch, project_dir)
                                 .iter()
@@ -150,6 +163,7 @@ fn run_loop(
                                     .map(|i| (i + 1) % keys.len())
                                     .unwrap_or(0);
                                 orch.app.selected_session = Some(keys[idx].clone());
+                                orch.app.scroll_offset = 0;
                             }
                         }
                         KeyCode::Up => {
@@ -166,6 +180,7 @@ fn run_loop(
                                     .map(|i| if i == 0 { keys.len() - 1 } else { i - 1 })
                                     .unwrap_or(keys.len() - 1);
                                 orch.app.selected_session = Some(keys[idx].clone());
+                                orch.app.scroll_offset = 0;
                             }
                         }
                         _ => {}

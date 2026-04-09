@@ -1,7 +1,6 @@
 use crate::session::{AgentSessionId, SessionKey};
 use crate::job::{Dispatch, Job, JobPhase};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,7 +31,7 @@ pub struct OrchestratorState {
     pub jobs: Vec<Job>,
     pub next_job_id: u32,
     #[serde(default)]
-    pub session_ids: HashMap<SessionKey, AgentSessionId>,
+    pub session_ids: Vec<(SessionKey, AgentSessionId)>,
 }
 
 pub struct ProjectDir {
@@ -51,7 +50,7 @@ impl ProjectDir {
             project: project.clone(),
             jobs: vec![],
             next_job_id: 1,
-            session_ids: HashMap::new(),
+            session_ids: Vec::new(),
         };
 
         let dir = Self {
