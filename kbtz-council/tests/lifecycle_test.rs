@@ -237,6 +237,24 @@ fn multiple_reviewed_steps_batched_into_one_leader_invocation() {
 }
 
 #[test]
+fn rework_step_with_no_session_spawns_implementation() {
+    let world = WorldSnapshot {
+        steps: vec![StepSnapshot {
+            id: "step-001".into(),
+            phase: StepPhase::Rework,
+            repos: vec!["backend".into()],
+        }],
+        sessions: vec![],
+        leader_busy: false,
+    };
+
+    let actions = tick(&world);
+    assert!(actions.iter().any(
+        |a| matches!(a, Action::SpawnImplementation { step_id, .. } if step_id == "step-001")
+    ));
+}
+
+#[test]
 fn rework_step_with_exited_session_transitions_to_completed() {
     let world = WorldSnapshot {
         steps: vec![StepSnapshot {

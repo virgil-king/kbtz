@@ -46,7 +46,7 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                     });
                 }
             }
-            StepPhase::Running | StepPhase::Rework => {
+            StepPhase::Running => {
                 let impl_exited = world.sessions.iter().any(|s| {
                     s.step_id == step.id
                         && matches!(s.role, SessionRole::Implementation)
@@ -57,6 +57,31 @@ pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
                         step_id: step.id.clone(),
                         to: StepPhase::Completed,
                     });
+                }
+            }
+            StepPhase::Rework => {
+                let has_impl = world.sessions.iter().any(|s| {
+                    s.step_id == step.id && matches!(s.role, SessionRole::Implementation)
+                });
+                if !has_impl {
+                    // No session yet — spawn one to resume rework
+                    actions.push(Action::SpawnImplementation {
+                        step_id: step.id.clone(),
+                        repos: step.repos.clone(),
+                    });
+                } else {
+                    // Session exists — check if it exited
+                    let impl_exited = world.sessions.iter().any(|s| {
+                        s.step_id == step.id
+                            && matches!(s.role, SessionRole::Implementation)
+                            && s.exited
+                    });
+                    if impl_exited {
+                        actions.push(Action::TransitionStep {
+                            step_id: step.id.clone(),
+                            to: StepPhase::Completed,
+                        });
+                    }
                 }
             }
             StepPhase::Completed => {
