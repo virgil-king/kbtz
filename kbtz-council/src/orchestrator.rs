@@ -1,4 +1,5 @@
 use crate::git;
+use crate::global::GlobalState;
 use crate::lifecycle::{self, Action, SessionSnapshot, JobSnapshot, WorldSnapshot};
 use crate::project::ProjectDir;
 use crate::prompt;
@@ -14,17 +15,23 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub struct Orchestrator {
+/// Per-project state: owns the project directory, sessions, MCP config,
+/// and trace files for one project.
+pub struct ProjectState {
+    pub name: String,
     pub project_dir: Arc<Mutex<ProjectDir>>,
     pub sessions: HashMap<SessionKey, ManagedSession>,
-    pub app: AppState,
+    pub mcp_config_path: PathBuf,
     trace_dir: PathBuf,
-    trace_files: HashMap<String, std::fs::File>,
-    mcp_config_path: PathBuf,
+    trace_files: HashMap<String, fs::File>,
 }
 
-impl Orchestrator {
-    pub fn new(project_dir: Arc<Mutex<ProjectDir>>, mcp_config_path: PathBuf) -> Self {
+impl ProjectState {
+    pub fn new(
+        name: String,
+        project_dir: Arc<Mutex<ProjectDir>>,
+        mcp_config_path: PathBuf,
+    ) -> Self {
         let trace_dir = {
             let dir = project_dir.lock().unwrap();
             let td = dir.root().join("traces");
@@ -32,35 +39,31 @@ impl Orchestrator {
             td
         };
         Self {
+            name,
             project_dir,
             sessions: HashMap::new(),
-            app: AppState::new(),
+            mcp_config_path,
             trace_dir,
             trace_files: HashMap::new(),
-            mcp_config_path,
         }
     }
 
-    /// Recover from persisted state on startup. Roll back in-flight phases
-    /// so tick can re-dispatch them, and recreate ManagedSession entries
-    /// with persisted UUIDs so --resume works.
+    /// Recover from persisted state on startup.
     pub fn recover_from_state(&mut self) {
         let mut dir = self.project_dir.lock().unwrap();
 
-        // Roll back phases where processes died
         for job in &mut dir.state_mut().jobs {
             match job.phase {
-                crate::job::JobPhase::Running => {
-                    job.phase = crate::job::JobPhase::Dispatched;
+                JobPhase::Running => {
+                    job.phase = JobPhase::Dispatched;
                 }
-                crate::job::JobPhase::Reviewing => {
-                    job.phase = crate::job::JobPhase::Completed;
+                JobPhase::Reviewing => {
+                    job.phase = JobPhase::Completed;
                 }
                 _ => {}
             }
         }
 
-        // Recreate ManagedSession entries with persisted UUIDs
         for (key, agent_id) in &dir.state().session_ids {
             if !self.sessions.contains_key(key) {
                 self.sessions.insert(
@@ -73,25 +76,107 @@ impl Orchestrator {
         let _ = dir.persist();
     }
 
-    /// Get or create a managed session for the given key.
     fn ensure_session(&mut self, key: SessionKey) -> &mut ManagedSession {
         self.sessions
             .entry(key.clone())
             .or_insert_with(|| ManagedSession::new(key))
     }
 
-    /// Enqueue a user message for any session.
-    pub fn send_message(&mut self, key: &SessionKey, message: String) {
+    /// Count of currently running sessions in this project.
+    pub fn running_count(&self) -> usize {
+        self.sessions.values().filter(|ms| ms.is_running()).count()
+    }
+
+    fn write_trace(&mut self, session_key: &str, line: &str) {
+        let trace_dir = &self.trace_dir;
+        let file = self
+            .trace_files
+            .entry(session_key.to_string())
+            .or_insert_with(|| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(trace_dir.join(format!("{}.jsonl", session_key)))
+                    .expect("failed to open trace file")
+            });
+        let _ = writeln!(file, "{}", line);
+    }
+
+    fn fetch_job_commits(&self, job_id: &str, session_dir: &Path) {
+        let dir = self.project_dir.lock().unwrap();
+        let repos = &dir.state().project.repos;
+        let multi_repo = repos.len() > 1;
+        let pool_dir = dir.root().join("pool");
+        for repo in repos {
+            let clone_path = session_dir.join(&repo.name);
+            if !clone_path.exists() {
+                continue;
+            }
+            let target_path = dir.root().join("repos").join(&repo.name);
+            if !target_path.exists() {
+                let pool_repo = pool_dir.join(&repo.name);
+                if pool_repo.exists() {
+                    let _ = git::clone_from_pool(&pool_repo, &target_path, None);
+                }
+            }
+            if target_path.exists() {
+                let branch_name = if multi_repo {
+                    format!("{}/{}", job_id, repo.name)
+                } else {
+                    job_id.to_string()
+                };
+                let _ = git::fetch_branch(&target_path, &clone_path, &branch_name);
+            }
+        }
+    }
+}
+
+pub struct Orchestrator {
+    pub projects: HashMap<String, ProjectState>,
+    pub app: AppState,
+    pub global: Arc<Mutex<GlobalState>>,
+    pub max_running_sessions: usize,
+}
+
+impl Orchestrator {
+    pub fn new(global: Arc<Mutex<GlobalState>>, max_running_sessions: usize) -> Self {
+        Self {
+            projects: HashMap::new(),
+            app: AppState::new(),
+            global,
+            max_running_sessions,
+        }
+    }
+
+    /// Register a project. Recovers persisted state and starts its MCP server.
+    pub fn add_project(&mut self, state: ProjectState) {
+        let name = state.name.clone();
+        self.projects.insert(name, state);
+    }
+
+    /// Total running sessions across all projects.
+    pub fn total_running(&self) -> usize {
+        self.projects.values().map(|p| p.running_count()).sum()
+    }
+
+    /// Enqueue a user message for a session in the given project.
+    pub fn send_message(&mut self, project_name: &str, key: &SessionKey, message: String) {
+        let ps = match self.projects.get_mut(project_name) {
+            Some(ps) => ps,
+            None => return,
+        };
+
         // Show user message in the stream view
+        let event_key = format!("{}/{}", project_name, key);
         self.app
-            .push_event(&key.to_string(), StreamEvent::UserMessage(message.clone()));
+            .push_event(&event_key, StreamEvent::UserMessage(message.clone()));
 
         let working_dir = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             dir.root().to_path_buf()
         };
         let mcp_config = if matches!(key, SessionKey::Leader) {
-            Some(self.mcp_config_path.clone())
+            Some(ps.mcp_config_path.clone())
         } else {
             None
         };
@@ -99,7 +184,7 @@ impl Orchestrator {
             SessionKey::Leader => Some(prompt::leader_system_prompt()),
             _ => None,
         };
-        let session = self.ensure_session(key.clone());
+        let session = ps.ensure_session(key.clone());
         session.enqueue(QueueItem {
             prompt: message,
             system_prompt,
@@ -109,8 +194,8 @@ impl Orchestrator {
         });
     }
 
-    fn build_world(&self) -> WorldSnapshot {
-        let dir = self.project_dir.lock().unwrap();
+    fn build_world(ps: &ProjectState) -> WorldSnapshot {
+        let dir = ps.project_dir.lock().unwrap();
         let jobs = dir
             .state()
             .jobs
@@ -122,7 +207,7 @@ impl Orchestrator {
             })
             .collect();
 
-        let sessions = self
+        let sessions = ps
             .sessions
             .values()
             .filter_map(|ms| {
@@ -135,7 +220,7 @@ impl Orchestrator {
             })
             .collect();
 
-        let leader_busy = self
+        let leader_busy = ps
             .sessions
             .get(&SessionKey::Leader)
             .map(|ms| ms.is_running())
@@ -148,19 +233,30 @@ impl Orchestrator {
         }
     }
 
-    /// Poll all sessions: drain events, detect exits. Does NOT reap or
-    /// transition phases — that's tick's job.
+    /// Poll all sessions across all projects.
     pub fn poll_sessions(&mut self) {
+        let project_names: Vec<String> = self.projects.keys().cloned().collect();
+        for name in project_names {
+            self.poll_project_sessions(&name);
+        }
+    }
+
+    fn poll_project_sessions(&mut self, project_name: &str) {
+        let ps = match self.projects.get_mut(project_name) {
+            Some(ps) => ps,
+            None => return,
+        };
+
         let mut trace_lines: Vec<(String, String)> = Vec::new();
         let mut newly_exited: Vec<(SessionKey, Option<String>)> = Vec::new();
 
-        for (key, ms) in &mut self.sessions {
+        for (key, ms) in &mut ps.sessions {
             if let Some(ref mut active) = ms.active {
-                // Drain events
                 while let Ok(msg) = active.rx.try_recv() {
                     match msg {
                         SessionMessage::Event(event) => {
-                            self.app.push_event(&key.to_string(), event);
+                            let event_key = format!("{}/{}", project_name, key);
+                            self.app.push_event(&event_key, event);
                         }
                         SessionMessage::RawLine(line) => {
                             trace_lines.push((key.to_string(), line));
@@ -168,7 +264,6 @@ impl Orchestrator {
                     }
                 }
 
-                // Detect exit (marks active.exited = true)
                 if !active.exited {
                     if let Ok(Some(_)) = active.try_wait() {
                         active.exited = true;
@@ -178,18 +273,15 @@ impl Orchestrator {
             }
         }
 
-        // Write traces
         for (key, line) in trace_lines {
-            self.write_trace(&key, &line);
+            ps.write_trace(&key, &line);
         }
 
-        // Extract results from newly exited sessions (summaries, feedback, commits)
-        // but do NOT transition phases — tick handles that.
         for (key, job_id) in &newly_exited {
-            // Persist agent session ID for future --resume
+            // Persist agent session ID
             {
-                let ms = self.sessions.get(key).unwrap();
-                let mut dir = self.project_dir.lock().unwrap();
+                let ms = ps.sessions.get(key).unwrap();
+                let mut dir = ps.project_dir.lock().unwrap();
                 dir.state_mut()
                     .session_ids
                     .retain(|(k, _)| k != key);
@@ -200,30 +292,28 @@ impl Orchestrator {
             }
 
             if let Some(job_id) = job_id {
-                let key_str = key.to_string();
+                let event_key = format!("{}/{}", project_name, key);
                 match key {
                     SessionKey::Implementation { .. } => {
-                        let summary = self.extract_summary(&key_str);
+                        let summary = extract_summary(&self.app, &event_key);
                         let session_dir = {
-                            let dir = self.project_dir.lock().unwrap();
+                            let dir = ps.project_dir.lock().unwrap();
                             dir.root()
                                 .join("sessions")
                                 .join(format!("{}-impl", job_id))
                         };
-                        self.fetch_job_commits(job_id, &session_dir);
+                        ps.fetch_job_commits(job_id, &session_dir);
 
-                        // Create an artifact for this implementation run
-                        let mut dir = self.project_dir.lock().unwrap();
+                        let mut dir = ps.project_dir.lock().unwrap();
                         dir.create_artifact(job_id, summary);
                         let _ = dir.persist();
                     }
                     SessionKey::Stakeholder { name, .. } => {
-                        let feedback_content = self.extract_summary(&key_str);
-                        let agent_uuid = self.sessions.get(key)
+                        let feedback_content = extract_summary(&self.app, &event_key);
+                        let agent_uuid = ps.sessions.get(key)
                             .map(|ms| ms.agent_session_id.0.to_string());
 
-                        // Add feedback to the job's latest artifact
-                        let mut dir = self.project_dir.lock().unwrap();
+                        let mut dir = ps.project_dir.lock().unwrap();
                         if let Some(artifact) = dir.latest_artifact_mut(job_id) {
                             artifact.feedback.push(crate::job::Feedback {
                                 stakeholder: name.clone(),
@@ -239,37 +329,64 @@ impl Orchestrator {
         }
     }
 
-    /// Reap exited sessions after tick has processed them, then dispatch
-    /// queued items.
+    /// Reap exited sessions and dispatch queued items across all projects,
+    /// respecting the global concurrency limit.
     pub fn reap_and_dispatch(&mut self) {
-        for ms in self.sessions.values_mut() {
-            if ms.has_exited() {
-                ms.reap();
+        for ps in self.projects.values_mut() {
+            for ms in ps.sessions.values_mut() {
+                if ms.has_exited() {
+                    ms.reap();
+                }
             }
         }
-        for ms in self.sessions.values_mut() {
-            let _ = ms.try_dispatch();
+
+        let budget = self.max_running_sessions.saturating_sub(self.total_running());
+        let mut dispatched = 0usize;
+        for ps in self.projects.values_mut() {
+            for ms in ps.sessions.values_mut() {
+                if dispatched >= budget {
+                    return;
+                }
+                if ms.active.is_none() && !ms.queue.is_empty() {
+                    if ms.try_dispatch().unwrap_or(false) {
+                        dispatched += 1;
+                    }
+                }
+            }
         }
     }
 
-    /// Process lifecycle tick — translate actions into session queue items.
+    /// Process lifecycle tick for all projects.
     pub fn process_tick(&mut self) -> io::Result<()> {
-        let world = self.build_world();
+        let project_names: Vec<String> = self.projects.keys().cloned().collect();
+        for name in project_names {
+            self.process_project_tick(&name)?;
+        }
+        Ok(())
+    }
+
+    fn process_project_tick(&mut self, project_name: &str) -> io::Result<()> {
+        let ps = match self.projects.get(project_name) {
+            Some(ps) => ps,
+            None => return Ok(()),
+        };
+        let world = Self::build_world(ps);
         let actions = lifecycle::tick(&world);
 
         for action in actions {
             match action {
                 Action::SpawnImplementation { job_id, .. } => {
-                    self.enqueue_implementation(&job_id)?;
+                    self.enqueue_implementation(project_name, &job_id)?;
                 }
                 Action::SpawnStakeholders { job_id } => {
-                    self.enqueue_stakeholders(&job_id)?;
+                    self.enqueue_stakeholders(project_name, &job_id)?;
                 }
                 Action::InvokeLeader { job_ids } => {
-                    self.enqueue_leader_decision(&job_ids)?;
+                    self.enqueue_leader_decision(project_name, &job_ids)?;
                 }
                 Action::TransitionJob { job_id, to } => {
-                    let mut dir = self.project_dir.lock().unwrap();
+                    let ps = self.projects.get_mut(project_name).unwrap();
+                    let mut dir = ps.project_dir.lock().unwrap();
                     if let Some(job) =
                         dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id)
                     {
@@ -283,16 +400,16 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn enqueue_implementation(&mut self, job_id: &str) -> io::Result<()> {
+    fn enqueue_implementation(&mut self, project_name: &str, job_id: &str) -> io::Result<()> {
+        let ps = self.projects.get(project_name).unwrap();
         let (session_dir, prompt_text, repo_refs) = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             let session_dir = dir
                 .root()
                 .join("sessions")
                 .join(format!("{}-impl", job_id));
             let job = dir.state().jobs.iter().find(|j| j.id == job_id);
 
-            // Use rework feedback from latest artifact if available
             let latest_decision = job
                 .and_then(|j| j.artifacts.last())
                 .and_then(|art_id| dir.state().artifacts.iter().find(|a| a.id == *art_id))
@@ -315,20 +432,17 @@ impl Orchestrator {
             (session_dir, prompt_text, repo_refs)
         };
 
-        // Ensure pool clones exist and have the needed branches, then set up session dir
         let pool_dir = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             dir.root().join("pool")
         };
         std::fs::create_dir_all(&pool_dir)?;
 
-        // Find source URLs from project config
         let project_repos = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             dir.state().project.repos.clone()
         };
 
-        // Build session dir repos: ensure pool has each branch, then clone from pool
         let mut session_repos: Vec<(String, PathBuf, Option<String>)> = Vec::new();
         for repo_ref in &repo_refs {
             if let Some(config) = project_repos.iter().find(|r| r.name == repo_ref.name) {
@@ -342,7 +456,6 @@ impl Orchestrator {
             }
         }
 
-        // Skip clone setup if session dir already exists (rework case)
         if !session_dir.exists() {
             let ref_tuples: Vec<(&str, &Path, Option<&str>)> = session_repos
                 .iter()
@@ -351,10 +464,11 @@ impl Orchestrator {
             git::setup_session_dir(&session_dir, &ref_tuples)?;
         }
 
+        let ps = self.projects.get_mut(project_name).unwrap();
         let key = SessionKey::Implementation {
             job_id: job_id.to_string(),
         };
-        let session = self.ensure_session(key);
+        let session = ps.ensure_session(key);
         session.enqueue(QueueItem {
             prompt: prompt::implementation_prompt(Some(&session_dir), &prompt_text),
             system_prompt: None,
@@ -363,9 +477,8 @@ impl Orchestrator {
             mcp_config: None,
         });
 
-        // Transition to running
         {
-            let mut dir = self.project_dir.lock().unwrap();
+            let mut dir = ps.project_dir.lock().unwrap();
             if let Some(job) =
                 dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id)
             {
@@ -377,9 +490,10 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn enqueue_stakeholders(&mut self, job_id: &str) -> io::Result<()> {
+    fn enqueue_stakeholders(&mut self, project_name: &str, job_id: &str) -> io::Result<()> {
+        let ps = self.projects.get(project_name).unwrap();
         let (dispatch_prompt, artifact_summary, stakeholders, session_dir) = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             let job = dir.state().jobs.iter().find(|s| s.id == job_id);
             let dispatch_prompt = job.map(|j| j.dispatch.prompt.clone()).unwrap_or_default();
             let artifact_summary = dir.latest_artifact(job_id)
@@ -393,6 +507,7 @@ impl Orchestrator {
             (dispatch_prompt, artifact_summary, stakeholders, session_dir)
         };
 
+        let ps = self.projects.get_mut(project_name).unwrap();
         for stakeholder in &stakeholders {
             let prompt_text = prompt::stakeholder_prompt(
                 Some(&session_dir),
@@ -405,7 +520,7 @@ impl Orchestrator {
                 job_id: job_id.to_string(),
                 name: stakeholder.name.clone(),
             };
-            let session = self.ensure_session(key);
+            let session = ps.ensure_session(key);
             session.enqueue(QueueItem {
                 prompt: prompt_text,
                 system_prompt: None,
@@ -415,9 +530,8 @@ impl Orchestrator {
             });
         }
 
-        // Transition to reviewing
         {
-            let mut dir = self.project_dir.lock().unwrap();
+            let mut dir = ps.project_dir.lock().unwrap();
             if let Some(job) =
                 dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id)
             {
@@ -429,9 +543,10 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn enqueue_leader_decision(&mut self, job_ids: &[String]) -> io::Result<()> {
+    fn enqueue_leader_decision(&mut self, project_name: &str, job_ids: &[String]) -> io::Result<()> {
+        let ps = self.projects.get(project_name).unwrap();
         let (state, project_md, working_dir) = {
-            let dir = self.project_dir.lock().unwrap();
+            let dir = ps.project_dir.lock().unwrap();
             let state = dir.state().clone();
             let project_md_path = dir.root().join("project.md");
             let project_md = std::fs::read_to_string(&project_md_path).ok();
@@ -443,7 +558,6 @@ impl Orchestrator {
             .iter()
             .filter_map(|id| {
                 let job = state.jobs.iter().find(|s| &s.id == id)?;
-                // Get feedback from the latest artifact
                 let artifact = job.artifacts.last()
                     .and_then(|art_id| state.artifacts.iter().find(|a| a.id == *art_id));
                 let feedbacks: Vec<(String, String)> = artifact
@@ -458,8 +572,9 @@ impl Orchestrator {
         let prompt_text =
             prompt::leader_decision_prompt(&state, &job_feedback, project_md.as_deref());
 
-        let mcp_config = self.mcp_config_path.clone();
-        let session = self.ensure_session(SessionKey::Leader);
+        let ps = self.projects.get_mut(project_name).unwrap();
+        let mcp_config = ps.mcp_config_path.clone();
+        let session = ps.ensure_session(SessionKey::Leader);
         session.enqueue(QueueItem {
             prompt: prompt_text,
             system_prompt: Some(prompt::leader_system_prompt()),
@@ -470,68 +585,24 @@ impl Orchestrator {
 
         Ok(())
     }
+}
 
-    fn extract_summary(&self, session_id: &str) -> String {
-        if let Some((_, events)) = self
-            .app
-            .session_events
-            .iter()
-            .find(|(id, _)| id == session_id)
-        {
-            for event in events.iter().rev() {
-                if let StreamEvent::Result { result, .. } = event {
-                    return result.clone();
-                }
-            }
-            for event in events.iter().rev() {
-                if let StreamEvent::AssistantText(text) = event {
-                    return text.clone();
-                }
+fn extract_summary(app: &AppState, session_id: &str) -> String {
+    if let Some((_, events)) = app
+        .session_events
+        .iter()
+        .find(|(id, _)| id == session_id)
+    {
+        for event in events.iter().rev() {
+            if let StreamEvent::Result { result, .. } = event {
+                return result.clone();
             }
         }
-        "No summary available".to_string()
-    }
-
-    fn write_trace(&mut self, session_key: &str, line: &str) {
-        let file = self
-            .trace_files
-            .entry(session_key.to_string())
-            .or_insert_with(|| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(self.trace_dir.join(format!("{}.jsonl", session_key)))
-                    .expect("failed to open trace file")
-            });
-        let _ = writeln!(file, "{}", line);
-    }
-
-    fn fetch_job_commits(&self, job_id: &str, session_dir: &Path) {
-        let dir = self.project_dir.lock().unwrap();
-        let repos = &dir.state().project.repos;
-        let multi_repo = repos.len() > 1;
-        let pool_dir = dir.root().join("pool");
-        for repo in repos {
-            let clone_path = session_dir.join(&repo.name);
-            if !clone_path.exists() {
-                continue;
-            }
-            // Ensure leader's repo exists by cloning from pool
-            let target_path = dir.root().join("repos").join(&repo.name);
-            if !target_path.exists() {
-                let pool_repo = pool_dir.join(&repo.name);
-                if pool_repo.exists() {
-                    let _ = git::clone_from_pool(&pool_repo, &target_path, None);
-                }
-            }
-            if target_path.exists() {
-                let branch_name = if multi_repo {
-                    format!("{}/{}", job_id, repo.name)
-                } else {
-                    job_id.to_string()
-                };
-                let _ = git::fetch_branch(&target_path, &clone_path, &branch_name);
+        for event in events.iter().rev() {
+            if let StreamEvent::AssistantText(text) = event {
+                return text.clone();
             }
         }
     }
+    "No summary available".to_string()
 }

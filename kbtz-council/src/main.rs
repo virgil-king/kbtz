@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kbtz_council::global::GlobalState;
+use kbtz_council::global::{GlobalState, ProjectStatus};
 use kbtz_council::mcp;
-use kbtz_council::orchestrator::Orchestrator;
-use kbtz_council::project::{Project, ProjectDir};
+use kbtz_council::orchestrator::{Orchestrator, ProjectState};
+use kbtz_council::project::Project;
 use kbtz_council::session::SessionKey;
 use kbtz_council::tui::dashboard::{render_dashboard, SessionInfo, SessionStatus};
 use kbtz_council::tui::input::TextInput;
@@ -30,16 +30,22 @@ fn default_global_dir() -> PathBuf {
         .join(".kbtz-council")
 }
 
+const DEFAULT_MAX_SESSIONS: usize = 8;
+
 #[derive(Parser)]
 #[command(name = "kbtz-council")]
 #[command(about = "Leader-driven AI agent orchestrator")]
 struct Cli {
-    /// Project name to open or create.
-    project: String,
+    /// Project name to focus on. If omitted, loads all active projects.
+    project: Option<String>,
 
     /// Path to the global directory (default: ~/.kbtz-council/).
     #[arg(long, default_value_os_t = default_global_dir())]
     global_dir: PathBuf,
+
+    /// Maximum concurrent agent sessions across all projects.
+    #[arg(long, default_value_t = DEFAULT_MAX_SESSIONS)]
+    max_sessions: usize,
 }
 
 fn main() -> io::Result<()> {
@@ -47,28 +53,48 @@ fn main() -> io::Result<()> {
 
     let mut global = GlobalState::open(&cli.global_dir)?;
 
-    let project_dir = match global.load_project(&cli.project) {
-        Ok(dir) => dir,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+    // Determine which projects to load
+    let project_names: Vec<String> = if let Some(ref name) = cli.project {
+        // Ensure the specified project exists (create if needed)
+        if global.load_project(name).is_err() {
             let project = Project {
                 repos: vec![],
                 stakeholders: vec![],
                 goal_summary: String::new(),
             };
-            global.create_project(&cli.project, "", &project)?
+            global.create_project(name, "", &project)?;
         }
-        Err(e) => return Err(e),
+        vec![name.clone()]
+    } else {
+        global
+            .list_projects(Some(ProjectStatus::Active))
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect()
     };
 
-    let project_path = project_dir.root().to_path_buf();
-    let project_dir = Arc::new(Mutex::new(project_dir));
+    let global = Arc::new(Mutex::new(global));
+    let mut orchestrator = Orchestrator::new(Arc::clone(&global), cli.max_sessions);
 
-    let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
-    let mcp_config_path = mcp::write_mcp_config(&project_path, mcp_port)?;
+    // Load each project: open its dir, start its MCP server, register it
+    for name in &project_names {
+        let g = global.lock().unwrap();
+        let project_dir = g.load_project(name)?;
+        let project_path = project_dir.root().to_path_buf();
+        let project_dir = Arc::new(Mutex::new(project_dir));
 
-    let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
-    orchestrator.recover_from_state();
-    orchestrator.app.selected_session = Some("leader".to_string());
+        let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
+        let mcp_config_path = mcp::write_mcp_config(&project_path, mcp_port)?;
+
+        let mut ps = ProjectState::new(name.clone(), project_dir, mcp_config_path);
+        ps.recover_from_state();
+        orchestrator.add_project(ps);
+    }
+
+    // Default selection: first project's leader
+    if let Some(name) = project_names.first() {
+        orchestrator.app.selected_session = Some(format!("{}/leader", name));
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -78,7 +104,7 @@ fn main() -> io::Result<()> {
 
     let mut input = TextInput::new();
 
-    let result = run_loop(&mut terminal, &mut orchestrator, &project_dir, &mut input);
+    let result = run_loop(&mut terminal, &mut orchestrator, &mut input);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -90,7 +116,6 @@ fn main() -> io::Result<()> {
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     orch: &mut Orchestrator,
-    project_dir: &Arc<Mutex<ProjectDir>>,
     input: &mut TextInput,
 ) -> io::Result<()> {
     loop {
@@ -108,8 +133,8 @@ fn run_loop(
                 .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                 .split(area);
 
-            // Dashboard (left)
-            let session_infos = collect_session_infos(orch, project_dir);
+            // Dashboard (left) — sessions grouped by project
+            let session_infos = collect_session_infos(orch);
 
             render_dashboard(
                 frame,
@@ -126,11 +151,11 @@ fn run_loop(
                 .split(h_chunks[1]);
 
             let events = orch.app.selected_events();
-            let session_id = orch.app.selected_session.as_deref().unwrap_or("leader");
+            let session_id = orch.app.selected_session.as_deref().unwrap_or("");
             let is_running = orch.app.selected_session.as_ref()
                 .and_then(|name| {
-                    let key = parse_session_key(name);
-                    orch.sessions.get(&key)
+                    let (proj, key) = parse_qualified_session(name);
+                    orch.projects.get(proj).and_then(|ps| ps.sessions.get(&key))
                 })
                 .map(|ms| ms.is_running())
                 .unwrap_or(false);
@@ -159,14 +184,13 @@ fn run_loop(
                             orch.app.scroll_offset = orch.app.scroll_offset.saturating_sub(10);
                         }
                         KeyCode::Home => {
-                            // Scroll to top — set to a large number, render will clamp
                             orch.app.scroll_offset = u16::MAX;
                         }
                         KeyCode::End => {
-                            orch.app.scroll_offset = 0; // pin to bottom
+                            orch.app.scroll_offset = 0;
                         }
                         KeyCode::Tab | KeyCode::Down => {
-                            let keys: Vec<String> = collect_session_infos(orch, project_dir)
+                            let keys: Vec<String> = collect_session_infos(orch)
                                 .iter()
                                 .map(|i| i.name.clone())
                                 .collect();
@@ -183,7 +207,7 @@ fn run_loop(
                             }
                         }
                         KeyCode::Up => {
-                            let keys: Vec<String> = collect_session_infos(orch, project_dir)
+                            let keys: Vec<String> = collect_session_infos(orch)
                                 .iter()
                                 .map(|i| i.name.clone())
                                 .collect();
@@ -203,16 +227,15 @@ fn run_loop(
                     },
                     InputMode::Editing => {
                         if key.code == KeyCode::Enter {
-                            // Enter sends the message
                             let text = input.text().trim().to_string();
                             if !text.is_empty() {
                                 let session_name = orch
                                     .app
                                     .selected_session
                                     .clone()
-                                    .unwrap_or_else(|| "leader".to_string());
-                                let session_key = parse_session_key(&session_name);
-                                orch.send_message(&session_key, text);
+                                    .unwrap_or_default();
+                                let (proj, session_key) = parse_qualified_session(&session_name);
+                                orch.send_message(proj, &session_key, text);
                             }
                             input.clear();
                             orch.app.input_mode = InputMode::Normal;
@@ -222,7 +245,6 @@ fn run_loop(
                         } else if key.code == KeyCode::Char('j')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            // Ctrl+J inserts newline
                             input.insert_newline();
                         } else if key.code == KeyCode::Backspace {
                             input.backspace();
@@ -236,61 +258,82 @@ fn run_loop(
     }
 }
 
-fn collect_session_infos(
-    orch: &Orchestrator,
-    project_dir: &Arc<Mutex<ProjectDir>>,
-) -> Vec<SessionInfo> {
-    let dir = project_dir.lock().unwrap();
-    let jobs = &dir.state().jobs;
+/// Collect session info across all projects, grouped by project name.
+/// Each session name is qualified as "project/session_key".
+fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
+    let mut infos = Vec::new();
 
-    let mut infos: Vec<SessionInfo> = orch
-        .sessions
-        .values()
-        .map(|ms| {
-            // Find job phase for implementation sessions
-            let (job_phase, job_summary) = match &ms.key {
-                SessionKey::Implementation { job_id } => {
-                    let job = jobs.iter().find(|j| &j.id == job_id);
-                    (
-                        job.map(|j| j.phase.clone()),
-                        job.map(|j| j.dispatch.prompt.clone()),
-                    )
+    // Sort project names for stable ordering
+    let mut project_names: Vec<&String> = orch.projects.keys().collect();
+    project_names.sort();
+
+    for project_name in project_names {
+        let ps = &orch.projects[project_name];
+        let dir = ps.project_dir.lock().unwrap();
+        let jobs = &dir.state().jobs;
+
+        let mut project_infos: Vec<SessionInfo> = ps
+            .sessions
+            .values()
+            .map(|ms| {
+                let (job_phase, job_summary) = match &ms.key {
+                    SessionKey::Implementation { job_id } => {
+                        let job = jobs.iter().find(|j| &j.id == job_id);
+                        (
+                            job.map(|j| j.phase.clone()),
+                            job.map(|j| j.dispatch.prompt.clone()),
+                        )
+                    }
+                    _ => (None, None),
+                };
+
+                SessionInfo {
+                    name: format!("{}/{}", project_name, ms.key),
+                    status: if ms.is_running() {
+                        SessionStatus::Running
+                    } else if !ms.queue.is_empty() {
+                        SessionStatus::Queued
+                    } else {
+                        SessionStatus::Idle
+                    },
+                    queue_depth: ms.queue.len(),
+                    job_phase,
+                    job_summary,
                 }
-                _ => (None, None),
-            };
+            })
+            .collect();
 
-            SessionInfo {
-                name: ms.key.to_string(),
-                status: if ms.is_running() {
-                    SessionStatus::Running
-                } else if !ms.queue.is_empty() {
-                    SessionStatus::Queued
-                } else {
-                    SessionStatus::Idle
+        // Always show leader for each project
+        let leader_key = format!("{}/leader", project_name);
+        if !project_infos.iter().any(|i| i.name == leader_key) {
+            project_infos.insert(
+                0,
+                SessionInfo {
+                    name: leader_key,
+                    status: SessionStatus::Idle,
+                    queue_depth: 0,
+                    job_phase: None,
+                    job_summary: None,
                 },
-                queue_depth: ms.queue.len(),
-                job_phase,
-                job_summary,
-            }
-        })
-        .collect();
+            );
+        }
 
-    drop(dir);
-
-    // Always show leader
-    if !infos.iter().any(|i| i.name == "leader") {
-        infos.insert(
-            0,
-            SessionInfo {
-                name: "leader".to_string(),
-                status: SessionStatus::Idle,
-                queue_depth: 0,
-                job_phase: None,
-                job_summary: None,
-            },
-        );
+        infos.extend(project_infos);
     }
+
     infos
+}
+
+/// Parse a qualified session name "project/session_key" into (project_name, SessionKey).
+fn parse_qualified_session(s: &str) -> (&str, SessionKey) {
+    if let Some(pos) = s.find('/') {
+        let project = &s[..pos];
+        let session = &s[pos + 1..];
+        (project, parse_session_key(session))
+    } else {
+        // Fallback: treat as session key with empty project
+        ("", parse_session_key(s))
+    }
 }
 
 fn parse_session_key(s: &str) -> SessionKey {
@@ -302,18 +345,16 @@ fn parse_session_key(s: &str) -> SessionKey {
         }
     } else {
         // Try to parse as job_id-stakeholder_name (e.g. "job-001-security")
-        // The job_id is "job-NNN", so split after the job prefix
         if let Some(pos) = s.find('-').and_then(|first| {
-            // Find second dash (after "job-NNN")
             s[first + 1..].find('-').map(|second| first + 1 + second)
         }) {
             let (job_part, name_part) = s.split_at(pos);
             SessionKey::Stakeholder {
                 job_id: job_part.to_string(),
-                name: name_part[1..].to_string(), // skip the dash
+                name: name_part[1..].to_string(),
             }
         } else {
-            SessionKey::Leader // fallback
+            SessionKey::Leader
         }
     }
 }

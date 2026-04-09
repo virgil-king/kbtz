@@ -153,15 +153,16 @@ fn recovery_rolls_back_inflight_phases() {
     dir.state_mut().jobs[2].phase = JobPhase::Reviewed; // should stay
     dir.persist().unwrap();
 
-    // Reload and recover
+    // Reload and recover via ProjectState
     let dir2 = ProjectDir::load(tmp.path()).unwrap();
     let project_dir = std::sync::Arc::new(std::sync::Mutex::new(dir2));
     let mcp_config = tmp.path().join(".mcp.json");
-    let mut orch = kbtz_council::orchestrator::Orchestrator::new(
+    let mut ps = kbtz_council::orchestrator::ProjectState::new(
+        "test".into(),
         std::sync::Arc::clone(&project_dir),
         mcp_config,
     );
-    orch.recover_from_state();
+    ps.recover_from_state();
 
     let dir = project_dir.lock().unwrap();
     // Running -> Dispatched (so tick re-spawns with --resume)
