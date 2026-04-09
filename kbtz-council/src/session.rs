@@ -40,6 +40,7 @@ pub enum SessionMessage {
 #[derive(Debug, Clone)]
 pub struct QueueItem {
     pub prompt: String,
+    pub system_prompt: Option<String>,
     pub step_id: Option<String>,
     pub working_dir: PathBuf,
     pub mcp_config: Option<PathBuf>,
@@ -98,6 +99,7 @@ impl ManagedSession {
             &self.agent_session_id,
             resume,
             &item.prompt,
+            item.system_prompt.as_deref(),
             &item.working_dir,
             item.mcp_config.as_deref(),
         )?;
@@ -144,6 +146,7 @@ impl ActiveSession {
         agent_session_id: &AgentSessionId,
         resume: bool,
         prompt: &str,
+        system_prompt: Option<&str>,
         working_dir: &Path,
         mcp_config: Option<&Path>,
     ) -> io::Result<Self> {
@@ -153,10 +156,13 @@ impl ActiveSession {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--bare")
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if let Some(sp) = system_prompt {
+            cmd.arg("--append-system-prompt").arg(sp);
+        }
 
         if resume {
             cmd.arg("--resume").arg(agent_session_id.0.to_string());

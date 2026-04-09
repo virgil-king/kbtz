@@ -57,9 +57,14 @@ impl Orchestrator {
         } else {
             None
         };
+        let system_prompt = match key {
+            SessionKey::Leader => Some(prompt::leader_system_prompt()),
+            _ => None,
+        };
         let session = self.ensure_session(key.clone());
         session.enqueue(QueueItem {
             prompt: message,
+            system_prompt,
             step_id: None,
             working_dir,
             mcp_config,
@@ -271,7 +276,8 @@ impl Orchestrator {
         };
         let session = self.ensure_session(key);
         session.enqueue(QueueItem {
-            prompt: prompt::implementation_prompt(&step_prompt),
+            prompt: prompt::implementation_prompt(Some(&session_dir), &step_prompt),
+            system_prompt: None,
             step_id: Some(step_id.to_string()),
             working_dir: session_dir,
             mcp_config: None,
@@ -305,6 +311,7 @@ impl Orchestrator {
 
         for stakeholder in &stakeholders {
             let prompt_text = prompt::stakeholder_prompt(
+                Some(&session_dir),
                 &stakeholder.persona,
                 &step
                     .as_ref()
@@ -322,6 +329,7 @@ impl Orchestrator {
             let session = self.ensure_session(key);
             session.enqueue(QueueItem {
                 prompt: prompt_text,
+                system_prompt: None,
                 step_id: Some(step_id.to_string()),
                 working_dir: session_dir.clone(),
                 mcp_config: None,
@@ -372,6 +380,7 @@ impl Orchestrator {
         let session = self.ensure_session(SessionKey::Leader);
         session.enqueue(QueueItem {
             prompt: prompt_text,
+            system_prompt: Some(prompt::leader_system_prompt()),
             step_id: None,
             working_dir,
             mcp_config: Some(mcp_config),

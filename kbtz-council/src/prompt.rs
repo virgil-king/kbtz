@@ -1,54 +1,33 @@
 use crate::project::OrchestratorState;
 use crate::step::StepPhase;
+use std::path::Path;
+
+const LEADER_SYSTEM_DEFAULT: &str = include_str!("../prompts/leader-system.md");
+const IMPLEMENTATION_DEFAULT: &str = include_str!("../prompts/implementation.md");
+const STAKEHOLDER_DEFAULT: &str = include_str!("../prompts/stakeholder.md");
+
+/// Load a prompt from the project directory if it exists, otherwise use the default.
+fn load_prompt(project_dir: Option<&Path>, filename: &str, default: &str) -> String {
+    if let Some(dir) = project_dir {
+        let path = dir.join("prompts").join(filename);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return content;
+        }
+    }
+    default.to_string()
+}
 
 /// System prompt for the leader session.
+pub fn leader_system_prompt_from(project_dir: Option<&Path>) -> String {
+    load_prompt(project_dir, "leader-system.md", LEADER_SYSTEM_DEFAULT)
+}
+
+/// System prompt for the leader session (default, no project override).
 pub fn leader_system_prompt() -> String {
-    r#"You are the LEADER of a council-based AI agent orchestration system.
-
-CRITICAL RULES:
-- You NEVER write code, create files, or modify repositories directly.
-- You NEVER use Bash, Read, Write, Edit, Grep, or any file tools.
-- You ONLY use the council MCP tools listed below to delegate work.
-- You are a strategist and decision-maker, not an implementor.
-
-Your MCP tools (provided by the council orchestrator):
-
-1. define_project(repos, stakeholders, goal_summary)
-   Register the repos and stakeholder reviewers. Call this first when
-   setting up a new project. repos is an array of {name, url} objects.
-   stakeholders is an array of {name, persona} objects.
-
-2. dispatch_step(prompt, repos, files)
-   Delegate an implementation step to an agent. Write a clear, detailed
-   prompt describing what the agent should do. Specify which repos are
-   relevant. The orchestrator will clone the repos and spawn an agent.
-
-3. rework_step(step_id, feedback)
-   Send a completed step back for changes with specific feedback.
-
-4. close_step(step_id)
-   Close a step after reviewing it. The orchestrator cleans up.
-
-WORKFLOW:
-1. Chat with the user to understand the project goal.
-2. Call define_project to register repos and stakeholders.
-3. Save the project definition to project.md using the Write tool.
-4. Break the goal into implementation steps.
-5. Call dispatch_step for each step with a detailed prompt. Independent
-   steps can be dispatched in parallel — the orchestrator runs them
-   concurrently. Dependent steps should be dispatched after their
-   prerequisites complete.
-6. When feedback arrives, review it and call close_step or rework_step.
-7. Dispatch follow-up steps as needed.
-
-When invoked with stakeholder feedback, review ALL feedback, form your
-own judgment, then merge the branch in repos/ and call close_step, or
-call rework_step with specific changes needed."#
-        .to_string()
+    LEADER_SYSTEM_DEFAULT.to_string()
 }
 
 /// Build the headless leader prompt with full state snapshot and feedback.
-/// `project_md` is the contents of project.md if it exists.
 pub fn leader_decision_prompt(
     state: &OrchestratorState,
     step_feedback: &[(String, Vec<(String, String)>)],
@@ -111,41 +90,21 @@ pub fn leader_decision_prompt(
 }
 
 /// Build the prompt for an implementation agent session.
-pub fn implementation_prompt(step_prompt: &str) -> String {
-    format!(
-        r#"You are an implementation agent. Your task:
-
-{}
-
-Your working directory contains the repo(s) you need to modify. If there are
-multiple repos, they are in subdirectories. A `files/` directory may contain
-additional context from the project leader.
-
-Do the work, commit your changes, and provide a summary of what you did.
-Make clean, focused commits. Do not push to any remote."#,
-        step_prompt
-    )
+pub fn implementation_prompt(project_dir: Option<&Path>, step_prompt: &str) -> String {
+    let template = load_prompt(project_dir, "implementation.md", IMPLEMENTATION_DEFAULT);
+    template.replace("{prompt}", step_prompt)
 }
 
 /// Build the prompt for a stakeholder review session.
-pub fn stakeholder_prompt(persona: &str, step_prompt: &str, summary: &str) -> String {
-    format!(
-        r#"You are a code reviewer with the following focus:
-
-{}
-
-## Step being reviewed
-
-**Task:** {}
-
-**Implementation summary:** {}
-
-Review the implementation. The repo clones are available in the working
-directory for you to read code and commit history. The leader's full repos
-are also available for broader context.
-
-Provide structured feedback: what's good, what needs changes, and any
-blocking concerns. Be specific -- reference file paths and line numbers."#,
-        persona, step_prompt, summary
-    )
+pub fn stakeholder_prompt(
+    project_dir: Option<&Path>,
+    persona: &str,
+    step_prompt: &str,
+    summary: &str,
+) -> String {
+    let template = load_prompt(project_dir, "stakeholder.md", STAKEHOLDER_DEFAULT);
+    template
+        .replace("{persona}", persona)
+        .replace("{step_prompt}", step_prompt)
+        .replace("{summary}", summary)
 }
