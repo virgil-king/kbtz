@@ -195,8 +195,8 @@ thread. Not in v2 scope.
 
 - `define_project(repos, stakeholders, goal_summary)` — register repos
   and stakeholder personas.
-- `dispatch_job(prompt, repos)` — delegate work to an implementation
-  agent. Creates a job and starts the implementation phase.
+- `dispatch_job(prompt, repos, files?)` — delegate work to an
+  implementation agent. Creates a job and starts the implementation phase.
 - `create_artifact(description, job_id?)` — leader did the work, submit
   for review. If `job_id` is provided, this is a revision of that job.
   If null, a new job is created implicitly.
@@ -238,16 +238,20 @@ Multiple jobs across multiple projects can use the same repo concurrently
 
 ```rust
 struct Orchestrator {
+    global_dir: PathBuf,             // ~/.kbtz-council/
     projects: HashMap<String, ProjectState>,
     concierge: ManagedSession,
+    concierge_mcp_port: u16,
     config: GlobalConfig,
-    focused_project: Option<String>,
+    focused_project: Option<String>,  // which project the TUI shows
+    view: View,                       // Home, Project, History
 }
 
 struct ProjectState {
     project_dir: Arc<Mutex<ProjectDir>>,
     sessions: HashMap<SessionKey, ManagedSession>,
     mcp_port: u16,
+    status: ProjectStatus,           // Active, Paused, Archived
 }
 ```
 
@@ -359,3 +363,180 @@ stop = ["echo 'project stopped'"]
 ```
 
 Project-level config overrides global. Project hooks run after global hooks.
+
+## Concierge MCP Server
+
+The concierge has its own MCP HTTP server on a separate port from
+project leaders. Its tools operate on the global state (index.json),
+not on any single project.
+
+The concierge's `.mcp.json` lives at `~/.kbtz-council/concierge/.mcp.json`.
+The MCP server is started at orchestrator boot alongside any project MCP
+servers.
+
+Tool calls from the concierge are handled synchronously by the HTTP
+handler (same as leader MCP calls). `create_project` creates the
+directory, writes to index.json, and runs start hooks before responding.
+
+The concierge's queue works identically to the leader's: user messages
+and orchestrator events go in, `claude -p --resume` invocations come out.
+
+### Concierge tools (full spec)
+
+**`create_project(name, goal)`**
+- Creates `~/.kbtz-council/projects/<name>/`
+- Initializes state.json, creates subdirectories
+- Adds entry to index.json
+- Runs global then project start hooks
+- Returns: `{ "project": "<name>", "path": "..." }`
+
+**`list_projects(status?)`**
+- Reads index.json
+- Filters by status if provided (active/paused/archived)
+- Returns: array of `{ "name", "status", "goal", "created_at", "job_count" }`
+
+**`pause_project(name)`**
+- Sets status to paused in index.json
+- Orchestrator stops polling this project's sessions on next tick
+- Running sessions are killed gracefully (SIGTERM)
+
+**`archive_project(name)`**
+- Runs stop hooks
+- Sets status to archived in index.json
+- Moves directory from projects/ to archive/
+
+**`resume_project(name)`**
+- Moves from archive/ to projects/ (or unpauses)
+- Sets status to active in index.json
+- Runs start hooks
+- Calls recover_from_state() for the project
+
+## index.json Schema
+
+```json
+{
+  "projects": [
+    {
+      "name": "readme-feature",
+      "status": "active",
+      "goal": "Add README.md to kbtz-council",
+      "created_at": "2026-04-09T01:00:00Z",
+      "path": "projects/readme-feature"
+    },
+    {
+      "name": "old-refactor",
+      "status": "archived",
+      "goal": "Refactor auth module",
+      "created_at": "2026-04-01T00:00:00Z",
+      "path": "archive/old-refactor"
+    }
+  ]
+}
+```
+
+The orchestrator reads index.json on startup to discover projects.
+`ProjectState` includes a `status` field read from here. The event
+loop skips paused projects (no polling, no ticking).
+
+## create_artifact (full spec)
+
+**`create_artifact(description, repos, job_id?)`**
+
+Parameters:
+- `description` — what the leader changed
+- `repos` — which repos were modified `[{name, branch}]`
+- `job_id` — optional. If provided, this is a revision of that job.
+  If null, a new job is created with `implementor: "leader"` and a
+  `Dispatch` with `prompt: description`, `repos: repos`, `files: []`.
+
+The artifact is created at `Completed` phase (no implementation agent
+needed). Stakeholder review is triggered immediately.
+
+## Rework for Leader-Created Jobs
+
+When `rework_job` is called on a job with `implementor: "leader"`, the
+lifecycle tick must NOT spawn an implementation agent. Instead:
+
+1. The lifecycle emits a new action: `InvokeLeaderForRework { job_id }`
+2. The orchestrator enqueues a message to the leader's queue with the
+   rework feedback and the original task description
+3. The leader does the work again and calls `create_artifact` with the
+   same `job_id` to submit the revision
+
+The lifecycle distinguishes agent vs leader rework by checking
+`job.implementor`. This field is stored on the Job struct.
+
+## Clone Pool Update Policy
+
+The global pool at `~/.kbtz-council/pool/` is a read-only cache of
+shallow branches. On each use:
+
+1. If the pool clone doesn't exist, create it: `git clone --depth 1`
+2. If the branch exists locally, `git fetch --depth 1 origin <branch>`
+   to update it (picks up new commits)
+3. If the branch doesn't exist locally, fetch it
+
+This ensures session clones always start from the latest available
+commit, even if another project fetched the same branch earlier.
+
+## TUI Navigation
+
+### Keybindings by view
+
+**Home View:**
+- `↑↓` or `Tab` — select project (active list) or archived project
+- `Enter` on active project — enter Project View
+- `Enter` on archived project — enter History View
+- `Enter` with no project selected — start typing to concierge
+- `Esc` — cancel input
+- `q` — quit
+
+**Project View:**
+- `↑↓` or `Tab` — select session
+- `PageUp/PageDown` — scroll session transcript
+- `Enter` — start typing message to selected session
+- `Esc` — return to Home View (project keeps running)
+- `q` — quit
+
+**History View:**
+- `↑↓` — select job/artifact
+- `PageUp/PageDown` — scroll transcript
+- `Esc` — return to Home View
+- `q` — quit
+
+The concierge is only accessible from Home View. The user returns to
+Home (Esc from Project View) to talk to the concierge. This prevents
+confusion about which session receives input.
+
+In Project View, user messages go to the selected session (leader,
+implementation agent, or stakeholder — any session).
+
+## Relationship to kbtz
+
+kbtz-council v2 fully replaces kbtz-workspace. It does NOT integrate
+with the kbtz SQLite database. Projects replace tasks. The concierge
+replaces the toplevel session. Job/artifact history replaces task notes.
+
+Users migrating from kbtz-workspace will use kbtz-council instead. The
+kbtz CLI tool remains available for standalone task tracking but is not
+used by or connected to kbtz-council.
+
+## PTY vs Headless (design decision)
+
+kbtz-workspace uses full PTY sessions with passthrough mode, VTE
+scrollback, and raw byte forwarding. kbtz-council intentionally drops
+this in favor of headless sessions with stream-json rendering.
+
+Rationale:
+- PTY passthrough is complex (scroll mode, alt screen, VTE sync) and
+  was the main source of bugs in kbtz-workspace
+- Stream-json rendering provides sufficient visibility for monitoring
+- The chat-like input model (user types messages, agent responds) works
+  well with headless sessions
+- All session transcripts are preserved in trace files for full replay
+
+The tradeoff is that users cannot type directly into an agent's terminal.
+Instead, they send messages through the session queue. This is
+intentional — it prevents the "agent stopped and won't continue" problem
+that PTY sessions had, since every invocation is `claude -p` and
+guaranteed to terminate.
