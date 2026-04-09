@@ -30,10 +30,18 @@ struct Cli {
     /// Path to the project directory. Created if it doesn't exist.
     #[arg(short, long)]
     project: PathBuf,
+
+    /// Run as MCP stdio server (spawned by claude as a subprocess).
+    #[arg(long)]
+    mcp_stdio: bool,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+
+    if cli.mcp_stdio {
+        return mcp::run_mcp_stdio(&cli.project);
+    }
 
     let project_dir = if cli.project.join("state.json").exists() {
         ProjectDir::load(&cli.project)?
@@ -48,9 +56,12 @@ fn main() -> io::Result<()> {
 
     let project_dir = Arc::new(Mutex::new(project_dir));
 
-    let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
-    let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
-    std::fs::write(cli.project.join("mcp-port"), mcp_port.to_string())?;
+    // Get our own binary path for the MCP config
+    let self_binary = std::env::current_exe()
+        .unwrap_or_else(|_| PathBuf::from("kbtz-council"))
+        .to_string_lossy()
+        .to_string();
+    let mcp_config_path = mcp::write_mcp_config(&cli.project, &self_binary)?;
 
     let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
     orchestrator.app.selected_session = Some("leader".to_string());
@@ -116,7 +127,14 @@ fn run_loop(
 
             let events = orch.app.selected_events();
             let session_id = orch.app.selected_session.as_deref().unwrap_or("leader");
-            render_stream_view(frame, v_chunks[0], events, session_id);
+            let is_running = orch.app.selected_session.as_ref()
+                .and_then(|name| {
+                    let key = parse_session_key(name);
+                    orch.sessions.get(&key)
+                })
+                .map(|ms| ms.is_running())
+                .unwrap_or(false);
+            render_stream_view(frame, v_chunks[0], events, session_id, is_running);
 
             let title = if editing {
                 " Ctrl+S send | Esc cancel "

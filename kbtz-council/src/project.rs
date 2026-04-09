@@ -70,6 +70,14 @@ impl ProjectDir {
         })
     }
 
+    /// Reload state from disk (picks up changes from MCP subprocess).
+    pub fn reload(&mut self) -> std::io::Result<()> {
+        let data = fs::read_to_string(self.root.join("state.json"))?;
+        self.state = serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

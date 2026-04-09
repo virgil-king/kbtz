@@ -304,13 +304,17 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
     Ok(port)
 }
 
-/// Write an .mcp.json config file pointing at the running HTTP MCP server.
-pub fn write_mcp_config(project_dir: &Path, port: u16) -> io::Result<std::path::PathBuf> {
+/// Write an .mcp.json config file using stdio transport.
+/// The orchestrator binary is invoked as an MCP server subprocess.
+pub fn write_mcp_config(
+    project_dir: &Path,
+    orchestrator_binary: &str,
+) -> io::Result<std::path::PathBuf> {
     let config = serde_json::json!({
         "mcpServers": {
             "council": {
-                "type": "http",
-                "url": format!("http://127.0.0.1:{}/mcp", port)
+                "command": orchestrator_binary,
+                "args": ["--mcp-stdio", "--project", project_dir.to_str().unwrap()]
             }
         }
     });
@@ -321,4 +325,69 @@ pub fn write_mcp_config(project_dir: &Path, port: u16) -> io::Result<std::path::
         serde_json::to_string_pretty(&config).unwrap(),
     )?;
     Ok(config_path)
+}
+
+/// Run the MCP stdio server. Reads JSON-RPC from stdin, processes tool
+/// calls by reading/writing the project directory, writes responses to
+/// stdout. Used when invoked with --mcp-stdio.
+pub fn run_mcp_stdio(project_path: &Path) -> io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let stdin = std::io::stdin();
+    let reader = BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Req {
+            #[allow(dead_code)]
+            jsonrpc: String,
+            id: serde_json::Value,
+            method: String,
+            params: Option<serde_json::Value>,
+        }
+
+        let request: Req = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let response_body = match request.method.as_str() {
+            "initialize" => jsonrpc_response(
+                request.id,
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "kbtz-council", "version": "0.1.0" }
+                }),
+            ),
+            "tools/list" => jsonrpc_response(request.id, tool_definitions()),
+            "tools/call" => {
+                let params = request.params.unwrap_or(serde_json::Value::Null);
+                let tool_name = params["name"].as_str().unwrap_or("");
+                let arguments = &params["arguments"];
+
+                let mut dir = ProjectDir::load(project_path)?;
+                let result = handle_tool_call(&mut dir, tool_name, arguments)
+                    .unwrap_or_else(|e| text_content(&format!("Error: {}", e)));
+
+                jsonrpc_response(request.id, result)
+            }
+            _ => jsonrpc_response(
+                request.id,
+                serde_json::json!({"error": {"code": -32601, "message": "Method not found"}}),
+            ),
+        };
+
+        writeln!(writer, "{}", response_body)?;
+        writer.flush()?;
+    }
+
+    Ok(())
 }

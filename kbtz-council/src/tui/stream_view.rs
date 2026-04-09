@@ -10,8 +10,9 @@ pub fn render_stream_view(
     area: Rect,
     events: &[StreamEvent],
     session_id: &str,
+    is_running: bool,
 ) {
-    let lines: Vec<Line> = events
+    let mut lines: Vec<Line> = events
         .iter()
         .flat_map(|event| match event {
             StreamEvent::Thinking(text) => vec![Line::from(Span::styled(
@@ -44,7 +45,16 @@ pub fn render_stream_view(
         })
         .collect();
 
-    let title = format!(" {} ", session_id);
+    // Show status when running and no output yet
+    if is_running && lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "⏳ Session running...",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    let status = if is_running { " [running] " } else { "" };
+    let title = format!(" {}{}", session_id, status);
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(title).borders(Borders::ALL))
         .wrap(Wrap { trim: false });
