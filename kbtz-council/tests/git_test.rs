@@ -38,7 +38,7 @@ fn shallow_clone_creates_repo_with_single_commit() {
     let dest = TempDir::new().unwrap();
     let clone_path = dest.path().join("clone");
 
-    kbtz_council::git::shallow_clone(source.path(), &clone_path).unwrap();
+    kbtz_council::git::shallow_clone(source.path(), &clone_path, None).unwrap();
 
     assert!(clone_path.join("file.txt").exists());
     let log = Command::new("git")
@@ -61,7 +61,7 @@ fn fetch_commits_brings_branch_into_target() {
 
     let clone_dir = TempDir::new().unwrap();
     let clone_path = clone_dir.path().join("clone");
-    kbtz_council::git::shallow_clone(source.path(), &clone_path).unwrap();
+    kbtz_council::git::shallow_clone(source.path(), &clone_path, None).unwrap();
 
     // Make a commit in the clone
     std::fs::write(clone_path.join("new.txt"), "new file").unwrap();
@@ -98,8 +98,8 @@ fn setup_session_dir_creates_clones_for_specified_repos() {
 
     let session_dir = TempDir::new().unwrap();
     let repos = vec![
-        ("repo-a", repo_a.path()),
-        ("repo-b", repo_b.path()),
+        ("repo-a", repo_a.path(), None),
+        ("repo-b", repo_b.path(), None),
     ];
 
     kbtz_council::git::setup_session_dir(session_dir.path(), &repos).unwrap();

@@ -14,9 +14,11 @@ Your MCP tools (provided by the council orchestrator):
    stakeholders is an array of {name, persona} objects.
 
 2. dispatch_job(prompt, repos, files)
-   Delegate an implementation step to an agent. Write a clear, detailed
-   prompt describing what the agent should do. Specify which repos are
-   relevant. The orchestrator will clone the repos and spawn an agent.
+   Delegate an implementation job to an agent. Write a clear, detailed
+   prompt describing what the agent should do. repos is an array of
+   {name, branch} objects — name must match a repo registered in
+   define_project, branch is optional (defaults to the repo's default
+   branch). The orchestrator will clone the repos and spawn an agent.
 
 3. rework_job(job_id, feedback)
    Send a completed step back for changes with specific feedback.

@@ -12,10 +12,18 @@ pub enum JobPhase {
     Rework,
 }
 
+/// A reference to a repo + optional branch for a job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dispatch {
     pub prompt: String,
-    pub repos: Vec<String>,
+    pub repos: Vec<RepoRef>,
     pub files: Vec<String>,
 }
 

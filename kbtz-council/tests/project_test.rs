@@ -1,13 +1,13 @@
 use kbtz_council::project::{Project, ProjectDir, RepoConfig, Stakeholder};
-use kbtz_council::job::{Dispatch, Job, JobPhase};
+use kbtz_council::job::{Dispatch, Job, JobPhase, RepoRef};
 use tempfile::TempDir;
 
 #[test]
 fn project_state_round_trip() {
     let project = Project {
         repos: vec![
-            RepoConfig { name: "backend".into(), url: "/home/user/backend".into() },
-            RepoConfig { name: "frontend".into(), url: "/home/user/frontend".into() },
+            RepoConfig { name: "backend".into(), url: "/home/user/backend".into(), branch: None },
+            RepoConfig { name: "frontend".into(), url: "/home/user/frontend".into(), branch: None },
         ],
         stakeholders: vec![
             Stakeholder { name: "security".into(), persona: "Review for auth and injection vulnerabilities.".into() },
@@ -30,7 +30,7 @@ fn job_state_round_trip() {
         phase: JobPhase::Dispatched,
         dispatch: Dispatch {
             prompt: "Add JWT auth middleware".into(),
-            repos: vec!["backend".into()],
+            repos: vec![RepoRef { name: "backend".into(), branch: None }],
             files: vec![],
         },
         summary: None,
@@ -66,7 +66,7 @@ fn job_phases_serialize_as_lowercase() {
 fn project_dir_init_creates_structure() {
     let tmp = TempDir::new().unwrap();
     let project = Project {
-        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into() }],
+        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into(), branch: None }],
         stakeholders: vec![
             Stakeholder { name: "security".into(), persona: "Check auth".into() },
         ],
@@ -86,7 +86,7 @@ fn project_dir_init_creates_structure() {
 fn project_dir_load_reads_state() {
     let tmp = TempDir::new().unwrap();
     let project = Project {
-        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into() }],
+        repos: vec![RepoConfig { name: "myrepo".into(), url: "/tmp/myrepo".into(), branch: None }],
         stakeholders: vec![],
         goal_summary: "Test".into(),
     };

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 pub struct RepoConfig {
     pub name: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

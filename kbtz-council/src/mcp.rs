@@ -1,6 +1,6 @@
 use crate::git;
 use crate::project::{ProjectDir, RepoConfig, Stakeholder};
-use crate::job::Dispatch;
+use crate::job::{Dispatch, RepoRef};
 use serde::Deserialize;
 use serde_json::Value;
 use std::io;
@@ -73,7 +73,17 @@ fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "prompt": { "type": "string" },
-                        "repos": { "type": "array", "items": { "type": "string" } },
+                        "repos": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "branch": { "type": "string" }
+                                },
+                                "required": ["name"]
+                            }
+                        },
                         "files": { "type": "array", "items": { "type": "string" } }
                     },
                     "required": ["prompt", "repos"]
@@ -136,15 +146,11 @@ fn handle_tool_call(
                 .map(|r| RepoConfig {
                     name: r.name,
                     url: r.url,
+                    branch: None,
                 })
                 .collect();
 
-            for repo in &repos {
-                let dest = dir.root().join("repos").join(&repo.name);
-                if !dest.exists() {
-                    git::shallow_clone(Path::new(&repo.url), &dest)?;
-                }
-            }
+            // No cloning here — repos are cloned on demand per job
 
             let stakeholder_params: Vec<StakeholderParam> =
                 serde_json::from_value(arguments["stakeholders"].clone()).unwrap_or_default();
@@ -171,7 +177,7 @@ fn handle_tool_call(
         }
         "dispatch_job" => {
             let prompt = arguments["prompt"].as_str().unwrap_or("").to_string();
-            let repos: Vec<String> =
+            let repos: Vec<RepoRef> =
                 serde_json::from_value(arguments["repos"].clone()).unwrap_or_default();
             let files: Vec<String> =
                 serde_json::from_value(arguments["files"].clone()).unwrap_or_default();

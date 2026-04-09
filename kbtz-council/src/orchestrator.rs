@@ -86,7 +86,7 @@ impl Orchestrator {
             .map(|s| JobSnapshot {
                 id: s.id.clone(),
                 phase: s.phase.clone(),
-                repos: s.dispatch.repos.clone(),
+                repos: s.dispatch.repos.iter().map(|r| r.name.clone()).collect(),
             })
             .collect();
 
@@ -214,8 +214,8 @@ impl Orchestrator {
 
         for action in actions {
             match action {
-                Action::SpawnImplementation { job_id, repos } => {
-                    self.enqueue_implementation(&job_id, &repos)?;
+                Action::SpawnImplementation { job_id, .. } => {
+                    self.enqueue_implementation(&job_id)?;
                 }
                 Action::SpawnStakeholders { job_id } => {
                     self.enqueue_stakeholders(&job_id)?;
@@ -238,44 +238,53 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn enqueue_implementation(&mut self, job_id: &str, repos: &[String]) -> io::Result<()> {
-        let (session_dir, job_prompt) = {
+    fn enqueue_implementation(&mut self, job_id: &str) -> io::Result<()> {
+        let (session_dir, job_prompt, repo_refs) = {
             let dir = self.project_dir.lock().unwrap();
             let session_dir = dir
                 .root()
                 .join("sessions")
                 .join(format!("{}-impl", job_id));
-            let job_prompt = dir
-                .state()
-                .jobs
-                .iter()
-                .find(|s| s.id == job_id)
-                .map(|s| s.dispatch.prompt.clone())
+            let job = dir.state().jobs.iter().find(|j| j.id == job_id);
+            let job_prompt = job.map(|j| j.dispatch.prompt.clone()).unwrap_or_default();
+            let repo_refs = job
+                .map(|j| j.dispatch.repos.clone())
                 .unwrap_or_default();
-            (session_dir, job_prompt)
+            (session_dir, job_prompt, repo_refs)
         };
 
-        // Set up clones
-        let owned_pairs: Vec<(String, PathBuf)> = {
+        // Ensure pool clones exist and have the needed branches, then set up session dir
+        let pool_dir = {
             let dir = self.project_dir.lock().unwrap();
-            repos
-                .iter()
-                .filter_map(|name| {
-                    let source = dir.root().join("repos").join(name);
-                    if source.exists() {
-                        Some((name.clone(), source))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+            dir.root().join("pool")
+        };
+        std::fs::create_dir_all(&pool_dir)?;
+
+        // Find source URLs from project config
+        let project_repos = {
+            let dir = self.project_dir.lock().unwrap();
+            dir.state().project.repos.clone()
         };
 
-        let ref_pairs: Vec<(&str, &Path)> = owned_pairs
+        // Build session dir repos: ensure pool has each branch, then clone from pool
+        let mut session_repos: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+        for repo_ref in &repo_refs {
+            if let Some(config) = project_repos.iter().find(|r| r.name == repo_ref.name) {
+                let repo_pool = pool_dir.join(&repo_ref.name);
+                git::ensure_pool_branch(&repo_pool, &config.url, repo_ref.branch.as_deref())?;
+                session_repos.push((
+                    repo_ref.name.clone(),
+                    repo_pool,
+                    repo_ref.branch.clone(),
+                ));
+            }
+        }
+
+        let ref_tuples: Vec<(&str, &Path, Option<&str>)> = session_repos
             .iter()
-            .map(|(n, p)| (n.as_str(), p.as_path()))
+            .map(|(n, p, b)| (n.as_str(), p.as_path(), b.as_deref()))
             .collect();
-        git::setup_session_dir(&session_dir, &ref_pairs)?;
+        git::setup_session_dir(&session_dir, &ref_tuples)?;
 
         let key = SessionKey::Implementation {
             job_id: job_id.to_string(),
