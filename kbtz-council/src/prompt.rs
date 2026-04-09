@@ -1,5 +1,5 @@
 use crate::project::OrchestratorState;
-use crate::step::StepPhase;
+use crate::job::JobPhase;
 use std::path::Path;
 
 const LEADER_SYSTEM_DEFAULT: &str = include_str!("../prompts/leader-system.md");
@@ -30,7 +30,7 @@ pub fn leader_system_prompt() -> String {
 /// Build the headless leader prompt with full state snapshot and feedback.
 pub fn leader_decision_prompt(
     state: &OrchestratorState,
-    step_feedback: &[(String, Vec<(String, String)>)],
+    job_feedback: &[(String, Vec<(String, String)>)],
     project_md: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
@@ -49,39 +49,39 @@ pub fn leader_decision_prompt(
         prompt.push_str(&format!("- {} ({})\n", repo.name, repo.url));
     }
 
-    prompt.push_str("\n**All Steps:**\n");
-    for step in &state.steps {
-        let phase_str = match &step.phase {
-            StepPhase::Dispatched => "dispatched",
-            StepPhase::Running => "running",
-            StepPhase::Completed => "completed",
-            StepPhase::Reviewing => "reviewing",
-            StepPhase::Reviewed => "REVIEWED -- needs your action",
-            StepPhase::Merged => "merged",
-            StepPhase::Rework => "rework in progress",
+    prompt.push_str("\n**All Jobs:**\n");
+    for job in &state.jobs {
+        let phase_str = match &job.phase {
+            JobPhase::Dispatched => "dispatched",
+            JobPhase::Running => "running",
+            JobPhase::Completed => "completed",
+            JobPhase::Reviewing => "reviewing",
+            JobPhase::Reviewed => "REVIEWED -- needs your action",
+            JobPhase::Merged => "merged",
+            JobPhase::Rework => "rework in progress",
         };
         prompt.push_str(&format!(
             "- {} [{}]: {}\n",
-            step.id, phase_str, step.dispatch.prompt
+            job.id, phase_str, job.dispatch.prompt
         ));
     }
 
-    if !step_feedback.is_empty() {
-        prompt.push_str("\n# Steps Ready for Your Review\n\n");
-        for (step_id, feedbacks) in step_feedback {
-            prompt.push_str(&format!("## {}\n\n", step_id));
+    if !job_feedback.is_empty() {
+        prompt.push_str("\n# Jobs Ready for Your Review\n\n");
+        for (job_id, feedbacks) in job_feedback {
+            prompt.push_str(&format!("## {}\n\n", job_id));
             prompt.push_str(&format!(
                 "Branch `{}` has been fetched into your repos.\n\n",
-                step_id
+                job_id
             ));
             for (stakeholder, feedback) in feedbacks {
                 prompt.push_str(&format!("### {} feedback\n{}\n\n", stakeholder, feedback));
             }
         }
         prompt.push_str("Review the feedback above. For each step, either:\n");
-        prompt.push_str("1. Merge the branch in your repos and call close_step(step_id)\n");
+        prompt.push_str("1. Merge the branch in your repos and call close_job(job_id)\n");
         prompt.push_str(
-            "2. Call rework_step(step_id, feedback) with specific changes needed\n\n",
+            "2. Call rework_job(job_id, feedback) with specific changes needed\n\n",
         );
         prompt.push_str("You may also dispatch new follow-up steps if needed.\n");
     }
@@ -90,21 +90,21 @@ pub fn leader_decision_prompt(
 }
 
 /// Build the prompt for an implementation agent session.
-pub fn implementation_prompt(project_dir: Option<&Path>, step_prompt: &str) -> String {
+pub fn implementation_prompt(project_dir: Option<&Path>, job_prompt: &str) -> String {
     let template = load_prompt(project_dir, "implementation.md", IMPLEMENTATION_DEFAULT);
-    template.replace("{prompt}", step_prompt)
+    template.replace("{prompt}", job_prompt)
 }
 
 /// Build the prompt for a stakeholder review session.
 pub fn stakeholder_prompt(
     project_dir: Option<&Path>,
     persona: &str,
-    step_prompt: &str,
+    job_prompt: &str,
     summary: &str,
 ) -> String {
     let template = load_prompt(project_dir, "stakeholder.md", STAKEHOLDER_DEFAULT);
     template
         .replace("{persona}", persona)
-        .replace("{step_prompt}", step_prompt)
+        .replace("{job_prompt}", job_prompt)
         .replace("{summary}", summary)
 }

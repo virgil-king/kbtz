@@ -1,5 +1,5 @@
 use kbtz_council::project::{Project, ProjectDir, RepoConfig, Stakeholder};
-use kbtz_council::step::{Dispatch, Step, StepPhase};
+use kbtz_council::job::{Dispatch, Job, JobPhase};
 use tempfile::TempDir;
 
 #[test]
@@ -24,10 +24,10 @@ fn project_state_round_trip() {
 }
 
 #[test]
-fn step_state_round_trip() {
-    let step = Step {
-        id: "step-001".into(),
-        phase: StepPhase::Dispatched,
+fn job_state_round_trip() {
+    let job = Job {
+        id: "job-001".into(),
+        phase: JobPhase::Dispatched,
         dispatch: Dispatch {
             prompt: "Add JWT auth middleware".into(),
             repos: vec!["backend".into()],
@@ -38,26 +38,26 @@ fn step_state_round_trip() {
         decision: None,
     };
 
-    let json = serde_json::to_string_pretty(&step).unwrap();
-    let parsed: Step = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.id, "step-001");
-    assert!(matches!(parsed.phase, StepPhase::Dispatched));
+    let json = serde_json::to_string_pretty(&job).unwrap();
+    let parsed: Job = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.id, "job-001");
+    assert!(matches!(parsed.phase, JobPhase::Dispatched));
 }
 
 #[test]
-fn step_phases_serialize_as_lowercase() {
+fn job_phases_serialize_as_lowercase() {
     let phases = vec![
-        StepPhase::Dispatched,
-        StepPhase::Running,
-        StepPhase::Completed,
-        StepPhase::Reviewing,
-        StepPhase::Reviewed,
-        StepPhase::Merged,
-        StepPhase::Rework,
+        JobPhase::Dispatched,
+        JobPhase::Running,
+        JobPhase::Completed,
+        JobPhase::Reviewing,
+        JobPhase::Reviewed,
+        JobPhase::Merged,
+        JobPhase::Rework,
     ];
     for phase in phases {
         let json = serde_json::to_string(&phase).unwrap();
-        let parsed: StepPhase = serde_json::from_str(&json).unwrap();
+        let parsed: JobPhase = serde_json::from_str(&json).unwrap();
         assert_eq!(phase, parsed);
     }
 }
@@ -97,7 +97,7 @@ fn project_dir_load_reads_state() {
 }
 
 #[test]
-fn state_tracks_steps() {
+fn state_tracks_jobs() {
     let tmp = TempDir::new().unwrap();
     let project = Project {
         repos: vec![],
@@ -106,15 +106,15 @@ fn state_tracks_steps() {
     };
 
     let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
-    let step_id = dir.add_step(Dispatch {
+    let job_id = dir.add_job(Dispatch {
         prompt: "Do the thing".into(),
         repos: vec![],
         files: vec![],
     }).unwrap();
 
-    assert_eq!(step_id, "step-001");
-    assert_eq!(dir.state().steps.len(), 1);
+    assert_eq!(job_id, "job-001");
+    assert_eq!(dir.state().jobs.len(), 1);
 
     let loaded = ProjectDir::load(tmp.path()).unwrap();
-    assert_eq!(loaded.state().steps.len(), 1);
+    assert_eq!(loaded.state().jobs.len(), 1);
 }

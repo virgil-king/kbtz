@@ -93,7 +93,7 @@ fn run_loop(
 
             // Dashboard (left)
             let dir = project_dir.lock().unwrap();
-            let steps = dir.state().steps.clone();
+            let steps = dir.state().jobs.clone();
             drop(dir);
 
             let session_infos = collect_session_infos(orch);
@@ -228,9 +228,9 @@ fn parse_session_key(s: &str) -> SessionKey {
         SessionKey::Stakeholder {
             name: name.to_string(),
         }
-    } else if let Some(step_id) = s.strip_suffix("-impl") {
+    } else if let Some(job_id) = s.strip_suffix("-impl") {
         SessionKey::Implementation {
-            step_id: step_id.to_string(),
+            job_id: job_id.to_string(),
         }
     } else {
         SessionKey::Leader

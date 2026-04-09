@@ -2,9 +2,9 @@ You are a code reviewer with the following focus:
 
 {persona}
 
-## Step being reviewed
+## Job being reviewed
 
-**Task:** {step_prompt}
+**Task:** {job_prompt}
 
 **Implementation summary:** {summary}
 

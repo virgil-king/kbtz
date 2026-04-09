@@ -1,6 +1,6 @@
 use crate::git;
 use crate::project::{ProjectDir, RepoConfig, Stakeholder};
-use crate::step::Dispatch;
+use crate::job::Dispatch;
 use serde::Deserialize;
 use serde_json::Value;
 use std::io;
@@ -67,8 +67,8 @@ fn tool_definitions() -> Value {
                 }
             },
             {
-                "name": "dispatch_step",
-                "description": "Dispatch an implementation step. Returns the assigned step ID.",
+                "name": "dispatch_job",
+                "description": "Dispatch an implementation job. Returns the assigned job ID.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -80,26 +80,26 @@ fn tool_definitions() -> Value {
                 }
             },
             {
-                "name": "rework_step",
-                "description": "Send a step back to the implementation agent with feedback.",
+                "name": "rework_job",
+                "description": "Send a job back to the implementation agent with feedback.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "step_id": { "type": "string" },
+                        "job_id": { "type": "string" },
                         "feedback": { "type": "string" }
                     },
-                    "required": ["step_id", "feedback"]
+                    "required": ["job_id", "feedback"]
                 }
             },
             {
-                "name": "close_step",
-                "description": "Close a step (merged or abandoned). Cleans up session directory.",
+                "name": "close_job",
+                "description": "Close a job (merged or abandoned). Cleans up session directory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "step_id": { "type": "string" }
+                        "job_id": { "type": "string" }
                     },
-                    "required": ["step_id"]
+                    "required": ["job_id"]
                 }
             }
         ]
@@ -169,55 +169,55 @@ fn handle_tool_call(
 
             Ok(text_content("Project defined successfully."))
         }
-        "dispatch_step" => {
+        "dispatch_job" => {
             let prompt = arguments["prompt"].as_str().unwrap_or("").to_string();
             let repos: Vec<String> =
                 serde_json::from_value(arguments["repos"].clone()).unwrap_or_default();
             let files: Vec<String> =
                 serde_json::from_value(arguments["files"].clone()).unwrap_or_default();
 
-            let step_id = dir.add_step(Dispatch {
+            let job_id = dir.add_job(Dispatch {
                 prompt,
                 repos,
                 files,
             })?;
 
-            Ok(text_content(&format!("Step {} dispatched.", step_id)))
+            Ok(text_content(&format!("Job {} dispatched.", job_id)))
         }
-        "rework_step" => {
-            let step_id = arguments["step_id"].as_str().unwrap_or("").to_string();
+        "rework_job" => {
+            let job_id = arguments["job_id"].as_str().unwrap_or("").to_string();
             let feedback = arguments["feedback"].as_str().unwrap_or("").to_string();
 
-            if let Some(step) = dir.state_mut().steps.iter_mut().find(|s| s.id == step_id) {
-                step.phase = crate::step::StepPhase::Rework;
-                step.decision = Some(crate::step::Decision::Rework {
+            if let Some(job) = dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id) {
+                job.phase = crate::job::JobPhase::Rework;
+                job.decision = Some(crate::job::Decision::Rework {
                     feedback: feedback.clone(),
                 });
             }
             dir.persist()?;
 
             Ok(text_content(&format!(
-                "Step {} sent back for rework.",
-                step_id
+                "Job {} sent back for rework.",
+                job_id
             )))
         }
-        "close_step" => {
-            let step_id = arguments["step_id"].as_str().unwrap_or("").to_string();
+        "close_job" => {
+            let job_id = arguments["job_id"].as_str().unwrap_or("").to_string();
 
-            if let Some(step) = dir.state_mut().steps.iter_mut().find(|s| s.id == step_id) {
-                step.phase = crate::step::StepPhase::Merged;
+            if let Some(job) = dir.state_mut().jobs.iter_mut().find(|s| s.id == job_id) {
+                job.phase = crate::job::JobPhase::Merged;
             }
             dir.persist()?;
 
             let session_dir = dir
                 .root()
                 .join("sessions")
-                .join(format!("{}-impl", step_id));
+                .join(format!("{}-impl", job_id));
             if session_dir.exists() {
                 let _ = git::cleanup_session_dir(&session_dir);
             }
 
-            Ok(text_content(&format!("Step {} closed.", step_id)))
+            Ok(text_content(&format!("Job {} closed.", job_id)))
         }
         _ => Ok(text_content("Unknown tool")),
     }

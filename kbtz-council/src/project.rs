@@ -1,5 +1,5 @@
 use crate::session::{AgentSessionId, SessionKey};
-use crate::step::{Dispatch, Step, StepPhase};
+use crate::job::{Dispatch, Job, JobPhase};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -27,8 +27,8 @@ pub struct Project {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub project: Project,
-    pub steps: Vec<Step>,
-    pub next_step_id: u32,
+    pub jobs: Vec<Job>,
+    pub next_job_id: u32,
     #[serde(default)]
     pub session_ids: HashMap<SessionKey, AgentSessionId>,
 }
@@ -47,8 +47,8 @@ impl ProjectDir {
 
         let state = OrchestratorState {
             project: project.clone(),
-            steps: vec![],
-            next_step_id: 1,
+            jobs: vec![],
+            next_job_id: 1,
             session_ids: HashMap::new(),
         };
 
@@ -90,13 +90,13 @@ impl ProjectDir {
         &mut self.state
     }
 
-    pub fn add_step(&mut self, dispatch: Dispatch) -> std::io::Result<String> {
-        let id = format!("step-{:03}", self.state.next_step_id);
-        self.state.next_step_id += 1;
+    pub fn add_job(&mut self, dispatch: Dispatch) -> std::io::Result<String> {
+        let id = format!("job-{:03}", self.state.next_job_id);
+        self.state.next_job_id += 1;
 
-        let step = Step {
+        let job = Job {
             id: id.clone(),
-            phase: StepPhase::Dispatched,
+            phase: JobPhase::Dispatched,
             dispatch,
             summary: None,
             feedback: vec![],
@@ -106,11 +106,11 @@ impl ProjectDir {
         let step_dir = self.root.join("steps").join(&id);
         fs::create_dir_all(step_dir.join("feedback"))?;
 
-        let dispatch_json = serde_json::to_string_pretty(&step.dispatch)
+        let dispatch_json = serde_json::to_string_pretty(&job.dispatch)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         fs::write(step_dir.join("dispatch.json"), dispatch_json)?;
 
-        self.state.steps.push(step);
+        self.state.jobs.push(job);
         self.save()?;
         Ok(id)
     }

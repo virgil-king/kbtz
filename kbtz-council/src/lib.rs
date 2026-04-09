@@ -5,6 +5,6 @@ pub mod orchestrator;
 pub mod project;
 pub mod prompt;
 pub mod session;
-pub mod step;
+pub mod job;
 pub mod stream;
 pub mod tui;

@@ -77,16 +77,16 @@ fn fetch_commits_brings_branch_into_target() {
         .unwrap();
 
     // Fetch commits back into source as a named branch
-    kbtz_council::git::fetch_branch(source.path(), &clone_path, "step-001").unwrap();
+    kbtz_council::git::fetch_branch(source.path(), &clone_path, "job-001").unwrap();
 
-    // Source should now have a step-001 branch
+    // Source should now have a job-001 branch
     let branches = Command::new("git")
-        .args(["branch", "--list", "step-001"])
+        .args(["branch", "--list", "job-001"])
         .current_dir(source.path())
         .output()
         .unwrap();
     let output = std::str::from_utf8(&branches.stdout).unwrap().trim();
-    assert!(output.contains("step-001"));
+    assert!(output.contains("job-001"));
 }
 
 #[test]

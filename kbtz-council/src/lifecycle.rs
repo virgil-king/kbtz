@@ -1,132 +1,132 @@
 use crate::session::SessionKey;
-use crate::step::StepPhase;
+use crate::job::JobPhase;
 
 #[derive(Debug, Clone)]
-pub struct StepSnapshot {
+pub struct JobSnapshot {
     pub id: String,
-    pub phase: StepPhase,
+    pub phase: JobPhase,
     pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
-    pub step_id: String,
+    pub job_id: String,
     pub key: SessionKey,
     pub exited: bool,
 }
 
 #[derive(Debug)]
 pub struct WorldSnapshot {
-    pub steps: Vec<StepSnapshot>,
+    pub jobs: Vec<JobSnapshot>,
     pub sessions: Vec<SessionSnapshot>,
     pub leader_busy: bool,
 }
 
 #[derive(Debug)]
 pub enum Action {
-    SpawnImplementation { step_id: String, repos: Vec<String> },
-    SpawnStakeholders { step_id: String },
-    InvokeLeader { step_ids: Vec<String> },
-    TransitionStep { step_id: String, to: StepPhase },
+    SpawnImplementation { job_id: String, repos: Vec<String> },
+    SpawnStakeholders { job_id: String },
+    InvokeLeader { job_ids: Vec<String> },
+    TransitionJob { job_id: String, to: JobPhase },
 }
 
 pub fn tick(world: &WorldSnapshot) -> Vec<Action> {
     let mut actions = Vec::new();
 
-    for step in &world.steps {
-        match &step.phase {
-            StepPhase::Dispatched => {
+    for job in &world.jobs {
+        match &job.phase {
+            JobPhase::Dispatched => {
                 let has_impl = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.key, SessionKey::Implementation { .. })
+                    s.job_id == job.id && matches!(s.key, SessionKey::Implementation { .. })
                 });
                 if !has_impl {
                     actions.push(Action::SpawnImplementation {
-                        step_id: step.id.clone(),
-                        repos: step.repos.clone(),
+                        job_id: job.id.clone(),
+                        repos: job.repos.clone(),
                     });
                 }
             }
-            StepPhase::Running => {
+            JobPhase::Running => {
                 let impl_exited = world.sessions.iter().any(|s| {
-                    s.step_id == step.id
+                    s.job_id == job.id
                         && matches!(s.key, SessionKey::Implementation { .. })
                         && s.exited
                 });
                 if impl_exited {
-                    actions.push(Action::TransitionStep {
-                        step_id: step.id.clone(),
-                        to: StepPhase::Completed,
+                    actions.push(Action::TransitionJob {
+                        job_id: job.id.clone(),
+                        to: JobPhase::Completed,
                     });
                 }
             }
-            StepPhase::Rework => {
+            JobPhase::Rework => {
                 let has_impl = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.key, SessionKey::Implementation { .. })
+                    s.job_id == job.id && matches!(s.key, SessionKey::Implementation { .. })
                 });
                 if !has_impl {
                     // No session yet — spawn one to resume rework
                     actions.push(Action::SpawnImplementation {
-                        step_id: step.id.clone(),
-                        repos: step.repos.clone(),
+                        job_id: job.id.clone(),
+                        repos: job.repos.clone(),
                     });
                 } else {
                     // Session exists — check if it exited
                     let impl_exited = world.sessions.iter().any(|s| {
-                        s.step_id == step.id
+                        s.job_id == job.id
                             && matches!(s.key, SessionKey::Implementation { .. })
                             && s.exited
                     });
                     if impl_exited {
-                        actions.push(Action::TransitionStep {
-                            step_id: step.id.clone(),
-                            to: StepPhase::Completed,
+                        actions.push(Action::TransitionJob {
+                            job_id: job.id.clone(),
+                            to: JobPhase::Completed,
                         });
                     }
                 }
             }
-            StepPhase::Completed => {
+            JobPhase::Completed => {
                 let has_stakeholders = world.sessions.iter().any(|s| {
-                    s.step_id == step.id && matches!(s.key, SessionKey::Stakeholder { .. })
+                    s.job_id == job.id && matches!(s.key, SessionKey::Stakeholder { .. })
                 });
                 if !has_stakeholders {
                     actions.push(Action::SpawnStakeholders {
-                        step_id: step.id.clone(),
+                        job_id: job.id.clone(),
                     });
                 }
             }
-            StepPhase::Reviewing => {
+            JobPhase::Reviewing => {
                 let stakeholder_sessions: Vec<_> = world
                     .sessions
                     .iter()
                     .filter(|s| {
-                        s.step_id == step.id
+                        s.job_id == job.id
                             && matches!(s.key, SessionKey::Stakeholder { .. })
                     })
                     .collect();
                 if !stakeholder_sessions.is_empty()
                     && stakeholder_sessions.iter().all(|s| s.exited)
                 {
-                    actions.push(Action::TransitionStep {
-                        step_id: step.id.clone(),
-                        to: StepPhase::Reviewed,
+                    actions.push(Action::TransitionJob {
+                        job_id: job.id.clone(),
+                        to: JobPhase::Reviewed,
                     });
                 }
             }
-            StepPhase::Reviewed | StepPhase::Merged => {}
+            JobPhase::Reviewed | JobPhase::Merged => {}
         }
     }
 
     // Batch all reviewed steps into one leader invocation
     if !world.leader_busy {
         let reviewed_ids: Vec<String> = world
-            .steps
+            .jobs
             .iter()
-            .filter(|s| matches!(s.phase, StepPhase::Reviewed))
+            .filter(|s| matches!(s.phase, JobPhase::Reviewed))
             .map(|s| s.id.clone())
             .collect();
         if !reviewed_ids.is_empty() {
             actions.push(Action::InvokeLeader {
-                step_ids: reviewed_ids,
+                job_ids: reviewed_ids,
             });
         }
     }

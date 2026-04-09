@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Orchestrator-internal session identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionKey {
-    Implementation { step_id: String },
+    Implementation { job_id: String },
     Stakeholder { name: String },
     Leader,
 }
@@ -19,7 +19,7 @@ pub enum SessionKey {
 impl std::fmt::Display for SessionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Implementation { step_id } => write!(f, "{}-impl", step_id),
+            Self::Implementation { job_id } => write!(f, "{}-impl", job_id),
             Self::Stakeholder { name } => write!(f, "stakeholder-{}", name),
             Self::Leader => write!(f, "leader"),
         }
@@ -41,7 +41,7 @@ pub enum SessionMessage {
 pub struct QueueItem {
     pub prompt: String,
     pub system_prompt: Option<String>,
-    pub step_id: Option<String>,
+    pub job_id: Option<String>,
     pub working_dir: PathBuf,
     pub mcp_config: Option<PathBuf>,
 }
@@ -57,7 +57,7 @@ pub struct ManagedSession {
 
 /// A currently running `claude -p` process.
 pub struct ActiveSession {
-    pub step_id: Option<String>,
+    pub job_id: Option<String>,
     child: Child,
     pub rx: mpsc::Receiver<SessionMessage>,
 }
@@ -103,7 +103,7 @@ impl ManagedSession {
             &item.working_dir,
             item.mcp_config.as_deref(),
         )?;
-        active.step_id = item.step_id;
+        active.job_id = item.job_id;
         self.invocation_count += 1;
         self.active = Some(active);
         Ok(true)
@@ -226,7 +226,7 @@ impl ActiveSession {
         }
 
         Ok(Self {
-            step_id: None,
+            job_id: None,
             child,
             rx,
         })

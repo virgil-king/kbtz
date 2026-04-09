@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StepPhase {
+pub enum JobPhase {
     Dispatched,
     Running,
     Completed,
@@ -34,9 +34,9 @@ pub enum Decision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Step {
+pub struct Job {
     pub id: String,
-    pub phase: StepPhase,
+    pub phase: JobPhase,
     pub dispatch: Dispatch,
     pub summary: Option<String>,
     pub feedback: Vec<Feedback>,
