@@ -61,7 +61,7 @@ pub fn render_stream_view(
         )));
     }
 
-    let status = if is_running { " [running] " } else { "" };
+    let status = if is_running { " ⏳ " } else { "" };
     let title = format!(" {}{}", session_id, status);
     let paragraph = Paragraph::new(lines)
         .block(Block::default().title(title).borders(Borders::ALL))
