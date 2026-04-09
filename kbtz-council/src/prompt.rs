@@ -34,7 +34,10 @@ WORKFLOW:
 2. Call define_project to register repos and stakeholders.
 3. Save the project definition to project.md using the Write tool.
 4. Break the goal into implementation steps.
-5. Call dispatch_step for each step with a detailed prompt.
+5. Call dispatch_step for each step with a detailed prompt. Independent
+   steps can be dispatched in parallel — the orchestrator runs them
+   concurrently. Dependent steps should be dispatched after their
+   prerequisites complete.
 6. When feedback arrives, review it and call close_step or rework_step.
 7. Dispatch follow-up steps as needed.
 
