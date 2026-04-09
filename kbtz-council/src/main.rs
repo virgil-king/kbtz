@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kbtz_council::global::GlobalState;
 use kbtz_council::mcp;
 use kbtz_council::orchestrator::Orchestrator;
 use kbtz_council::project::{Project, ProjectDir};
@@ -23,33 +24,47 @@ use kbtz_council::tui::input::TextInput;
 use kbtz_council::tui::stream_view::render_stream_view;
 use kbtz_council::tui::InputMode;
 
+fn default_global_dir() -> PathBuf {
+    dirs::home_dir()
+        .expect("cannot determine home directory")
+        .join(".kbtz-council")
+}
+
 #[derive(Parser)]
 #[command(name = "kbtz-council")]
 #[command(about = "Leader-driven AI agent orchestrator")]
 struct Cli {
-    /// Path to the project directory. Created if it doesn't exist.
-    #[arg(short, long)]
-    project: PathBuf,
+    /// Project name to open or create.
+    project: String,
+
+    /// Path to the global directory (default: ~/.kbtz-council/).
+    #[arg(long, default_value_os_t = default_global_dir())]
+    global_dir: PathBuf,
 }
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
-    let project_dir = if cli.project.join("state.json").exists() {
-        ProjectDir::load(&cli.project)?
-    } else {
-        let project = Project {
-            repos: vec![],
-            stakeholders: vec![],
-            goal_summary: String::new(),
-        };
-        ProjectDir::init(&cli.project, &project)?
+    let mut global = GlobalState::open(&cli.global_dir)?;
+
+    let project_dir = match global.load_project(&cli.project) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let project = Project {
+                repos: vec![],
+                stakeholders: vec![],
+                goal_summary: String::new(),
+            };
+            global.create_project(&cli.project, "", &project)?
+        }
+        Err(e) => return Err(e),
     };
 
+    let project_path = project_dir.root().to_path_buf();
     let project_dir = Arc::new(Mutex::new(project_dir));
 
     let mcp_port = mcp::start_mcp_server(Arc::clone(&project_dir))?;
-    let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
+    let mcp_config_path = mcp::write_mcp_config(&project_path, mcp_port)?;
 
     let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
     orchestrator.recover_from_state();

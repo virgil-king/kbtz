@@ -1,4 +1,5 @@
 pub mod git;
+pub mod global;
 pub mod lifecycle;
 pub mod mcp;
 pub mod orchestrator;
@@ -8,3 +9,4 @@ pub mod session;
 pub mod job;
 pub mod stream;
 pub mod tui;
+pub mod util;

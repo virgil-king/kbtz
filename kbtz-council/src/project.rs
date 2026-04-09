@@ -1,5 +1,6 @@
 use crate::session::{AgentSessionId, SessionKey};
 use crate::job::{Artifact, Dispatch, Job, JobPhase};
+use crate::util::iso_now;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ pub struct OrchestratorState {
     pub session_ids: Vec<(SessionKey, AgentSessionId)>,
 }
 
+#[derive(Debug)]
 pub struct ProjectDir {
     root: PathBuf,
     state: OrchestratorState,
@@ -134,7 +136,7 @@ impl ProjectDir {
         let artifact = Artifact {
             id: id.clone(),
             job_id: job_id.to_string(),
-            ts: chrono_now(),
+            ts: iso_now(),
             summary,
             commits: vec![],
             feedback: vec![],
@@ -172,12 +174,4 @@ impl ProjectDir {
     }
 }
 
-fn chrono_now() -> String {
-    // Simple ISO timestamp without chrono dependency
-    use std::time::SystemTime;
-    let d = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}s", d.as_secs())
-}
 
