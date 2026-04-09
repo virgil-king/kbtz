@@ -6,9 +6,10 @@ use crate::session::{AgentSessionId, HeadlessSession, SessionMessage, SessionRol
 use crate::step::StepPhase;
 use crate::stream::StreamEvent;
 use crate::tui::AppState;
-use std::collections::HashSet;
-use std::io;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -18,17 +19,38 @@ pub struct Orchestrator {
     pub app: AppState,
     pub leader_busy: bool,
     exited_session_ids: HashSet<String>,
+    trace_dir: PathBuf,
+    trace_files: HashMap<String, std::fs::File>,
 }
 
 impl Orchestrator {
     pub fn new(project_dir: Arc<Mutex<ProjectDir>>) -> Self {
+        let trace_dir = {
+            let dir = project_dir.lock().unwrap();
+            let td = dir.root().join("traces");
+            let _ = fs::create_dir_all(&td);
+            td
+        };
         Self {
             project_dir,
             sessions: vec![],
             app: AppState::new(),
             leader_busy: false,
             exited_session_ids: HashSet::new(),
+            trace_dir,
+            trace_files: HashMap::new(),
         }
+    }
+
+    fn write_trace(&mut self, session_key: &str, line: &str) {
+        let file = self.trace_files.entry(session_key.to_string()).or_insert_with(|| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.trace_dir.join(format!("{}.jsonl", session_key)))
+                .expect("failed to open trace file")
+        });
+        let _ = writeln!(file, "{}", line);
     }
 
     fn build_world(&self) -> WorldSnapshot {
@@ -63,6 +85,7 @@ impl Orchestrator {
 
     pub fn poll_sessions(&mut self) {
         let mut exited_indices = vec![];
+        let mut trace_lines: Vec<(String, String)> = vec![];
 
         for (i, session) in self.sessions.iter_mut().enumerate() {
             while let Ok(msg) = session.rx.try_recv() {
@@ -70,7 +93,9 @@ impl Orchestrator {
                     SessionMessage::Event(event) => {
                         self.app.push_event(&session.key.0, event);
                     }
-                    SessionMessage::RawLine(_) => {}
+                    SessionMessage::RawLine(line) => {
+                        trace_lines.push((session.key.0.clone(), line));
+                    }
                     SessionMessage::Exited { .. } => {}
                 }
             }
@@ -79,6 +104,10 @@ impl Orchestrator {
                 self.exited_session_ids.insert(session.key.0.clone());
                 exited_indices.push(i);
             }
+        }
+
+        for (key, line) in trace_lines {
+            self.write_trace(&key, &line);
         }
 
         for &i in exited_indices.iter().rev() {
