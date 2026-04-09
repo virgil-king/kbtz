@@ -118,3 +118,56 @@ fn state_tracks_jobs() {
     let loaded = ProjectDir::load(tmp.path()).unwrap();
     assert_eq!(loaded.state().jobs.len(), 1);
 }
+
+#[test]
+fn recovery_rolls_back_inflight_phases() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+
+    // Add jobs in various in-flight phases
+    dir.add_job(Dispatch {
+        prompt: "job 1".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+    dir.add_job(Dispatch {
+        prompt: "job 2".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+    dir.add_job(Dispatch {
+        prompt: "job 3".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+
+    // Simulate phases that would exist if processes died mid-flight
+    dir.state_mut().jobs[0].phase = JobPhase::Running;
+    dir.state_mut().jobs[1].phase = JobPhase::Reviewing;
+    dir.state_mut().jobs[2].phase = JobPhase::Reviewed; // should stay
+    dir.persist().unwrap();
+
+    // Reload and recover
+    let dir2 = ProjectDir::load(tmp.path()).unwrap();
+    let project_dir = std::sync::Arc::new(std::sync::Mutex::new(dir2));
+    let mcp_config = tmp.path().join(".mcp.json");
+    let mut orch = kbtz_council::orchestrator::Orchestrator::new(
+        std::sync::Arc::clone(&project_dir),
+        mcp_config,
+    );
+    orch.recover_from_state();
+
+    let dir = project_dir.lock().unwrap();
+    // Running -> Dispatched (so tick re-spawns with --resume)
+    assert_eq!(dir.state().jobs[0].phase, JobPhase::Dispatched);
+    // Reviewing -> Completed (so tick re-spawns stakeholders)
+    assert_eq!(dir.state().jobs[1].phase, JobPhase::Completed);
+    // Reviewed stays Reviewed (tick invokes leader)
+    assert_eq!(dir.state().jobs[2].phase, JobPhase::Reviewed);
+}

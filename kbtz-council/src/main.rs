@@ -52,6 +52,7 @@ fn main() -> io::Result<()> {
     let mcp_config_path = mcp::write_mcp_config(&cli.project, mcp_port)?;
 
     let mut orchestrator = Orchestrator::new(Arc::clone(&project_dir), mcp_config_path);
+    orchestrator.recover_from_state();
     orchestrator.app.selected_session = Some("leader".to_string());
 
     enable_raw_mode()?;

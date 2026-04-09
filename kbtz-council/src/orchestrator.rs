@@ -41,6 +41,38 @@ impl Orchestrator {
         }
     }
 
+    /// Recover from persisted state on startup. Roll back in-flight phases
+    /// so tick can re-dispatch them, and recreate ManagedSession entries
+    /// with persisted UUIDs so --resume works.
+    pub fn recover_from_state(&mut self) {
+        let mut dir = self.project_dir.lock().unwrap();
+
+        // Roll back phases where processes died
+        for job in &mut dir.state_mut().jobs {
+            match job.phase {
+                crate::job::JobPhase::Running => {
+                    job.phase = crate::job::JobPhase::Dispatched;
+                }
+                crate::job::JobPhase::Reviewing => {
+                    job.phase = crate::job::JobPhase::Completed;
+                }
+                _ => {}
+            }
+        }
+
+        // Recreate ManagedSession entries with persisted UUIDs
+        for (key, agent_id) in &dir.state().session_ids {
+            if !self.sessions.contains_key(key) {
+                self.sessions.insert(
+                    key.clone(),
+                    ManagedSession::with_agent_session_id(key.clone(), agent_id.clone(), 1),
+                );
+            }
+        }
+
+        let _ = dir.persist();
+    }
+
     /// Get or create a managed session for the given key.
     fn ensure_session(&mut self, key: SessionKey) -> &mut ManagedSession {
         self.sessions
