@@ -168,6 +168,7 @@ impl ActiveSession {
             .arg("--verbose")
             .arg("--permission-mode")
             .arg("bypassPermissions")
+            .env("KBTZ_COUNCIL", "1")
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
