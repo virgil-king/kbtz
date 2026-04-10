@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use kbtz_council::global::{GlobalState, ProjectStatus};
 use kbtz_council::mcp;
-use kbtz_council::orchestrator::{Orchestrator, ProjectState, CONCIERGE_SESSION_NAME};
+use kbtz_council::orchestrator::{Orchestrator, ProjectState, SelectedSession};
 use kbtz_council::project::Project;
 use kbtz_council::session::{ManagedSession, SessionKey};
 use kbtz_council::tui::dashboard::{render_dashboard, SessionInfo, SessionStatus};
@@ -73,10 +73,14 @@ fn main() -> io::Result<()> {
             .collect()
     };
 
-    // Set up concierge session (restore or create)
+    // Set up concierge session (restore or create, persist ID immediately)
     let concierge = match global.load_concierge_session_id() {
         Some(id) => ManagedSession::with_agent_session_id(SessionKey::Concierge, id, 1),
-        None => ManagedSession::new(SessionKey::Concierge),
+        None => {
+            let ms = ManagedSession::new(SessionKey::Concierge);
+            global.save_concierge_session_id(&ms.agent_session_id)?;
+            ms
+        }
     };
 
     // Start concierge MCP server
@@ -119,7 +123,7 @@ fn main() -> io::Result<()> {
     }
 
     // Default selection: concierge
-    orchestrator.app.selected_session = Some(CONCIERGE_SESSION_NAME.to_string());
+    orchestrator.app.selected_session = Some(SelectedSession::Concierge);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -176,21 +180,11 @@ fn run_loop(
                 .split(h_chunks[1]);
 
             let events = orch.app.selected_events();
-            let session_id = orch.app.selected_session.as_deref().unwrap_or("");
-            let is_running = orch.app.selected_session.as_ref()
-                .map(|name| {
-                    if name == CONCIERGE_SESSION_NAME {
-                        orch.concierge.is_running()
-                    } else {
-                        let (proj, key) = parse_qualified_session(name);
-                        orch.projects.get(proj)
-                            .and_then(|ps| ps.sessions.get(&key))
-                            .map(|ms| ms.is_running())
-                            .unwrap_or(false)
-                    }
-                })
-                .unwrap_or(false);
-            render_stream_view(frame, v_chunks[0], events, session_id, is_running, orch.app.scroll_offset);
+            let session_label = orch.app.selected_session.as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let is_running = orch.is_session_running(orch.app.selected_session.as_ref());
+            render_stream_view(frame, v_chunks[0], events, &session_label, is_running, orch.app.scroll_offset);
 
             let title = if editing {
                 " Enter send | Ctrl+J newline | Esc cancel "
@@ -221,36 +215,30 @@ fn run_loop(
                             orch.app.scroll_offset = 0;
                         }
                         KeyCode::Tab | KeyCode::Down => {
-                            let keys: Vec<String> = collect_session_infos(orch)
-                                .iter()
-                                .map(|i| i.name.clone())
-                                .collect();
-                            if !keys.is_empty() {
+                            let sessions = collect_session_infos(orch);
+                            if !sessions.is_empty() {
                                 let idx = orch
                                     .app
                                     .selected_session
                                     .as_ref()
-                                    .and_then(|s| keys.iter().position(|k| k == s))
-                                    .map(|i| (i + 1) % keys.len())
+                                    .and_then(|s| sessions.iter().position(|i| &i.session == s))
+                                    .map(|i| (i + 1) % sessions.len())
                                     .unwrap_or(0);
-                                orch.app.selected_session = Some(keys[idx].clone());
+                                orch.app.selected_session = Some(sessions[idx].session.clone());
                                 orch.app.scroll_offset = 0;
                             }
                         }
                         KeyCode::Up => {
-                            let keys: Vec<String> = collect_session_infos(orch)
-                                .iter()
-                                .map(|i| i.name.clone())
-                                .collect();
-                            if !keys.is_empty() {
+                            let sessions = collect_session_infos(orch);
+                            if !sessions.is_empty() {
                                 let idx = orch
                                     .app
                                     .selected_session
                                     .as_ref()
-                                    .and_then(|s| keys.iter().position(|k| k == s))
-                                    .map(|i| if i == 0 { keys.len() - 1 } else { i - 1 })
-                                    .unwrap_or(keys.len() - 1);
-                                orch.app.selected_session = Some(keys[idx].clone());
+                                    .and_then(|s| sessions.iter().position(|i| &i.session == s))
+                                    .map(|i| if i == 0 { sessions.len() - 1 } else { i - 1 })
+                                    .unwrap_or(sessions.len() - 1);
+                                orch.app.selected_session = Some(sessions[idx].session.clone());
                                 orch.app.scroll_offset = 0;
                             }
                         }
@@ -260,16 +248,8 @@ fn run_loop(
                         if key.code == KeyCode::Enter {
                             let text = input.text().trim().to_string();
                             if !text.is_empty() {
-                                let session_name = orch
-                                    .app
-                                    .selected_session
-                                    .clone()
-                                    .unwrap_or_default();
-                                if session_name == CONCIERGE_SESSION_NAME {
-                                    orch.send_concierge_message(text);
-                                } else {
-                                    let (proj, session_key) = parse_qualified_session(&session_name);
-                                    orch.send_message(proj, &session_key, text);
+                                if let Some(target) = orch.app.selected_session.clone() {
+                                    orch.send_message(&target, text);
                                 }
                             }
                             input.clear();
@@ -294,13 +274,13 @@ fn run_loop(
 }
 
 /// Collect session info across concierge + all projects.
-/// Concierge is always first. Each session name is qualified as "scope/session_key".
+/// Concierge is always first.
 fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
     let mut infos = Vec::new();
 
     // Concierge always first
     infos.push(SessionInfo {
-        name: CONCIERGE_SESSION_NAME.to_string(),
+        session: SelectedSession::Concierge,
         status: if orch.concierge.is_running() {
             SessionStatus::Running
         } else if !orch.concierge.queue.is_empty() {
@@ -338,7 +318,10 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
                 };
 
                 SessionInfo {
-                    name: format!("{}/{}", project_name, ms.key),
+                    session: SelectedSession::Project {
+                        project: project_name.clone(),
+                        key: ms.key.clone(),
+                    },
                     status: if ms.is_running() {
                         SessionStatus::Running
                     } else if !ms.queue.is_empty() {
@@ -354,12 +337,15 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
             .collect();
 
         // Always show leader for each project
-        let leader_key = format!("{}/leader", project_name);
-        if !project_infos.iter().any(|i| i.name == leader_key) {
+        let leader = SelectedSession::Project {
+            project: project_name.clone(),
+            key: SessionKey::Leader,
+        };
+        if !project_infos.iter().any(|i| i.session == leader) {
             project_infos.insert(
                 0,
                 SessionInfo {
-                    name: leader_key,
+                    session: leader,
                     status: SessionStatus::Idle,
                     queue_depth: 0,
                     job_phase: None,
@@ -372,42 +358,4 @@ fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
     }
 
     infos
-}
-
-/// Parse a qualified session name "project/session_key" into (project_name, SessionKey).
-///
-/// Panics if the name does not contain a "/" separator — all session names
-/// must be qualified with their project.
-fn parse_qualified_session(s: &str) -> (&str, SessionKey) {
-    let pos = s.find('/').unwrap_or_else(|| {
-        panic!("session name must be qualified as 'project/key', got '{}'", s)
-    });
-    let project = &s[..pos];
-    let session = &s[pos + 1..];
-    (project, parse_session_key(session))
-}
-
-fn parse_session_key(s: &str) -> SessionKey {
-    if s == "concierge" {
-        SessionKey::Concierge
-    } else if s == "leader" {
-        SessionKey::Leader
-    } else if let Some(rest) = s.strip_suffix("-impl") {
-        SessionKey::Implementation {
-            job_id: rest.to_string(),
-        }
-    } else {
-        // Try to parse as job_id-stakeholder_name (e.g. "job-001-security")
-        if let Some(pos) = s.find('-').and_then(|first| {
-            s[first + 1..].find('-').map(|second| first + 1 + second)
-        }) {
-            let (job_part, name_part) = s.split_at(pos);
-            SessionKey::Stakeholder {
-                job_id: job_part.to_string(),
-                name: name_part[1..].to_string(),
-            }
-        } else {
-            SessionKey::Leader
-        }
-    }
 }

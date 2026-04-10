@@ -187,6 +187,20 @@ impl Orchestrator {
         project_running + concierge_running
     }
 
+    /// Check whether a session is currently running.
+    pub fn is_session_running(&self, session: Option<&SelectedSession>) -> bool {
+        match session {
+            Some(SelectedSession::Concierge) => self.concierge.is_running(),
+            Some(SelectedSession::Project { project, key }) => self
+                .projects
+                .get(project.as_str())
+                .and_then(|ps| ps.sessions.get(key))
+                .map(|ms| ms.is_running())
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
     /// Enqueue a user message for any session (concierge or project-scoped).
     pub fn send_message(&mut self, target: &SelectedSession, message: String) {
         self.app

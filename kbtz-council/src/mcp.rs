@@ -272,15 +272,25 @@ fn handle_tool_call(
     }
 }
 
-/// Start the MCP HTTP server on a random localhost port. Returns the port.
-/// The server runs in a background thread, processing tool calls via the
-/// shared ProjectDir.
-pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> {
+/// Start an MCP HTTP server on a random localhost port. The `handler` closure
+/// is called for each `tools/call` request with (tool_name, arguments) and
+/// must return a JSON result value.
+fn start_mcp_http_server(
+    server_name: &str,
+    tools_list: Value,
+    handler: impl Fn(&str, &Value) -> Value + Send + 'static,
+) -> io::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
     let server = tiny_http::Server::from_listener(listener, None)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    let init_response = serde_json::json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": { "tools": {} },
+        "serverInfo": { "name": server_name, "version": "0.1.0" }
+    });
 
     thread::spawn(move || {
         let json_header: tiny_http::Header = "Content-Type: application/json"
@@ -288,37 +298,31 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
             .unwrap();
 
         for mut request in server.incoming_requests() {
-            // Handle GET (health check / SSE endpoint discovery)
             if request.method() == &tiny_http::Method::Get {
-                let resp = tiny_http::Response::from_string("")
-                    .with_status_code(405);
+                let resp = tiny_http::Response::from_string("").with_status_code(405);
                 let _ = request.respond(resp);
                 continue;
             }
 
-            // Handle DELETE (session termination)
             if request.method() == &tiny_http::Method::Delete {
-                let resp = tiny_http::Response::from_string("")
-                    .with_status_code(202);
+                let resp = tiny_http::Response::from_string("").with_status_code(202);
                 let _ = request.respond(resp);
                 continue;
             }
 
-            // POST: read JSON-RPC body
             let mut body = String::new();
             if request.as_reader().read_to_string(&mut body).is_err() {
-                let resp = tiny_http::Response::from_string("Bad request")
-                    .with_status_code(400);
+                let resp =
+                    tiny_http::Response::from_string("Bad request").with_status_code(400);
                 let _ = request.respond(resp);
                 continue;
             }
 
-            // Parse as JSON — check if it's a notification (no "id" field)
             let parsed: Value = match serde_json::from_str(&body) {
                 Ok(v) => v,
                 Err(_) => {
-                    let resp = tiny_http::Response::from_string("Invalid JSON")
-                        .with_status_code(400);
+                    let resp =
+                        tiny_http::Response::from_string("Invalid JSON").with_status_code(400);
                     let _ = request.respond(resp);
                     continue;
                 }
@@ -326,8 +330,7 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
 
             // Notifications have no "id" — respond with 202
             if parsed.get("id").is_none() || parsed["id"].is_null() {
-                let resp = tiny_http::Response::from_string("")
-                    .with_status_code(202);
+                let resp = tiny_http::Response::from_string("").with_status_code(202);
                 let _ = request.respond(resp);
                 continue;
             }
@@ -343,27 +346,13 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
             };
 
             let response_body = match rpc.method.as_str() {
-                "initialize" => jsonrpc_response(
-                    rpc.id,
-                    serde_json::json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "kbtz-council", "version": "0.1.0" }
-                    }),
-                ),
-                "tools/list" => jsonrpc_response(rpc.id, tool_definitions()),
+                "initialize" => jsonrpc_response(rpc.id, init_response.clone()),
+                "tools/list" => jsonrpc_response(rpc.id, tools_list.clone()),
                 "tools/call" => {
                     let params = rpc.params.unwrap_or(Value::Null);
                     let tool_name = params["name"].as_str().unwrap_or("");
                     let arguments = &params["arguments"];
-
-                    let result = {
-                        let mut dir = project_dir.lock().unwrap();
-                        handle_tool_call(&mut dir, tool_name, arguments)
-                            .unwrap_or_else(|e| text_content(&format!("Error: {}", e)))
-                    };
-
-                    jsonrpc_response(rpc.id, result)
+                    jsonrpc_response(rpc.id, handler(tool_name, arguments))
                 }
                 _ => jsonrpc_response(
                     rpc.id,
@@ -378,6 +367,15 @@ pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> 
     });
 
     Ok(port)
+}
+
+/// Start the per-project MCP HTTP server. Returns the port.
+pub fn start_mcp_server(project_dir: Arc<Mutex<ProjectDir>>) -> io::Result<u16> {
+    start_mcp_http_server("kbtz-council", tool_definitions(), move |tool_name, arguments| {
+        let mut dir = project_dir.lock().unwrap();
+        handle_tool_call(&mut dir, tool_name, arguments)
+            .unwrap_or_else(|e| text_content(&format!("Error: {}", e)))
+    })
 }
 
 /// Write an .mcp.json config file pointing at the running HTTP MCP server.
@@ -456,6 +454,13 @@ fn concierge_tool_definitions() -> Value {
     })
 }
 
+fn require_str<'a>(arguments: &'a Value, field: &str) -> io::Result<&'a str> {
+    arguments[field]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("'{}' is required", field)))
+}
+
 fn handle_concierge_tool_call(
     global: &mut GlobalState,
     tool_name: &str,
@@ -463,8 +468,8 @@ fn handle_concierge_tool_call(
 ) -> io::Result<Value> {
     match tool_name {
         "create_project" => {
-            let name = arguments["name"].as_str().unwrap_or("").to_string();
-            let goal = arguments["goal"].as_str().unwrap_or("").to_string();
+            let name = require_str(arguments, "name")?.to_string();
+            let goal = require_str(arguments, "goal")?.to_string();
             let project = Project {
                 repos: vec![],
                 stakeholders: vec![],
@@ -511,13 +516,13 @@ fn handle_concierge_tool_call(
         }
         "archive_project" => {
             use crate::global::ProjectStatus;
-            let name = arguments["name"].as_str().unwrap_or("").to_string();
+            let name = require_str(arguments, "name")?.to_string();
             global.set_status(&name, ProjectStatus::Archived)?;
             Ok(text_content(&format!("Project '{}' archived.", name)))
         }
         "resume_project" => {
             use crate::global::ProjectStatus;
-            let name = arguments["name"].as_str().unwrap_or("").to_string();
+            let name = require_str(arguments, "name")?.to_string();
             global.set_status(&name, ProjectStatus::Active)?;
             Ok(text_content(&format!(
                 "Project '{}' resumed (now active).",
@@ -528,103 +533,17 @@ fn handle_concierge_tool_call(
     }
 }
 
-/// Start the concierge MCP HTTP server on a random localhost port.
-/// The server handles global project management tools.
+/// Start the concierge MCP HTTP server. Returns the port.
 pub fn start_concierge_mcp_server(global: Arc<Mutex<GlobalState>>) -> io::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-
-    let server = tiny_http::Server::from_listener(listener, None)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-    thread::spawn(move || {
-        let json_header: tiny_http::Header = "Content-Type: application/json"
-            .parse()
-            .unwrap();
-
-        for mut request in server.incoming_requests() {
-            if request.method() == &tiny_http::Method::Get {
-                let resp = tiny_http::Response::from_string("").with_status_code(405);
-                let _ = request.respond(resp);
-                continue;
-            }
-
-            if request.method() == &tiny_http::Method::Delete {
-                let resp = tiny_http::Response::from_string("").with_status_code(202);
-                let _ = request.respond(resp);
-                continue;
-            }
-
-            let mut body = String::new();
-            if request.as_reader().read_to_string(&mut body).is_err() {
-                let resp =
-                    tiny_http::Response::from_string("Bad request").with_status_code(400);
-                let _ = request.respond(resp);
-                continue;
-            }
-
-            let parsed: Value = match serde_json::from_str(&body) {
-                Ok(v) => v,
-                Err(_) => {
-                    let resp =
-                        tiny_http::Response::from_string("Invalid JSON").with_status_code(400);
-                    let _ = request.respond(resp);
-                    continue;
-                }
-            };
-
-            if parsed.get("id").is_none() || parsed["id"].is_null() {
-                let resp = tiny_http::Response::from_string("").with_status_code(202);
-                let _ = request.respond(resp);
-                continue;
-            }
-
-            let rpc: JsonRpcRequest = match serde_json::from_value(parsed) {
-                Ok(r) => r,
-                Err(_) => {
-                    let resp = tiny_http::Response::from_string("Invalid JSON-RPC")
-                        .with_status_code(400);
-                    let _ = request.respond(resp);
-                    continue;
-                }
-            };
-
-            let response_body = match rpc.method.as_str() {
-                "initialize" => jsonrpc_response(
-                    rpc.id,
-                    serde_json::json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "kbtz-council-concierge", "version": "0.1.0" }
-                    }),
-                ),
-                "tools/list" => jsonrpc_response(rpc.id, concierge_tool_definitions()),
-                "tools/call" => {
-                    let params = rpc.params.unwrap_or(Value::Null);
-                    let tool_name = params["name"].as_str().unwrap_or("");
-                    let arguments = &params["arguments"];
-
-                    let result = {
-                        let mut g = global.lock().unwrap();
-                        handle_concierge_tool_call(&mut g, tool_name, arguments)
-                            .unwrap_or_else(|e| text_content(&format!("Error: {}", e)))
-                    };
-
-                    jsonrpc_response(rpc.id, result)
-                }
-                _ => jsonrpc_response(
-                    rpc.id,
-                    serde_json::json!({"error": {"code": -32601, "message": "Method not found"}}),
-                ),
-            };
-
-            let resp = tiny_http::Response::from_string(&response_body)
-                .with_header(json_header.clone());
-            let _ = request.respond(resp);
-        }
-    });
-
-    Ok(port)
+    start_mcp_http_server(
+        "kbtz-council-concierge",
+        concierge_tool_definitions(),
+        move |tool_name, arguments| {
+            let mut g = global.lock().unwrap();
+            handle_concierge_tool_call(&mut g, tool_name, arguments)
+                .unwrap_or_else(|e| text_content(&format!("Error: {}", e)))
+        },
+    )
 }
 
 /// Write an .mcp.json config for the concierge session.
