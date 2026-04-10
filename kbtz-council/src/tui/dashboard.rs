@@ -1,4 +1,5 @@
 use crate::job::JobPhase;
+use crate::orchestrator::SelectedSession;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -7,7 +8,7 @@ use ratatui::Frame;
 
 /// Unified session info for dashboard display.
 pub struct SessionInfo {
-    pub name: String,
+    pub session: SelectedSession,
     pub status: SessionStatus,
     pub queue_depth: usize,
     pub job_phase: Option<JobPhase>,
@@ -24,7 +25,7 @@ pub fn render_dashboard(
     frame: &mut Frame,
     area: Rect,
     sessions: &[SessionInfo],
-    selected_session: &Option<String>,
+    selected_session: &Option<SelectedSession>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -43,7 +44,7 @@ pub fn render_dashboard(
     let items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
-            let selected = Some(&s.name) == selected_session.as_ref();
+            let selected = Some(&s.session) == selected_session.as_ref();
             let (indicator, indicator_color) = match s.status {
                 SessionStatus::Running => (">>", Color::Green),
                 SessionStatus::Queued => ("..", Color::Yellow),
@@ -64,7 +65,7 @@ pub fn render_dashboard(
 
             let mut spans = vec![
                 Span::styled(format!("{} ", indicator), Style::default().fg(indicator_color)),
-                Span::styled(s.name.clone(), name_style),
+                Span::styled(s.session.to_string(), name_style),
             ];
 
             if let Some(ref phase) = s.job_phase {

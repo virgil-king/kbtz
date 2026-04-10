@@ -2,6 +2,7 @@ pub mod dashboard;
 pub mod input;
 pub mod stream_view;
 
+use crate::orchestrator::SelectedSession;
 use crate::stream::StreamEvent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,8 +12,8 @@ pub enum InputMode {
 }
 
 pub struct AppState {
-    pub selected_session: Option<String>,
-    pub session_events: Vec<(String, Vec<StreamEvent>)>,
+    pub selected_session: Option<SelectedSession>,
+    pub session_events: Vec<(SelectedSession, Vec<StreamEvent>)>,
     pub input_mode: InputMode,
     /// Scroll offset from bottom (0 = pinned to bottom / auto-scroll)
     pub scroll_offset: u16,
@@ -28,22 +29,22 @@ impl AppState {
         }
     }
 
-    pub fn push_event(&mut self, session_id: &str, event: StreamEvent) {
+    pub fn push_event(&mut self, session: &SelectedSession, event: StreamEvent) {
         if let Some((_, events)) = self
             .session_events
             .iter_mut()
-            .find(|(id, _)| id == session_id)
+            .find(|(id, _)| id == session)
         {
             events.push(event);
         } else {
             self.session_events
-                .push((session_id.to_string(), vec![event]));
+                .push((session.clone(), vec![event]));
         }
     }
 
     pub fn selected_events(&self) -> &[StreamEvent] {
-        if let Some(ref sid) = self.selected_session {
-            if let Some((_, events)) = self.session_events.iter().find(|(id, _)| id == sid) {
+        if let Some(ref sel) = self.selected_session {
+            if let Some((_, events)) = self.session_events.iter().find(|(id, _)| id == sel) {
                 return events;
             }
         }

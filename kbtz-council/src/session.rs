@@ -14,6 +14,7 @@ pub enum SessionKey {
     Implementation { job_id: String },
     Stakeholder { job_id: String, name: String },
     Leader,
+    Concierge,
 }
 
 impl std::fmt::Display for SessionKey {
@@ -22,6 +23,7 @@ impl std::fmt::Display for SessionKey {
             Self::Implementation { job_id } => write!(f, "{}-impl", job_id),
             Self::Stakeholder { job_id, name } => write!(f, "{}-{}", job_id, name),
             Self::Leader => write!(f, "leader"),
+            Self::Concierge => write!(f, "concierge"),
         }
     }
 }

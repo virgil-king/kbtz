@@ -1,4 +1,5 @@
 use crate::project::{Project, ProjectDir};
+use crate::session::AgentSessionId;
 use crate::util::iso_now;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -189,6 +190,20 @@ impl GlobalState {
                 )
             })?;
         Ok(self.root.join(&entry.path))
+    }
+
+    /// Load the persisted concierge session ID, if any.
+    pub fn load_concierge_session_id(&self) -> Option<AgentSessionId> {
+        let path = self.root.join("concierge-session.json");
+        let data = fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+
+    /// Persist the concierge session ID.
+    pub fn save_concierge_session_id(&self, id: &AgentSessionId) -> io::Result<()> {
+        let data = serde_json::to_string_pretty(id)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        fs::write(self.root.join("concierge-session.json"), data)
     }
 
     fn save_index(&self) -> io::Result<()> {

@@ -1,5 +1,6 @@
 use crate::git;
-use crate::project::{ProjectDir, RepoConfig, Stakeholder};
+use crate::global::GlobalState;
+use crate::project::{Project, ProjectDir, RepoConfig, Stakeholder};
 use crate::job::{Dispatch, RepoRef};
 use serde::Deserialize;
 use serde_json::Value;
@@ -391,6 +392,253 @@ pub fn write_mcp_config(project_dir: &Path, port: u16) -> io::Result<std::path::
     });
 
     let config_path = project_dir.join(".mcp.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config).unwrap(),
+    )?;
+    Ok(config_path)
+}
+
+// --- Concierge MCP server (global scope) ---
+
+fn concierge_tool_definitions() -> Value {
+    serde_json::json!({
+        "tools": [
+            {
+                "name": "create_project",
+                "description": "Create a new project. Returns the project name and path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Project name (alphanumeric and hyphens)." },
+                        "goal": { "type": "string", "description": "One-line project goal." }
+                    },
+                    "required": ["name", "goal"]
+                }
+            },
+            {
+                "name": "list_projects",
+                "description": "List projects, optionally filtered by status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "paused", "archived"],
+                            "description": "Filter by status. Omit to list all."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "archive_project",
+                "description": "Archive a project. Moves it to the archive directory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Project name to archive." }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "resume_project",
+                "description": "Resume (un-archive) a project, setting it back to active.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Project name to resume." }
+                    },
+                    "required": ["name"]
+                }
+            }
+        ]
+    })
+}
+
+fn handle_concierge_tool_call(
+    global: &mut GlobalState,
+    tool_name: &str,
+    arguments: &Value,
+) -> io::Result<Value> {
+    match tool_name {
+        "create_project" => {
+            let name = arguments["name"].as_str().unwrap_or("").to_string();
+            let goal = arguments["goal"].as_str().unwrap_or("").to_string();
+            let project = Project {
+                repos: vec![],
+                stakeholders: vec![],
+                goal_summary: goal.clone(),
+            };
+            global.create_project(&name, &goal, &project)?;
+            let path = global.project_path(&name)?;
+            Ok(text_content(&format!(
+                "Project '{}' created at {}.",
+                name,
+                path.display()
+            )))
+        }
+        "list_projects" => {
+            use crate::global::ProjectStatus;
+            let status_filter = arguments
+                .get("status")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "active" => Some(ProjectStatus::Active),
+                    "paused" => Some(ProjectStatus::Paused),
+                    "archived" => Some(ProjectStatus::Archived),
+                    _ => None,
+                });
+            let entries = global.list_projects(status_filter);
+            if entries.is_empty() {
+                return Ok(text_content("No projects found."));
+            }
+            let mut lines = Vec::new();
+            for e in &entries {
+                lines.push(format!(
+                    "- {} [{}] — {} (created {})",
+                    e.name,
+                    match e.status {
+                        ProjectStatus::Active => "active",
+                        ProjectStatus::Paused => "paused",
+                        ProjectStatus::Archived => "archived",
+                    },
+                    if e.goal.is_empty() { "(no goal)" } else { &e.goal },
+                    e.created_at,
+                ));
+            }
+            Ok(text_content(&lines.join("\n")))
+        }
+        "archive_project" => {
+            use crate::global::ProjectStatus;
+            let name = arguments["name"].as_str().unwrap_or("").to_string();
+            global.set_status(&name, ProjectStatus::Archived)?;
+            Ok(text_content(&format!("Project '{}' archived.", name)))
+        }
+        "resume_project" => {
+            use crate::global::ProjectStatus;
+            let name = arguments["name"].as_str().unwrap_or("").to_string();
+            global.set_status(&name, ProjectStatus::Active)?;
+            Ok(text_content(&format!(
+                "Project '{}' resumed (now active).",
+                name
+            )))
+        }
+        _ => Ok(text_content("Unknown tool")),
+    }
+}
+
+/// Start the concierge MCP HTTP server on a random localhost port.
+/// The server handles global project management tools.
+pub fn start_concierge_mcp_server(global: Arc<Mutex<GlobalState>>) -> io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+
+    let server = tiny_http::Server::from_listener(listener, None)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    thread::spawn(move || {
+        let json_header: tiny_http::Header = "Content-Type: application/json"
+            .parse()
+            .unwrap();
+
+        for mut request in server.incoming_requests() {
+            if request.method() == &tiny_http::Method::Get {
+                let resp = tiny_http::Response::from_string("").with_status_code(405);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            if request.method() == &tiny_http::Method::Delete {
+                let resp = tiny_http::Response::from_string("").with_status_code(202);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                let resp =
+                    tiny_http::Response::from_string("Bad request").with_status_code(400);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            let parsed: Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    let resp =
+                        tiny_http::Response::from_string("Invalid JSON").with_status_code(400);
+                    let _ = request.respond(resp);
+                    continue;
+                }
+            };
+
+            if parsed.get("id").is_none() || parsed["id"].is_null() {
+                let resp = tiny_http::Response::from_string("").with_status_code(202);
+                let _ = request.respond(resp);
+                continue;
+            }
+
+            let rpc: JsonRpcRequest = match serde_json::from_value(parsed) {
+                Ok(r) => r,
+                Err(_) => {
+                    let resp = tiny_http::Response::from_string("Invalid JSON-RPC")
+                        .with_status_code(400);
+                    let _ = request.respond(resp);
+                    continue;
+                }
+            };
+
+            let response_body = match rpc.method.as_str() {
+                "initialize" => jsonrpc_response(
+                    rpc.id,
+                    serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "kbtz-council-concierge", "version": "0.1.0" }
+                    }),
+                ),
+                "tools/list" => jsonrpc_response(rpc.id, concierge_tool_definitions()),
+                "tools/call" => {
+                    let params = rpc.params.unwrap_or(Value::Null);
+                    let tool_name = params["name"].as_str().unwrap_or("");
+                    let arguments = &params["arguments"];
+
+                    let result = {
+                        let mut g = global.lock().unwrap();
+                        handle_concierge_tool_call(&mut g, tool_name, arguments)
+                            .unwrap_or_else(|e| text_content(&format!("Error: {}", e)))
+                    };
+
+                    jsonrpc_response(rpc.id, result)
+                }
+                _ => jsonrpc_response(
+                    rpc.id,
+                    serde_json::json!({"error": {"code": -32601, "message": "Method not found"}}),
+                ),
+            };
+
+            let resp = tiny_http::Response::from_string(&response_body)
+                .with_header(json_header.clone());
+            let _ = request.respond(resp);
+        }
+    });
+
+    Ok(port)
+}
+
+/// Write an .mcp.json config for the concierge session.
+pub fn write_concierge_mcp_config(global_dir: &Path, port: u16) -> io::Result<std::path::PathBuf> {
+    let config = serde_json::json!({
+        "mcpServers": {
+            "concierge": {
+                "type": "http",
+                "url": format!("http://127.0.0.1:{}/mcp", port)
+            }
+        }
+    });
+
+    let config_path = global_dir.join(".concierge-mcp.json");
     std::fs::write(
         &config_path,
         serde_json::to_string_pretty(&config).unwrap(),

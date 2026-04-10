@@ -1,4 +1,5 @@
 use crate::git;
+use crate::global::GlobalState;
 use crate::lifecycle::{self, Action, SessionSnapshot, JobSnapshot, WorldSnapshot};
 use crate::project::ProjectDir;
 use crate::prompt;
@@ -129,15 +130,44 @@ impl ProjectState {
 
 pub struct Orchestrator {
     pub projects: HashMap<String, ProjectState>,
+    pub concierge: ManagedSession,
+    pub concierge_mcp_config: PathBuf,
+    pub global_state: Arc<Mutex<GlobalState>>,
     pub app: AppState,
     pub max_running_sessions: usize,
     pub pool_dir: PathBuf,
 }
 
+/// A resolved reference to a session — either the global concierge or a
+/// project-scoped session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SelectedSession {
+    Concierge,
+    Project { project: String, key: SessionKey },
+}
+
+impl std::fmt::Display for SelectedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Concierge => write!(f, "concierge"),
+            Self::Project { project, key } => write!(f, "{}/{}", project, key),
+        }
+    }
+}
+
 impl Orchestrator {
-    pub fn new(max_running_sessions: usize, pool_dir: PathBuf) -> Self {
+    pub fn new(
+        max_running_sessions: usize,
+        pool_dir: PathBuf,
+        concierge: ManagedSession,
+        concierge_mcp_config: PathBuf,
+        global_state: Arc<Mutex<GlobalState>>,
+    ) -> Self {
         Self {
             projects: HashMap::new(),
+            concierge,
+            concierge_mcp_config,
+            global_state,
             app: AppState::new(),
             max_running_sessions,
             pool_dir,
@@ -150,22 +180,42 @@ impl Orchestrator {
         self.projects.insert(name, state);
     }
 
-    /// Total running sessions across all projects.
+    /// Total running sessions across all projects plus concierge.
     pub fn total_running(&self) -> usize {
-        self.projects.values().map(|p| p.running_count()).sum()
+        let project_running: usize = self.projects.values().map(|p| p.running_count()).sum();
+        let concierge_running = if self.concierge.is_running() { 1 } else { 0 };
+        project_running + concierge_running
     }
 
-    /// Enqueue a user message for a session in the given project.
-    ///
-    /// Panics if `project_name` does not match a registered project.
-    pub fn send_message(&mut self, project_name: &str, key: &SessionKey, message: String) {
+    /// Enqueue a user message for any session (concierge or project-scoped).
+    pub fn send_message(&mut self, target: &SelectedSession, message: String) {
+        self.app
+            .push_event(target, StreamEvent::UserMessage(message.clone()));
+
+        match target {
+            SelectedSession::Concierge => {
+                let working_dir = {
+                    let g = self.global_state.lock().unwrap();
+                    g.root().to_path_buf()
+                };
+                self.concierge.enqueue(QueueItem {
+                    prompt: message,
+                    system_prompt: Some(prompt::concierge_system_prompt()),
+                    job_id: None,
+                    working_dir,
+                    mcp_config: Some(self.concierge_mcp_config.clone()),
+                });
+                return;
+            }
+            SelectedSession::Project { project, key } => {
+                self.send_project_message(project, key, message);
+            }
+        }
+    }
+
+    fn send_project_message(&mut self, project_name: &str, key: &SessionKey, message: String) {
         let ps = self.projects.get_mut(project_name)
             .unwrap_or_else(|| panic!("send_message: unknown project '{}'", project_name));
-
-        // Show user message in the stream view
-        let event_key = format!("{}/{}", project_name, key);
-        self.app
-            .push_event(&event_key, StreamEvent::UserMessage(message.clone()));
 
         let working_dir = {
             let dir = ps.project_dir.lock().unwrap();
@@ -229,11 +279,33 @@ impl Orchestrator {
         }
     }
 
-    /// Poll all sessions across all projects.
+    /// Poll all sessions across all projects plus the concierge.
     pub fn poll_sessions(&mut self) {
+        self.poll_concierge();
         let project_names: Vec<String> = self.projects.keys().cloned().collect();
         for name in project_names {
             self.poll_project_sessions(&name);
+        }
+    }
+
+    fn poll_concierge(&mut self) {
+        if let Some(ref mut active) = self.concierge.active {
+            while let Ok(msg) = active.rx.try_recv() {
+                match msg {
+                    SessionMessage::Event(event) => {
+                        self.app.push_event(&SelectedSession::Concierge, event);
+                    }
+                    SessionMessage::RawLine(_) => {}
+                }
+            }
+
+            if !active.exited {
+                if let Ok(Some(_)) = active.try_wait() {
+                    active.exited = true;
+                    let g = self.global_state.lock().unwrap();
+                    let _ = g.save_concierge_session_id(&self.concierge.agent_session_id);
+                }
+            }
         }
     }
 
@@ -252,8 +324,11 @@ impl Orchestrator {
                 while let Ok(msg) = active.rx.try_recv() {
                     match msg {
                         SessionMessage::Event(event) => {
-                            let event_key = format!("{}/{}", project_name, key);
-                            self.app.push_event(&event_key, event);
+                            let sel = SelectedSession::Project {
+                                project: project_name.to_string(),
+                                key: key.clone(),
+                            };
+                            self.app.push_event(&sel, event);
                         }
                         SessionMessage::RawLine(line) => {
                             trace_lines.push((key.to_string(), line));
@@ -289,10 +364,13 @@ impl Orchestrator {
             }
 
             if let Some(job_id) = job_id {
-                let event_key = format!("{}/{}", project_name, key);
+                let sel = SelectedSession::Project {
+                    project: project_name.to_string(),
+                    key: key.clone(),
+                };
                 match key {
                     SessionKey::Implementation { .. } => {
-                        let summary = extract_summary(&self.app, &event_key);
+                        let summary = extract_summary(&self.app, &sel);
                         let session_dir = {
                             let dir = ps.project_dir.lock().unwrap();
                             dir.root()
@@ -306,7 +384,7 @@ impl Orchestrator {
                         let _ = dir.persist();
                     }
                     SessionKey::Stakeholder { name, .. } => {
-                        let feedback_content = extract_summary(&self.app, &event_key);
+                        let feedback_content = extract_summary(&self.app, &sel);
                         let agent_uuid = ps.sessions.get(key)
                             .map(|ms| ms.agent_session_id.0.to_string());
 
@@ -320,15 +398,20 @@ impl Orchestrator {
                         }
                         let _ = dir.persist();
                     }
-                    SessionKey::Leader => {}
+                    SessionKey::Leader | SessionKey::Concierge => {}
                 }
             }
         }
     }
 
-    /// Reap exited sessions and dispatch queued items across all projects,
-    /// respecting the global concurrency limit.
+    /// Reap exited sessions and dispatch queued items across all projects
+    /// and the concierge, respecting the global concurrency limit.
     pub fn reap_and_dispatch(&mut self) -> io::Result<()> {
+        // Reap concierge
+        if self.concierge.has_exited() {
+            self.concierge.reap();
+        }
+
         for ps in self.projects.values_mut() {
             for ms in ps.sessions.values_mut() {
                 if ms.has_exited() {
@@ -339,6 +422,16 @@ impl Orchestrator {
 
         let budget = self.max_running_sessions.saturating_sub(self.total_running());
         let mut dispatched = 0usize;
+
+        // Dispatch concierge first (user-facing, high priority)
+        if dispatched < budget
+            && self.concierge.active.is_none()
+            && !self.concierge.queue.is_empty()
+        {
+            if self.concierge.try_dispatch()? {
+                dispatched += 1;
+            }
+        }
 
         // Sort project names for deterministic, fair dispatch order
         let mut names: Vec<&String> = self.projects.keys().collect();
@@ -590,11 +683,11 @@ impl Orchestrator {
     }
 }
 
-fn extract_summary(app: &AppState, session_id: &str) -> String {
+fn extract_summary(app: &AppState, session: &SelectedSession) -> String {
     if let Some((_, events)) = app
         .session_events
         .iter()
-        .find(|(id, _)| id == session_id)
+        .find(|(id, _)| id == session)
     {
         for event in events.iter().rev() {
             if let StreamEvent::Result { result, .. } = event {

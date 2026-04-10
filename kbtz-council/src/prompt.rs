@@ -5,6 +5,7 @@ use std::path::Path;
 const LEADER_SYSTEM_DEFAULT: &str = include_str!("../prompts/leader-system.md");
 const IMPLEMENTATION_DEFAULT: &str = include_str!("../prompts/implementation.md");
 const STAKEHOLDER_DEFAULT: &str = include_str!("../prompts/stakeholder.md");
+const CONCIERGE_SYSTEM_DEFAULT: &str = include_str!("../prompts/concierge-system.md");
 
 /// Load a prompt from the project directory if it exists, otherwise use the default.
 fn load_prompt(project_dir: Option<&Path>, filename: &str, default: &str) -> String {
@@ -25,6 +26,11 @@ pub fn leader_system_prompt_from(project_dir: Option<&Path>) -> String {
 /// System prompt for the leader session (default, no project override).
 pub fn leader_system_prompt() -> String {
     LEADER_SYSTEM_DEFAULT.to_string()
+}
+
+/// System prompt for the concierge session.
+pub fn concierge_system_prompt() -> String {
+    CONCIERGE_SYSTEM_DEFAULT.to_string()
 }
 
 /// Build the headless leader prompt with full state snapshot and feedback.

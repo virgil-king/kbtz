@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use kbtz_council::global::{GlobalState, ProjectStatus};
 use kbtz_council::mcp;
-use kbtz_council::orchestrator::{Orchestrator, ProjectState};
+use kbtz_council::orchestrator::{Orchestrator, ProjectState, CONCIERGE_SESSION_NAME};
 use kbtz_council::project::Project;
-use kbtz_council::session::SessionKey;
+use kbtz_council::session::{ManagedSession, SessionKey};
 use kbtz_council::tui::dashboard::{render_dashboard, SessionInfo, SessionStatus};
 use kbtz_council::tui::input::TextInput;
 use kbtz_council::tui::stream_view::render_stream_view;
@@ -73,11 +73,40 @@ fn main() -> io::Result<()> {
             .collect()
     };
 
-    let mut orchestrator = Orchestrator::new(cli.max_sessions, global.pool_dir());
+    // Set up concierge session (restore or create)
+    let concierge = match global.load_concierge_session_id() {
+        Some(id) => ManagedSession::with_agent_session_id(SessionKey::Concierge, id, 1),
+        None => ManagedSession::new(SessionKey::Concierge),
+    };
+
+    // Start concierge MCP server
+    let global_shared = Arc::new(Mutex::new(global));
+    let concierge_mcp_port =
+        mcp::start_concierge_mcp_server(Arc::clone(&global_shared))?;
+    let concierge_mcp_config = {
+        let g = global_shared.lock().unwrap();
+        mcp::write_concierge_mcp_config(g.root(), concierge_mcp_port)?
+    };
+
+    let pool_dir = {
+        let g = global_shared.lock().unwrap();
+        g.pool_dir()
+    };
+
+    let mut orchestrator = Orchestrator::new(
+        cli.max_sessions,
+        pool_dir,
+        concierge,
+        concierge_mcp_config,
+        Arc::clone(&global_shared),
+    );
 
     // Load each project: open its dir, start its MCP server, register it
     for name in &project_names {
-        let project_dir = global.load_project(name)?;
+        let project_dir = {
+            let g = global_shared.lock().unwrap();
+            g.load_project(name)?
+        };
         let project_path = project_dir.root().to_path_buf();
         let project_dir = Arc::new(Mutex::new(project_dir));
 
@@ -89,10 +118,8 @@ fn main() -> io::Result<()> {
         orchestrator.add_project(ps);
     }
 
-    // Default selection: first project's leader
-    if let Some(name) = project_names.first() {
-        orchestrator.app.selected_session = Some(format!("{}/leader", name));
-    }
+    // Default selection: concierge
+    orchestrator.app.selected_session = Some(CONCIERGE_SESSION_NAME.to_string());
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -151,11 +178,17 @@ fn run_loop(
             let events = orch.app.selected_events();
             let session_id = orch.app.selected_session.as_deref().unwrap_or("");
             let is_running = orch.app.selected_session.as_ref()
-                .and_then(|name| {
-                    let (proj, key) = parse_qualified_session(name);
-                    orch.projects.get(proj).and_then(|ps| ps.sessions.get(&key))
+                .map(|name| {
+                    if name == CONCIERGE_SESSION_NAME {
+                        orch.concierge.is_running()
+                    } else {
+                        let (proj, key) = parse_qualified_session(name);
+                        orch.projects.get(proj)
+                            .and_then(|ps| ps.sessions.get(&key))
+                            .map(|ms| ms.is_running())
+                            .unwrap_or(false)
+                    }
                 })
-                .map(|ms| ms.is_running())
                 .unwrap_or(false);
             render_stream_view(frame, v_chunks[0], events, session_id, is_running, orch.app.scroll_offset);
 
@@ -232,8 +265,12 @@ fn run_loop(
                                     .selected_session
                                     .clone()
                                     .unwrap_or_default();
-                                let (proj, session_key) = parse_qualified_session(&session_name);
-                                orch.send_message(proj, &session_key, text);
+                                if session_name == CONCIERGE_SESSION_NAME {
+                                    orch.send_concierge_message(text);
+                                } else {
+                                    let (proj, session_key) = parse_qualified_session(&session_name);
+                                    orch.send_message(proj, &session_key, text);
+                                }
                             }
                             input.clear();
                             orch.app.input_mode = InputMode::Normal;
@@ -256,10 +293,25 @@ fn run_loop(
     }
 }
 
-/// Collect session info across all projects, grouped by project name.
-/// Each session name is qualified as "project/session_key".
+/// Collect session info across concierge + all projects.
+/// Concierge is always first. Each session name is qualified as "scope/session_key".
 fn collect_session_infos(orch: &Orchestrator) -> Vec<SessionInfo> {
     let mut infos = Vec::new();
+
+    // Concierge always first
+    infos.push(SessionInfo {
+        name: CONCIERGE_SESSION_NAME.to_string(),
+        status: if orch.concierge.is_running() {
+            SessionStatus::Running
+        } else if !orch.concierge.queue.is_empty() {
+            SessionStatus::Queued
+        } else {
+            SessionStatus::Idle
+        },
+        queue_depth: orch.concierge.queue.len(),
+        job_phase: None,
+        job_summary: None,
+    });
 
     // Sort project names for stable ordering
     let mut project_names: Vec<&String> = orch.projects.keys().collect();
@@ -336,7 +388,9 @@ fn parse_qualified_session(s: &str) -> (&str, SessionKey) {
 }
 
 fn parse_session_key(s: &str) -> SessionKey {
-    if s == "leader" {
+    if s == "concierge" {
+        SessionKey::Concierge
+    } else if s == "leader" {
         SessionKey::Leader
     } else if let Some(rest) = s.strip_suffix("-impl") {
         SessionKey::Implementation {
