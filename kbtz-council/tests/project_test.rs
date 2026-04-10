@@ -176,6 +176,54 @@ fn add_completed_job_with_existing_dispatched_jobs() {
 }
 
 #[test]
+fn complete_job_with_artifact_transitions_existing_job() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+    let job_id = dir.add_job(Dispatch {
+        prompt: "Original task".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+
+    assert_eq!(dir.state().jobs[0].phase, JobPhase::Dispatched);
+
+    dir.complete_job_with_artifact(&job_id, "Leader completed this directly".into()).unwrap();
+
+    let job = &dir.state().jobs[0];
+    assert_eq!(job.phase, JobPhase::Completed);
+    assert_eq!(job.artifacts.len(), 1);
+
+    let artifact = dir.latest_artifact(&job_id).unwrap();
+    assert_eq!(artifact.summary, "Leader completed this directly");
+
+    // Verify persistence
+    let loaded = ProjectDir::load(tmp.path()).unwrap();
+    assert_eq!(loaded.state().jobs[0].phase, JobPhase::Completed);
+}
+
+#[test]
+fn complete_job_with_artifact_rejects_nonexistent_job() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+    let result = dir.complete_job_with_artifact("job-999", "Nope".into());
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
 fn recovery_rolls_back_inflight_phases() {
     let tmp = TempDir::new().unwrap();
     let project = Project {

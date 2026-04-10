@@ -211,12 +211,7 @@ fn handle_tool_call(
 
             let job_id = match job_id {
                 Some(id) => {
-                    // Add artifact to existing job, transition to Completed
-                    dir.create_artifact(&id, description);
-                    if let Some(job) = dir.state_mut().jobs.iter_mut().find(|j| j.id == id) {
-                        job.phase = crate::job::JobPhase::Completed;
-                    }
-                    dir.persist()?;
+                    dir.complete_job_with_artifact(&id, description)?;
                     id
                 }
                 None => {

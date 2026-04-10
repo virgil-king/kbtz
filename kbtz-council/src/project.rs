@@ -117,6 +117,26 @@ impl ProjectDir {
         Ok(id)
     }
 
+    /// Add an artifact to an existing job and transition it to `Completed`.
+    /// Returns an error if the job does not exist.
+    pub fn complete_job_with_artifact(
+        &mut self,
+        job_id: &str,
+        description: String,
+    ) -> std::io::Result<()> {
+        if !self.state.jobs.iter().any(|j| j.id == job_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Job {} not found", job_id),
+            ));
+        }
+        self.create_artifact(job_id, description);
+        if let Some(job) = self.state.jobs.iter_mut().find(|j| j.id == job_id) {
+            job.phase = JobPhase::Completed;
+        }
+        self.save()
+    }
+
     /// Create a job that starts at `Completed` phase with an artifact already
     /// attached. Used when the leader submits work directly without dispatching
     /// an implementation agent.
