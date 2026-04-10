@@ -117,6 +117,32 @@ impl ProjectDir {
         Ok(id)
     }
 
+    /// Create a job that starts at `Completed` phase with an artifact already
+    /// attached. Used when the leader submits work directly without dispatching
+    /// an implementation agent.
+    pub fn add_completed_job(&mut self, description: String) -> std::io::Result<String> {
+        let id = format!("job-{:03}", self.state.next_job_id);
+        self.state.next_job_id += 1;
+
+        let job = Job {
+            id: id.clone(),
+            phase: JobPhase::Completed,
+            dispatch: Dispatch {
+                prompt: description.clone(),
+                repos: vec![],
+                files: vec![],
+            },
+            implementor: Some("leader".to_string()),
+            agent_id: None,
+            artifacts: vec![],
+        };
+
+        self.state.jobs.push(job);
+        self.create_artifact(&id, description);
+        self.save()?;
+        Ok(id)
+    }
+
     fn save(&self) -> std::io::Result<()> {
         let data = serde_json::to_string_pretty(&self.state)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;

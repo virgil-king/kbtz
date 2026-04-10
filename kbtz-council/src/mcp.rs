@@ -102,6 +102,18 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "create_artifact",
+                "description": "Submit leader-produced work for stakeholder review without dispatching an implementation agent. Creates a job implicitly if job_id is omitted.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string", "description": "Summary of the work produced." },
+                        "job_id": { "type": "string", "description": "Existing job ID. If omitted, a new job is created." }
+                    },
+                    "required": ["description"]
+                }
+            },
+            {
                 "name": "close_job",
                 "description": "Close a job (merged or abandoned). Cleans up session directory.",
                 "inputSchema": {
@@ -189,6 +201,34 @@ fn handle_tool_call(
             })?;
 
             Ok(text_content(&format!("Job {} dispatched.", job_id)))
+        }
+        "create_artifact" => {
+            let description = arguments["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let job_id = arguments["job_id"].as_str().map(|s| s.to_string());
+
+            let job_id = match job_id {
+                Some(id) => {
+                    // Add artifact to existing job, transition to Completed
+                    dir.create_artifact(&id, description);
+                    if let Some(job) = dir.state_mut().jobs.iter_mut().find(|j| j.id == id) {
+                        job.phase = crate::job::JobPhase::Completed;
+                    }
+                    dir.persist()?;
+                    id
+                }
+                None => {
+                    // Create a new job at Completed phase with artifact
+                    dir.add_completed_job(description)?
+                }
+            };
+
+            Ok(text_content(&format!(
+                "Artifact created for job {}. Stakeholder review will begin automatically.",
+                job_id
+            )))
         }
         "rework_job" => {
             let job_id = arguments["job_id"].as_str().unwrap_or("").to_string();

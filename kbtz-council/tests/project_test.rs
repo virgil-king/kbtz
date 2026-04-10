@@ -120,6 +120,62 @@ fn state_tracks_jobs() {
 }
 
 #[test]
+fn add_completed_job_creates_job_and_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+    let job_id = dir.add_completed_job("Leader did the work directly".into()).unwrap();
+
+    assert_eq!(job_id, "job-001");
+    assert_eq!(dir.state().jobs.len(), 1);
+
+    let job = &dir.state().jobs[0];
+    assert_eq!(job.phase, JobPhase::Completed);
+    assert_eq!(job.implementor.as_deref(), Some("leader"));
+    assert_eq!(job.artifacts.len(), 1);
+
+    let artifact = dir.latest_artifact(&job_id).unwrap();
+    assert_eq!(artifact.summary, "Leader did the work directly");
+    assert_eq!(artifact.job_id, job_id);
+
+    // Verify persistence
+    let loaded = ProjectDir::load(tmp.path()).unwrap();
+    assert_eq!(loaded.state().jobs[0].phase, JobPhase::Completed);
+    assert_eq!(loaded.state().artifacts.len(), 1);
+}
+
+#[test]
+fn add_completed_job_with_existing_dispatched_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let project = Project {
+        repos: vec![],
+        stakeholders: vec![],
+        goal_summary: "Test".into(),
+    };
+
+    let mut dir = ProjectDir::init(tmp.path(), &project).unwrap();
+
+    // Add a normal dispatched job first
+    dir.add_job(Dispatch {
+        prompt: "Normal job".into(),
+        repos: vec![],
+        files: vec![],
+    }).unwrap();
+
+    // Add a leader-direct completed job
+    let job_id = dir.add_completed_job("Leader work".into()).unwrap();
+    assert_eq!(job_id, "job-002");
+    assert_eq!(dir.state().jobs.len(), 2);
+    assert_eq!(dir.state().jobs[0].phase, JobPhase::Dispatched);
+    assert_eq!(dir.state().jobs[1].phase, JobPhase::Completed);
+}
+
+#[test]
 fn recovery_rolls_back_inflight_phases() {
     let tmp = TempDir::new().unwrap();
     let project = Project {
