@@ -918,6 +918,8 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
  "unicode-width",
  "uuid",

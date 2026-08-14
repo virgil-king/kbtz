@@ -39,8 +39,28 @@ kbtz-workspace [OPTIONS]
 | `--db <path>` | `$KBTZ_DB` or `~/.kbtz/kbtz.db` | Path to kbtz database |
 | `-j, --concurrency <N>` | `4` | Max concurrent agent sessions |
 | `--prefer <text>` | | FTS preference hint for task selection |
-| `--command <cmd>` | `claude` | Command to run per session |
+| `--backend <name>` | `codex` | Agent backend for sessions |
+| `--command <cmd>` | `airchat` | Override the backend command binary |
 | `--manual` | | Disable auto-spawning; use `s` to spawn manually |
+| `--persistent-sessions` | | Keep worker PTYs alive across workspace restarts |
+
+The default backend is Codex, launched as `airchat codex`. The equivalent
+configuration is:
+
+```toml
+[workspace]
+backend = "codex"
+
+[agent.codex]
+command = ["airchat", "codex"]
+```
+
+Keep a Claude backend configured when tasks have existing Claude sessions:
+
+```toml
+[agent.claude]
+command = ["airchat", "claude", "--"]
+```
 
 ### Screens
 
@@ -107,7 +127,13 @@ Scroll mode freezes the session output and renders the frozen viewport directly 
 
 1. **Claim** — When there is an available task and available session capacity, the workspace generates a new session ID and atomically claims the best available task for that ID. Tasks are ranked by FTS relevance (if `--prefer` is set), number of tasks they would unblock, and age.
 
-2. **Spawn** — A PTY is allocated and the configured command (default: `claude`) is launched with the agent protocol injected via `--append-system-prompt`. Each session gets environment variables: `KBTZ_DB`, `KBTZ_TASK`, `KBTZ_SESSION_ID`, and `KBTZ_WORKSPACE_DIR`.
+2. **Spawn** — A PTY is allocated and the configured command (default:
+   `airchat codex`) is launched. Claude receives the agent protocol and task
+   prompt through its existing CLI flags. Codex receives the same content as
+   its positional first message, which survives Codex's project trust prompt.
+   Each session gets environment variables:
+   `KBTZ_DB`, `KBTZ_TASK`, `KBTZ_SESSION_ID`, `KBTZ_WORKSPACE_DIR`, and
+   `KBTZ_AGENT_TYPE`.
 
 3. **Monitor** — A lifecycle tick runs every 100ms. It checks each session's process liveness and its task's database state. Sessions are reaped when:
    - The task is marked done, paused, or deleted
@@ -119,11 +145,31 @@ Scroll mode freezes the session output and renders the frozen viewport directly 
 
 5. **Shutdown** — On quit (`q` or Ctrl-C), all sessions receive SIGTERM in parallel. After a 5-second grace period, any remaining sessions are force-killed and all task claims are released.
 
+### Mixed-agent relaunches
+
+Session state is stored in `~/.kbtz/workspace/claude-sessions/<task>`.
+New state records include both the backend type and the agent conversation ID.
+Older files containing only a conversation ID are treated as Claude state.
+When the workspace relaunches, the stored backend wins over the task's current
+agent field and the workspace default. This lets previously active Claude
+sessions resume as Claude while new tasks start with the Codex default.
+
+Fresh Codex workers use a uniquely named temporary Codex profile containing a
+kbtz-owned `SessionStart` hook. The profile records the exact generated thread
+ID when the first turn starts, then removes itself. A workspace marker cleans up
+the profile if the worker exits before that point. The hook trust bypass applies
+only to this generated profile. Relaunch uses
+`airchat codex -- resume <ID> <prompt>` to resume that exact interactive
+conversation.
+
+The `r` key deletes a task's stored session state before respawning it, so the
+task starts a fresh conversation.
+
 ### Agent protocol
 
 Each spawned agent receives a system prompt that teaches it the workspace contract:
 
-- **Environment variables**: `$KBTZ_DB` (database path), `$KBTZ_TASK` (assigned task name), `$KBTZ_SESSION_ID` (e.g. `ws/3`), `$KBTZ_WORKSPACE_DIR` (status directory)
+- **Environment variables**: `$KBTZ_DB` (database path), `$KBTZ_TASK` (assigned task name), `$KBTZ_SESSION_ID` (e.g. `ws/3`), `$KBTZ_AGENT_TYPE` (session backend), `$KBTZ_WORKSPACE_DIR` (status directory)
 - **Completion**: Agents create PRs, wait for CI to pass, display the diff, and wait for user review; the user requests changes or asks the agent to merge
 - **Decomposition**: Agents can split work into subtasks using `kbtz exec` for atomic creation of subtasks with blocking relationships
 - **Notes**: Agents document decisions and progress with `kbtz note` for cross-session continuity
@@ -132,6 +178,11 @@ Each spawned agent receives a system prompt that teaches it the workspace contra
 ### Status reporting
 
 Agents report their status by writing to files in the workspace status directory (`$KBTZ_WORKSPACE_DIR`, default `~/.kbtz/workspace/`). Each session gets a file named after its session ID (with `/` replaced by `-`). The workspace watches this directory and updates the task tree with status indicators:
+
+Claude Code plugin hooks update these files throughout the Claude lifecycle.
+Codex does not use Claude's hook system, so the workspace marks Codex sessions
+active at startup. Zoomed mode uses the same PTY input and output path for
+Codex as it does for Claude.
 
 | Status      | Indicator | Meaning                   |
 |-------------|-----------|---------------------------|

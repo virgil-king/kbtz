@@ -2,8 +2,8 @@
 
 ## Overview
 
-kbtz-workspace is a terminal multiplexer that manages child sessions (Claude
-Code, shells, etc.). Each session runs in a PTY (direct) or connects to a
+kbtz-workspace is a terminal multiplexer that manages child sessions (Codex,
+Claude Code, shells, etc.). Each session runs in a PTY (direct) or connects to a
 persistent shepherd process (reconnectable). The workspace presents two views:
 
 - **Tree view**: ratatui-rendered task list (tree.rs)
@@ -127,7 +127,7 @@ terminal.
 
 1. **No scrollback duplication**: Resizing the terminal must not cause
    duplicate content in scroll mode
-2. **Works for all CLI apps**: Main screen apps (Claude Code, shells) and
+2. **Works for all CLI apps**: Main screen apps (Codex, Claude Code, shells) and
    alt screen apps (vim, less, htop)
 3. **Correct tmux-like behavior**: Scroll mode shows main screen history,
    including content from before an alt screen switch

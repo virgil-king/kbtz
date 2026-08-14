@@ -36,7 +36,7 @@ pub enum AgentCommand {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
-    /// Which Rust backend implementation to use (e.g., "claude").
+    /// Which Rust backend implementation to use (e.g., "claude" or "codex").
     /// Defaults to the agent name. Allows multiple agent types to share
     /// the same backend with different command/args.
     pub backend: Option<String>,
@@ -130,6 +130,9 @@ args = ["--verbose"]
 [agent.gemini]
 command = "gemini-cli"
 args = ["--model", "gemini-2.5-pro"]
+
+[agent.codex]
+command = ["airchat", "codex"]
 "#;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(toml.as_bytes()).unwrap();
@@ -157,6 +160,10 @@ args = ["--model", "gemini-2.5-pro"]
         assert_eq!(gemini.binary(), Some("gemini-cli"));
         assert!(gemini.prefix_args().is_empty());
         assert_eq!(gemini.args, vec!["--model", "gemini-2.5-pro"]);
+
+        let codex = config.agent.get("codex").unwrap();
+        assert_eq!(codex.binary(), Some("airchat"));
+        assert_eq!(codex.prefix_args(), &["codex"]);
     }
 
     #[test]

@@ -90,7 +90,7 @@ plus `default_backend: String`. A `session_backends: HashMap<String, String>`
 tracks which backend each session was spawned with (for `request_exit` routing).
 
 At startup, build the backends map from `[agent.*]` config sections. The
-default comes from `workspace.backend` (falling back to "claude" if unset).
+default comes from `workspace.backend` (falling back to "codex" if unset).
 
 ### Spawn logic
 
@@ -105,11 +105,14 @@ No config format changes needed. The existing format already supports this:
 
 ```toml
 [workspace]
-backend = "claude"
+backend = "codex"
+
+[agent.codex]
+command = ["airchat", "codex"]
+args = ["--verbose"]
 
 [agent.claude]
-command = "claude"
-args = ["--verbose"]
+command = ["airchat", "claude", "--"]
 
 [agent.gemini]
 command = "gemini-cli"

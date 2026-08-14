@@ -65,6 +65,9 @@ Claude Code plugin hooks (`plugin/hooks/hooks.json`) fire `workspace-status.sh` 
 | Notification | `needs_input` |
 | Stop | `idle` |
 
+Hookless backends such as Codex are initialized as `active` by
+`kbtz-workspace`; they can still be viewed and controlled in zoomed mode.
+
 ### Readers
 
 - `kbtz-workspace` reads status files to update task tree indicators
@@ -73,6 +76,19 @@ Claude Code plugin hooks (`plugin/hooks/hooks.json`) fire `workspace-status.sh` 
 ### Cleanup
 
 The orchestrator deletes orphaned status files during reconciliation on startup. Files that don't correspond to any live window are removed.
+
+## Conversation state
+
+`kbtz-workspace` stores resumable agent conversation state in
+`$KBTZ_WORKSPACE_DIR/claude-sessions/<task>`. New files are JSON objects with
+`agent_type` and `session_id` fields. Legacy files containing only a session ID
+are interpreted as Claude state. The stored agent type takes precedence over
+the task's configured agent and the workspace default during relaunch.
+
+Fresh Codex sessions use a temporary profile in `$CODEX_HOME` to install the
+kbtz-owned `SessionStart` hook. A corresponding
+`$KBTZ_WORKSPACE_DIR/<session>.codex-profile` marker supports cleanup until the
+first turn records the generated Codex ID.
 
 ## Tmux window options (kbtz-tmux only)
 
@@ -94,6 +110,7 @@ On startup, `reconcile()` scans all windows for these options and re-adopts orph
 | `KBTZ_DB` | Orchestrator/workspace | Database path for agents |
 | `KBTZ_TASK` | Orchestrator/workspace | Assigned task name |
 | `KBTZ_SESSION_ID` | Orchestrator/workspace | Session ID (e.g. `ws/3`) |
+| `KBTZ_AGENT_TYPE` | Orchestrator/workspace | Backend type for the session |
 | `KBTZ_WORKSPACE_DIR` | Orchestrator/workspace | Status file directory |
 | `KBTZ_TMUX_SESSION` | User | Override tmux session name |
 | `KBTZ_DEBUG` | User | Enable debug logging |

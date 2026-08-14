@@ -57,12 +57,14 @@ CONFIG FILE:
 
         [workspace]
         concurrency = 3
-        backend = \"claude\"
+        backend = \"codex\"
         workspace_dir = \"/tmp/my-workspace\"
 
+        [agent.codex]
+        command = [\"airchat\", \"codex\"]
+
         [agent.claude]
-        command = \"/usr/local/bin/claude\"
-        args = [\"--verbose\"]
+        command = [\"airchat\", \"claude\", \"--\"]
 
 TREE MODE KEYS:
     j/k, Up/Down   Navigate
@@ -89,6 +91,10 @@ ZOOMED MODE / TASK MANAGER:
     ^B q            Quit"
 )]
 struct Cli {
+    /// Internal Codex SessionStart hook entry point.
+    #[arg(long, hide = true)]
+    codex_session_hook: bool,
+
     /// Path to kbtz database [default: $KBTZ_DB or ~/.kbtz/kbtz.db]
     #[arg(long, env = "KBTZ_DB")]
     db: Option<String>,
@@ -101,7 +107,7 @@ struct Cli {
     #[arg(long)]
     prefer: Option<String>,
 
-    /// Agent backend to use for sessions [default: claude]
+    /// Agent backend to use for sessions [default: codex]
     #[arg(long)]
     backend: Option<String>,
 
@@ -186,6 +192,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.codex_session_hook {
+        return app::capture_codex_session_from_hook();
+    }
     let config = config::Config::load()?;
 
     let db_path = cli.db.unwrap_or_else(|| {
@@ -245,10 +254,7 @@ fn run() -> Result<()> {
     let concurrency = cli.concurrency.or(ws.concurrency).unwrap_or(8);
     let manual = cli.manual || ws.manual.unwrap_or(false);
     let prefer = cli.prefer.or(ws.prefer);
-    let default_backend = cli
-        .backend
-        .or(ws.backend)
-        .unwrap_or_else(|| "claude".into());
+    let default_backend = cli.backend.or(ws.backend).unwrap_or_else(|| "codex".into());
     let persistent_sessions = cli.persistent_sessions || ws.persistent_sessions.unwrap_or(false);
 
     // Build all configured backends. The default backend is always included;
@@ -653,7 +659,10 @@ fn tree_loop(
                     TreeKeyAction::Quit => return Ok(Action::Quit),
                     TreeKeyAction::Refresh | TreeKeyAction::ToggleShowAll => app.refresh_tree()?,
                     TreeKeyAction::Pause(name) => match kbtz::ops::pause_task(&app.conn, &name) {
-                        Ok(()) => app.refresh_tree()?,
+                        Ok(()) => {
+                            app.stop_task_session(&name);
+                            app.refresh_tree()?;
+                        }
                         Err(e) => app.tree.error = Some(e.to_string()),
                     },
                     TreeKeyAction::Unpause(name) => {
@@ -666,6 +675,7 @@ fn tree_loop(
                         kbtz::debug_log::log(&format!("mark done: {name}"));
                         match kbtz::ops::mark_done(&app.conn, &name) {
                             Ok(()) => {
+                                app.stop_task_session(&name);
                                 app.refresh_tree()?;
                                 kbtz::debug_log::log("mark done: refresh_tree complete");
                             }
@@ -1168,10 +1178,13 @@ fn passthrough_loop(
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let mut buf = [0u8; 4096];
-    let mut last_status = SessionStatus::Starting;
+    let sid = kind.session_id();
+    let mut last_status = app
+        .get_session(sid)
+        .map(|session| session.status().clone())
+        .unwrap_or(SessionStatus::Starting);
     let mut scroll = ScrollState::new();
 
-    let sid = kind.session_id();
     let watchers = Watchers::new(app)?;
     let mut debug_msg: Option<String> = None;
     let mut last_iter = Instant::now();
