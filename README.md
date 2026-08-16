@@ -1,19 +1,10 @@
-# kbtz
+Kibitz Workspace is a unified task tracker and coding agent multiplexer TUI. Tasks have an associated session ID which may or may not be active at any time. Sessions are empowered to narrate their progress on their tasks and edit the task board in general. This combination provides the following advantages over session-based multiplexers:
 
-A task tracker and workspace for coding agents. Backed by SQLite, designed for concurrent multi-agent workflows.
+* Session findings and outputs are accessible via the task board rather than hidden inside agent sessions
+* It's cheap and easy to file a new task rather than bloating an existing one
+* Sessions focus on one task so they remember context if you need to resume them later on
 
-The name comes from "kibitz" -- to watch and offer commentary.
-
-- **See the status of all agents and tasks in one place** — a terminal workspace shows a live task tree with status indicators for every running agent
-- **Press Tab to chat with the next agent that needs input** — jump straight to the agent waiting for your attention, review its work, and move on
-- **Tasks and notes are under your control** — work is tracked in a SQLite database you own, not hidden inside agent context windows
-- **Structure work with dependencies** — parent/child and blocking relationships between tasks so agents work in the right order
-- **Unblocked tasks immediately get their own agent** — when a task's dependencies are satisfied, the workspace claims it and spawns a new session automatically
-
-kbtz has two components:
-
-- **`kbtz-workspace`** — A terminal workspace with a built-in multiplexer. Manages concurrent agent sessions against a shared task database with a tmux-like interface for monitoring and interacting with them.
-- **`kbtz`** — The underlying CLI that agents use to interact with the task database: creating tasks, setting dependencies, claiming work, and adding notes.
+This model supports a rolling workflow where sessions stay short, they often file some followup tasks, and you end up with a fine-grained record of work that you can use to backtrack when needed.
 
 ## Install
 
@@ -24,7 +15,7 @@ cargo install --path kbtz-workspace   # workspace manager (built-in multiplexer)
 
 ## kbtz-workspace
 
-`kbtz-workspace` is a terminal workspace manager that orchestrates multiple AI agent sessions against a shared kbtz task database. It automatically claims tasks, spawns agent sessions in PTYs, monitors their lifecycle, and reaps them when tasks complete — giving you a tmux-like interface over a fleet of concurrent agents.
+`kbtz-workspace` is the TUI.
 
 ### Usage
 
